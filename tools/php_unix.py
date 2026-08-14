@@ -118,8 +118,15 @@ def build(spc: Path, work: Path, branch: str) -> Path:
     # of its own: it links what `download` already put in place, and refuses at the very end of a
     # build otherwise, which is the most expensive moment to find out.
     everything = ",".join(STATIC_EXTENSIONS + SHARED_EXTENSIONS)
+    if not env.get("GITHUB_TOKEN"):
+        print(
+            "warning: no GITHUB_TOKEN. static-php-cli resolves two dozen libraries through "
+            "api.github.com, which allows 60 unauthenticated requests an hour per IP — expect a "
+            "403 that surfaces as a type error inside its downloader.",
+            file=sys.stderr,
+        )
     run(str(spc), "download", f"--with-php={branch}", f"--for-extensions={everything}",
-        "--ignore-cache-sources=php-src", cwd=work, env=env)
+        "--retry=5", "--ignore-cache-sources=php-src", cwd=work, env=env)
 
     arguments = [str(spc), "build", extensions]
     arguments += [f"--build-{sapi}" for sapi in SAPIS]

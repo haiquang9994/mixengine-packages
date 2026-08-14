@@ -55,6 +55,13 @@ jobs:
       - name: build
         run: python3 -u tools/php_unix.py --branch "${{ inputs.branch }}" --out dist
         timeout-minutes: 180
+        env:
+          # static-php-cli asks api.github.com which release of each of its ~23 libraries is
+          # newest. Unauthenticated that is 60 requests an hour *per IP*, shared across every
+          # runner Azure has, so it fails as a 403 the moment anyone else is building — and it
+          # fails as a type error deep inside the downloader rather than as a rate limit, which
+          # makes it look like a bug in this recipe. The runner's own token lifts it to 1000.
+          GITHUB_TOKEN: ${{ github.token }}
       - uses: actions/upload-artifact@v4
         with:
           name: php-${{ matrix.os }}-${{ matrix.arch }}
