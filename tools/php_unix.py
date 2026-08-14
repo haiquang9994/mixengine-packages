@@ -114,7 +114,11 @@ def build(spc: Path, work: Path, branch: str) -> Path:
     env = {**os.environ, "SPC_SKIP_PHP_VERSION_CHECK": "no"}
 
     run(str(spc), "doctor", "--auto-fix", cwd=work, env=env)
-    run(str(spc), "download", f"--with-php={branch}", f"--for-extensions={extensions}",
+    # The download has to cover the shared extensions too. `--build-shared` does not fetch anything
+    # of its own: it links what `download` already put in place, and refuses at the very end of a
+    # build otherwise, which is the most expensive moment to find out.
+    everything = ",".join(STATIC_EXTENSIONS + SHARED_EXTENSIONS)
+    run(str(spc), "download", f"--with-php={branch}", f"--for-extensions={everything}",
         "--ignore-cache-sources=php-src", cwd=work, env=env)
 
     arguments = [str(spc), "build", extensions]
