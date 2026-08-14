@@ -204,19 +204,30 @@ def smoke(tree: Path, version: str, manifest: dict) -> dict:
     for candidate in SMOKE_EXTENSIONS:
         if candidate not in manifest["extensions"]["shared"]:
             continue
-        # Warnings go to stderr on purpose. PHP's CLI default is to display them on *stdout*, so a
-        # failed load would otherwise arrive mixed into the answer being parsed.
+        # Through a generated php.ini rather than -d, because that is the mechanism the daemon will
+        # use and a smoke test that proves a different one proves nothing.
+        #
+        # Every value is quoted, and that is not a style choice. PHP's ini parser refuses ``~`` in
+        # an unquoted value -- ``syntax error, unexpected '~'`` -- and Windows puts one in every 8.3
+        # short path: ``RUNNER~1``, ``PROGRA~1``, and the profile directory of any user whose name is
+        # not plain ASCII. Unquoted, the file is rejected from that line on and *every* extension
+        # silently fails to load while ``php -v`` keeps answering perfectly. Quoted, it loads. This
+        # holds for MixEngine's generated config too, not only for this test.
+        ini = elsewhere.parent / "php.ini"
+        ini.write_text(
+            f'display_errors=stderr\n'
+            f'extension_dir="{elsewhere / "ext"}"\n'
+            f'extension="php_{candidate}.dll"\n',
+            encoding="ascii",
+        )
         answer, complaint = php(
             elsewhere / "php.exe",
-            "-n",
-            "-d", "display_errors=stderr",
-            "-d", f"extension_dir={elsewhere / 'ext'}",
-            "-d", f"extension=php_{candidate}.dll",
+            "-n", "-c", str(ini),
             "-r", f"echo extension_loaded({candidate!r}) ? 'yes' : 'no';",
         )
         if answer == "yes":
             loaded = candidate
-            print(f"loaded {candidate} from the relocated ext/")
+            print(f"loaded {candidate} from the relocated ext/, through a generated php.ini")
             break
         refused.append(f"{candidate}: {answer!r} {complaint.splitlines()[:2]}")
     if loaded is None:
