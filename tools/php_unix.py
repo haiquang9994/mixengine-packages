@@ -176,10 +176,15 @@ def assemble(buildroot: Path, work: Path) -> tuple[Path, dict[str, str], list[st
             shutil.copy2(module, tree / "ext" / module.name)
             shared.append(module.stem)
 
-    for extra in ("license", "LICENSE"):
-        source = buildroot / extra
-        if source.exists():
-            shutil.copy2(source, tree / "LICENSE")
+    # static-php-cli leaves a *directory* of licences, one per library it linked in — and that is
+    # the right shape, because a static binary carries all of their code. Several of those licences
+    # require the text to travel with the binary, so shipping the whole directory is a condition of
+    # redistributing the artifact at all rather than tidiness.
+    licences = buildroot / "license"
+    if licences.is_dir():
+        shutil.copytree(licences, tree / "licenses")
+    elif (buildroot / "LICENSE").is_file():
+        shutil.copy2(buildroot / "LICENSE", tree / "LICENSE")
     return tree, provides, shared
 
 
@@ -227,16 +232,28 @@ def smoke(tree: Path, provides: dict[str, str], shared: list[str]) -> tuple[str,
         if name != "php":
             run(str(elsewhere / path), "-v")
 
+    # Through a generated php.ini with every value quoted, exactly as the Windows recipe does and
+    # for the same reason: this is the mechanism the daemon will use, so it is the one worth
+    # proving, and a check that goes through -d proves a different one.
     loaded = None
     for candidate in shared:
+        name = candidate.removeprefix("php_")
+        ini = elsewhere.parent / "php.ini"
+        ini.write_text(
+            f'display_errors=stderr\n'
+            f'extension_dir="{elsewhere / "ext"}"\n'
+            f'zend_extension="{elsewhere / "ext" / (candidate + ".so")}"\n',
+            encoding="ascii",
+        )
         answer = run(
-            str(elsewhere / "bin" / "php"), "-n",
-            "-d", f"zend_extension={elsewhere / 'ext' / (candidate + '.so')}",
-            "-r", f"echo extension_loaded({candidate.removeprefix('php_')!r}) ? 'yes' : 'no';",
+            str(elsewhere / "bin" / "php"), "-n", "-c", str(ini),
+            "-r", f"echo extension_loaded({name!r}) ? 'yes' : 'no';",
         ).strip()
         if answer.endswith("yes"):
             loaded = candidate
+            print(f"loaded {name} from the relocated ext/, through a generated php.ini")
             break
+        print(f"{name} did not load: {answer!r}")
 
     proof = {"relocated": True, "ran": ran}
     if loaded:
@@ -299,6 +316,9 @@ def main() -> None:
     try:
         run("tar", "--zstd", "-cf", str(packed), "-C", str(tree), ".")
     except SystemExit:
+        # A tar that died half way leaves a truncated archive behind, and `dist/` is uploaded
+        # wholesale — so it is removed rather than left for something downstream to find.
+        packed.unlink(missing_ok=True)
         packed = packed.with_suffix("").with_suffix(".tar.gz")
         run("tar", "-czf", str(packed), "-C", str(tree), ".")
 
