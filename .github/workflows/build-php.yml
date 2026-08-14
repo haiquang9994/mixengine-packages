@@ -92,8 +92,11 @@ jobs:
             assets=()
             for manifest in incoming/*.json; do
               [ "$(jq -r '.version' "$manifest")" = "$version" ] || continue
-              archive="${manifest%.json}"
-              assets+=("$archive")
+              # Both halves. The manifest is what the index generator reads, so a release holding
+              # only the archive is a release the index cannot be rebuilt from — and it is the
+              # release, not this run's scratch directory, that has to still be readable in a year.
+              # It also lets a reader see what is inside an artifact without fetching 50 MB of it.
+              assets+=("${manifest%.json}" "$manifest")
             done
             echo "== $tag: ${#assets[@]} artifact(s)"
             if ! gh release view "$tag" >/dev/null 2>&1; then
