@@ -151,6 +151,20 @@ def build(spc: Path, work: Path, branch: str) -> Path:
         # state it and a client can refuse the install instead of producing a loader error.
         env["SPC_LIBC"] = "glibc"
 
+    # No PHP release here was written for C23, and C23 removed the old-style function definition —
+    # `bc_add(n1, n2, result, scale_min)` with the parameter types on the lines below it, which is
+    # how libbcmath is written all through 8.1. Nothing asks for C23: `AC_PROG_CC` probes for the
+    # newest standard the compiler will accept and puts it in `CC` itself, so the standard a build
+    # gets is decided by how new the runner's clang happens to be. That is why 8.1 compiled on
+    # macos-14 and failed on macos-15-intel with the same source and the same flags — a difference
+    # in Xcode, read as a difference in architecture.
+    #
+    # Answering the probe here rather than fighting its result afterwards: `-std=` appended later
+    # would win at `make` time but leave `configure` measuring the compiler as something the build
+    # then isn't. Set for every branch, because a version that builds today would otherwise break
+    # the first time a runner image ships a newer clang, and it would break the same way.
+    env["ac_cv_prog_cc_c23"] = "no"
+
     run_spc([str(spc), "doctor", "--auto-fix"], work, env)
     # The download has to cover the shared extensions too. `--build-shared` does not fetch anything
     # of its own: it links what `download` already put in place, and refuses at the very end of a
