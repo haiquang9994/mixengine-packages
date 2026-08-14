@@ -388,14 +388,27 @@ def macos_floor(paths: list[Path]) -> str | None:
     Bundling makes this a property of the *archive* rather than of the compiler flags: a dependency
     copied in from Homebrew was built for the runner's macOS and carries its own minimum, which is
     usually higher than anything this recipe asked for.
+
+    Which field to read depends on which load command it sits in, so the command has to be tracked
+    rather than the whole dump grepped: ``LC_BUILD_VERSION`` states the minimum as ``minos`` and then
+    goes on to list the *tools* that built the file, each with a ``version`` of its own — the
+    linker's ``1115.7.3`` is not a macOS release, but it is the largest number in the file and would
+    win every comparison. Only the older ``LC_VERSION_MIN_MACOSX`` spells its minimum ``version``.
     """
     if sys.platform != "darwin":
         return None
+    fields = {"LC_BUILD_VERSION": "minos", "LC_VERSION_MIN_MACOSX": "version"}
     versions: set[tuple[int, ...]] = set()
     for path in paths:
-        output = run("otool", "-l", str(path), check=False)
-        for match in re.findall(r"^\s*(?:minos|version)\s+(\d+(?:\.\d+)*)", output, re.MULTILINE):
-            versions.add(tuple(int(part) for part in match.split(".")))
+        command: str | None = None
+        for line in run("otool", "-l", str(path), check=False).splitlines():
+            words = line.split()
+            if len(words) == 2 and words[0] == "cmd":
+                command = words[1]
+            elif len(words) == 2 and command in fields and words[0] == fields[command]:
+                if re.fullmatch(r"\d+(?:\.\d+)*", words[1]):
+                    versions.add(tuple(int(part) for part in words[1].split(".")))
+                command = None      # one minimum per load command; ignore whatever follows it
     return _highest(versions)
 
 

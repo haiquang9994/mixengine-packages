@@ -3,6 +3,10 @@ dist/
 *.tar.gz
 *.tar.zst
 
+# Byte-code left behind by running the tools locally. Committing it once was enough: a stale .pyc
+# beside a newer .py is a file that can be imported instead of the source.
+__pycache__/
+
 # The private half of the signing key. It belongs in this repository's Actions secrets and nowhere
 # else — an index signed by a key that leaked is an index that can be forged, and the public key is
 # compiled into MixEngine, so recovering from that needs an application release.
