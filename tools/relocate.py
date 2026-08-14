@@ -306,6 +306,14 @@ def rewrite(tree: Path, libdir: str, bundled: set[str], executable_dir: Path) ->
                 if Path(spelling).name in bundled and not spelling.startswith("@rpath/"):
                     run("install_name_tool", "-change", spelling,
                         f"@rpath/{Path(spelling).name}", str(path))
+            # Every search path the build left behind is removed, not merely added to. They are
+            # absolute — a Homebrew cellar, a temporary build prefix — and on the machine that built
+            # this they all still exist, so `@rpath/libzip.5.dylib` would go on resolving to the
+            # builder's copy and the archive would look correct here and load a stranger's library
+            # there. Everything the tree needs is in one directory, so one search path is enough.
+            for existing in macho_rpaths(path):
+                if existing != anchor:
+                    run("install_name_tool", "-delete_rpath", existing, str(path), check=False)
             if anchor not in macho_rpaths(path):
                 run("install_name_tool", "-add_rpath", anchor, str(path))
             macho_sign(path)

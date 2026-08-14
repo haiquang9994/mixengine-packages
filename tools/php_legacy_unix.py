@@ -573,7 +573,16 @@ def build_environment(prefixes: dict[str, Path], extra: Path) -> dict[str, str]:
     # being built against.
     environment["CFLAGS"] = f"-std=gnu17 {environment.get('CFLAGS', '')}".strip()
     environment["CXXFLAGS"] = f"-std=gnu++17 {environment.get('CXXFLAGS', '')}".strip()
+
     link = list(libraries)
+    if sys.platform.startswith("linux"):
+        # `-ldl` up front, so configure's very first `dlopen` test links rather than its fallback.
+        # This matters more than it looks: PHP defines HAVE_LIBDL off that test, and **without
+        # HAVE_LIBDL both extension loaders in main/php_ini.c compile down to empty functions** —
+        # so an `extension=` line is not refused, it is not read, and PHP starts perfectly while
+        # loading nothing and saying nothing. On glibc before 2.34 dlopen lives in libdl rather than
+        # in libc, which is exactly where that first test looks.
+        link.append("-ldl")
     if sys.platform == "darwin":
         # Without this the load commands are packed tight, and `install_name_tool` later refuses to
         # lengthen a path — which is the entire relocation step, failing after the build rather than
@@ -767,7 +776,23 @@ def loads(php: Path, extension_dir: Path, module: str, ini: Path) -> tuple[bool,
         [str(php), "-c", str(ini), "-r", f"echo extension_loaded({name!r}) ? 'yes' : 'no';"],
         capture_output=True, text=True, timeout=300,
     )
-    return attempt.stdout.strip().endswith("yes"), attempt.stdout.strip(), attempt.stderr.strip()
+    ok = attempt.stdout.strip().endswith("yes")
+    error = attempt.stderr.strip()
+    if not ok and not error:
+        # PHP refusing an extension without a word means one of exactly two things, and `dl()` says
+        # which. It reports "dynamic modules are not supported" when PHP was built without
+        # HAVE_LIBDL — in which case `extension=` lines are not ignored so much as compiled out of
+        # existence, since both loader callbacks in main/php_ini.c have empty bodies without it.
+        # Otherwise it reports dlopen's own complaint, which is the answer we were looking for all
+        # along and which the ini path never shows.
+        probe = subprocess.run(
+            [str(php), "-c", str(ini), "-r", f"var_dump(dl({module + '.so'!r}));"],
+            capture_output=True, text=True, timeout=300,
+        )
+        error = "dl() says: " + " ".join(
+            (probe.stdout + " " + probe.stderr).split()
+        )
+    return ok, attempt.stdout.strip(), error
 
 
 def installed_extension_dir(prefix: Path) -> Path | None:
