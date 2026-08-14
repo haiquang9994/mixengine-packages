@@ -63,6 +63,11 @@
         "loaded_extension": {
           "type": "string",
           "description": "A shared extension that was loaded from extension_dir after relocation. Absent when the build has none to load."
+        },
+        "loaded_extensions": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Every shared extension that was loaded after relocation, where the recipe proves all of them rather than one. Proving one shows extension_dir is honoured; proving all shows no extension built into an archive that cannot load it — which is a separate failure, invisible in a build log, and the usual shape of it is an extension whose symbols come from another extension that has to be loaded first."
         }
       }
     }

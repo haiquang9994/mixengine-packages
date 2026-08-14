@@ -543,54 +543,81 @@ def build(source: Path, prefix: Path, branch: tuple[int, int], environment: dict
         raise SystemExit(f"make install produced no {prefix / 'bin' / 'php'}")
 
 
-def pecl_release(package: str, version: tuple[int, ...], work: Path) -> tuple[str, Path] | None:
-    """The newest stable release of *package* that says it supports this PHP, and its tarball.
+# How far back down a package's release list to look. It has to be this large: reaching a `mongodb`
+# that still supports PHP 7.0 means walking past every 2.x and most of 1.x, roughly eighty releases.
+# A smaller number does not fail — it quietly reports "nothing supports this PHP" and the artifact
+# ships without an extension MixEngine promised across the whole range.
+PECL_DEPTH = 250
 
-    Resolved rather than pinned. A table of six branches times four extensions is twenty-four
-    numbers nobody can check without doing exactly this, and every package already states its own
-    range in the ``package.xml`` it ships — so that is what is read.
+# Tried in turn when the newest suitable release does not compile. A declared range is a claim, and
+# claims about a PHP from ten years ago are sometimes optimistic.
+PECL_ATTEMPTS = 5
+
+# Missing either of these is a failed build, not a warning. They are the two extensions MixEngine
+# was told it must carry on every version, so an artifact without one is an artifact that lies about
+# what it can run.
+PECL_REQUIRED = {"redis", "mongodb"}
+
+
+def pecl_candidates(package: str, version: tuple[int, ...], work: Path):
+    """Yield ``(release, tarball)`` for each stable release that says it supports this PHP.
+
+    Newest first, and lazily — the tarball for a candidate is only fetched once its declared range
+    has already been checked. That check reads PEAR's ``deps.<version>.txt``, a few hundred bytes of
+    serialised PHP, rather than the ``package.xml`` inside the tarball: the answer is the same and
+    it is the difference between eighty small requests and eighty archive downloads.
     """
     try:
         catalogue = fetch(f"https://pecl.php.net/rest/r/{package}/allreleases.xml").decode()
     except urllib.error.HTTPError:
-        return None
+        return
     candidates = [
         found for found, stability in re.findall(r"<v>([^<]+)</v>\s*<s>([^<]+)</s>", catalogue)
         if stability == "stable"
     ]
     candidates.sort(key=parts, reverse=True)
 
-    for candidate in candidates[:40]:
+    for candidate in candidates[:PECL_DEPTH]:
+        try:
+            declaration = fetch(
+                f"https://pecl.php.net/rest/r/{package}/deps.{candidate}.txt"
+            ).decode("utf-8", "replace")
+        except urllib.error.HTTPError:
+            continue
+        supported = supports(declaration, version)
+        if supported is None:
+            continue
         tarball = work / f"{package}-{candidate}.tgz"
         try:
             tarball.write_bytes(fetch(f"https://pecl.php.net/get/{package}-{candidate}.tgz"))
         except urllib.error.HTTPError:
             continue
-        with tarfile.open(tarball) as archive:
-            member = next((name for name in archive.getnames() if name.endswith("package.xml")), None)
-            manifest = archive.extractfile(member).read().decode("utf-8", "replace") if member else ""
-        supported = supports(manifest, version)
-        if supported is None:
-            tarball.unlink(missing_ok=True)
-            continue
-        print(f"{package} {candidate} claims PHP {supported}")
-        return candidate, tarball
-    return None
+        print(f"{package} {candidate} declares PHP {supported}")
+        yield candidate, tarball
 
 
-def supports(manifest: str, version: tuple[int, ...]) -> str | None:
-    """The PHP range a ``package.xml`` declares, if *version* is inside it, else None.
+def supports(declaration: str, version: tuple[int, ...]) -> str | None:
+    """The PHP range a package declares, if *version* is inside it, else None.
 
-    Only the ``<php>`` block inside ``<required>`` is read. A package that declares no range at all
-    is treated as not answering the question rather than as answering yes: PECL has releases from
-    before the field was used, and assuming they support a PHP from a decade later is how a build
-    fails an hour in.
+    Reads either shape PEAR states it in: the serialised ``a:1:{s:8:"required";…}`` of
+    ``deps.<version>.txt``, or the ``<php><min>…`` of a ``package.xml``. A package that declares no
+    range at all is treated as not answering the question rather than as answering yes — PECL has
+    releases from before the field was used, and assuming one of those supports a PHP from a decade
+    later is how a build fails an hour in.
     """
-    span = re.search(r"<php>(.*?)</php>", manifest, re.S)
-    if not span:
+    serialised = re.search(r's:3:"php";a:\d+:\{(.*?)\}', declaration, re.S)
+    if serialised:
+        body = serialised.group(1)
+        low = re.search(r's:3:"min";s:\d+:"([^"]+)"', body)
+        high = re.search(r's:3:"max";s:\d+:"([^"]+)"', body)
+    else:
+        span = re.search(r"<php>(.*?)</php>", declaration, re.S)
+        if not span:
+            return None
+        low = re.search(r"<min>([^<]+)</min>", span.group(1))
+        high = re.search(r"<max>([^<]+)</max>", span.group(1))
+    if not low and not high:
         return None
-    low = re.search(r"<min>([^<]+)</min>", span.group(1))
-    high = re.search(r"<max>([^<]+)</max>", span.group(1))
     if low and version < parts(low.group(1)):
         return None
     if high and version > parts(high.group(1)):
@@ -600,38 +627,53 @@ def supports(manifest: str, version: tuple[int, ...]) -> str | None:
 
 def build_extensions(prefix: Path, version: str, work: Path,
                      environment: dict[str, str]) -> dict[str, str]:
-    """Build the PECL set with ``phpize``, and report what was built at which version."""
+    """Build the PECL set with ``phpize``, and report what was built at which version.
+
+    Each package walks down its own release list until one compiles. A declared range is what the
+    packager believed at the time, and for a PHP this old the belief is sometimes wrong — the newest
+    `mongodb` that claims 7.x is not always the newest that builds against it. Trying the next one
+    down costs a minute; not trying it costs an artifact quietly missing an extension.
+    """
     chosen: dict[str, str] = {}
     for package in PECL:
-        found = pecl_release(package, parts(version), work)
-        if not found:
-            print(f"warning: no stable {package} release claims support for PHP {version}",
-                  file=sys.stderr)
-            continue
-        release_version, tarball = found
-        directory = work / f"ext-{package}"
-        directory.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(tarball) as archive:
-            archive.extractall(directory)
-        unpacked = directory / f"{package}-{release_version}"
-        if not unpacked.is_dir():
-            unpacked = next(path for path in sorted(directory.iterdir()) if path.is_dir())
+        attempts = 0
+        for release_version, tarball in pecl_candidates(package, parts(version), work):
+            attempts += 1
+            if attempts > PECL_ATTEMPTS:
+                break
+            directory = work / f"ext-{package}-{release_version}"
+            directory.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(tarball) as archive:
+                archive.extractall(directory)
+            unpacked = directory / f"{package}-{release_version}"
+            if not unpacked.is_dir():
+                unpacked = next(path for path in sorted(directory.iterdir()) if path.is_dir())
 
-        configure = [f"--with-php-config={prefix / 'bin' / 'php-config'}"]
-        if package == "redis" and "igbinary" in chosen:
-            configure.append("--enable-redis-igbinary")
-        try:
-            run(str(prefix / "bin" / "phpize"), cwd=unpacked, env=environment, capture=False)
-            run("./configure", *configure, cwd=unpacked, env=environment, capture=False)
-            run("make", f"-j{os.cpu_count() or 2}", cwd=unpacked, env=environment, capture=False)
-            run("make", "install", cwd=unpacked, env=environment, capture=False)
-        except SystemExit:
-            # One extension refusing to build is not a reason to publish nothing. The manifest lists
-            # what is actually in the archive, so a missing one is visible rather than assumed.
-            print(f"warning: {package} {release_version} did not build against PHP {version}",
-                  file=sys.stderr)
-            continue
-        chosen[package] = release_version
+            configure = [f"--with-php-config={prefix / 'bin' / 'php-config'}"]
+            if package == "redis" and "igbinary" in chosen:
+                configure.append("--enable-redis-igbinary")
+            try:
+                run(str(prefix / "bin" / "phpize"), cwd=unpacked, env=environment, capture=False)
+                run("./configure", *configure, cwd=unpacked, env=environment, capture=False)
+                run("make", f"-j{os.cpu_count() or 2}", cwd=unpacked, env=environment,
+                    capture=False)
+                run("make", "install", cwd=unpacked, env=environment, capture=False)
+            except SystemExit:
+                print(f"warning: {package} {release_version} declares support for PHP {version} "
+                      f"and does not build against it; trying an older release", file=sys.stderr)
+                continue
+            chosen[package] = release_version
+            break
+
+        if package not in chosen:
+            message = (f"no stable {package} release both claims PHP {version} and builds against "
+                       f"it, within {PECL_ATTEMPTS} attempts")
+            if package in PECL_REQUIRED:
+                raise SystemExit(
+                    f"{message}. MixEngine offers {package} on every version it ships, so an "
+                    "artifact without it is not one worth publishing."
+                )
+            print(f"warning: {message}", file=sys.stderr)
     return chosen
 
 
@@ -771,31 +813,41 @@ def smoke(tree: Path, provides: dict[str, str], shared: list[str]) -> tuple[str,
         raise SystemExit(f"the relocated build cannot use its own libraries: {answer}")
     print("every bundled library answered from the relocated tree")
 
-    loaded = None
+    # Every shared extension is loaded, not just the first one that works. An extension that built
+    # and then cannot be loaded is the failure this is looking for — it is invisible in the build
+    # log, and `redis` is exactly the case, since it resolves igbinary's symbols only at load time.
+    loaded, refused = [], []
     for candidate in shared:
         ini = elsewhere.parent / "php.ini"
         directive = "zend_extension" if candidate == "xdebug" else "extension"
         # Every value quoted, as the Windows recipe does and for the same reason: this is the
         # mechanism the daemon uses, so it is the one worth proving.
-        ini.write_text(
-            'display_errors=stderr\n'
-            f'extension_dir="{elsewhere / "ext"}"\n'
-            f'{directive}="{elsewhere / "ext" / (candidate + ".so")}"\n',
-            encoding="ascii",
-        )
+        lines = ['display_errors=stderr\n', f'extension_dir="{elsewhere / "ext"}"\n']
+        if candidate == "redis" and "igbinary" in shared:
+            lines.append(f'extension="{elsewhere / "ext" / "igbinary.so"}"\n')
+        lines.append(f'{directive}="{elsewhere / "ext" / (candidate + ".so")}"\n')
+        ini.write_text("".join(lines), encoding="ascii")
         answer = run(
             str(elsewhere / "bin" / "php"), "-n", "-c", str(ini),
             "-r", f"echo extension_loaded({candidate!r}) ? 'yes' : 'no';",
         ).strip()
         if answer.endswith("yes"):
-            loaded = candidate
+            loaded.append(candidate)
             print(f"loaded {candidate} from the relocated ext/, through a generated php.ini")
-            break
-        print(f"{candidate} did not load: {answer!r}")
+        else:
+            refused.append(candidate)
+            print(f"{candidate} did not load: {answer!r}", file=sys.stderr)
 
-    proof = {"relocated": True, "ran": ran}
-    if loaded:
-        proof["loaded_extension"] = loaded
+    missing = sorted(PECL_REQUIRED - set(loaded))
+    if missing:
+        raise SystemExit(
+            f"built but cannot be loaded: {', '.join(missing)}. These are offered on every version "
+            "MixEngine ships, so a build where they do not load is not one worth publishing."
+        )
+    if refused:
+        print(f"warning: {', '.join(refused)} built but would not load", file=sys.stderr)
+
+    proof = {"relocated": True, "ran": ran, "loaded_extensions": loaded}
     shutil.rmtree(elsewhere.parent.parent, ignore_errors=True)
     return version.group(1), proof
 
