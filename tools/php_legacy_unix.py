@@ -66,7 +66,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import php_smoke
 import relocate
+from php_smoke import loads
 
 RELEASES = "https://www.php.net/releases/index.php?json&version={branch}"
 DISTRIBUTIONS = "https://www.php.net/distributions/{filename}"
@@ -789,15 +791,10 @@ PECL_ATTEMPTS = 5
 # what it can run.
 PECL_REQUIRED = {"redis", "mongodb"}
 
-# Loaded with `zend_extension=` rather than `extension=`. Getting this wrong does not look like a
-# configuration mistake from the outside — the extension simply reports as not loaded, which is
-# indistinguishable from a broken build. `opcache` is here as well as `xdebug` because PHP builds it
-# as a shared module by default, so it arrives in `ext/` alongside the PECL ones.
-ZEND_EXTENSIONS = {"xdebug", "opcache"}
-
-# What `extension_loaded()` answers to, where that is not the file name. Only opcache so far, and
-# missing it makes a perfectly loaded extension report as absent.
-EXTENSION_NAMES = {"opcache": "Zend OPcache"}
+# Which extensions need `zend_extension=`, what `extension_loaded()` answers to, and how to load one
+# through a generated ini all live in `php_smoke`, because the 8.1+ recipe has to get them right too.
+ZEND_EXTENSIONS = php_smoke.ZEND_EXTENSIONS
+EXTENSION_NAMES = php_smoke.EXTENSION_NAMES
 
 
 def pecl_candidates(package: str, version: tuple[int, ...], work: Path):
@@ -921,46 +918,6 @@ def build_extensions(prefix: Path, version: str, work: Path,
     return chosen
 
 
-def loads(php: Path, extension_dir: Path, module: str, ini: Path) -> tuple[bool, str, str]:
-    """Try to load one extension through a generated ini, and report what PHP said about it.
-
-    The ini is the mechanism the daemon will use, so it is the one worth proving — and
-    ``display_startup_errors`` is turned on because loading an extension happens at startup, where
-    PHP's default is to refuse in silence. A refusal nobody can see is the failure this whole check
-    exists to catch.
-    """
-    name = EXTENSION_NAMES.get(module, module)
-    directive = "zend_extension" if module in ZEND_EXTENSIONS else "extension"
-    lines = ["display_errors=stderr\n", "display_startup_errors=On\n", "error_reporting=E_ALL\n",
-             f'extension_dir="{extension_dir}"\n']
-    if module == "redis" and (extension_dir / "igbinary.so").exists():
-        lines.append(f'extension="{extension_dir / "igbinary.so"}"\n')
-    lines.append(f'{directive}="{extension_dir / (module + ".so")}"\n')
-    ini.write_text("".join(lines), encoding="utf-8")
-
-    attempt = subprocess.run(
-        [str(php), "-c", str(ini), "-r", f"echo extension_loaded({name!r}) ? 'yes' : 'no';"],
-        capture_output=True, text=True, timeout=300,
-    )
-    ok = attempt.stdout.strip().endswith("yes")
-    error = attempt.stderr.strip()
-    if not ok and not error:
-        # PHP refusing an extension without a word means one of exactly two things, and `dl()` says
-        # which. It reports "dynamic modules are not supported" when PHP was built without
-        # HAVE_LIBDL — in which case `extension=` lines are not ignored so much as compiled out of
-        # existence, since both loader callbacks in main/php_ini.c have empty bodies without it.
-        # Otherwise it reports dlopen's own complaint, which is the answer we were looking for all
-        # along and which the ini path never shows.
-        probe = subprocess.run(
-            [str(php), "-c", str(ini), "-r", f"var_dump(dl({module + '.so'!r}));"],
-            capture_output=True, text=True, timeout=300,
-        )
-        error = "dl() says: " + " ".join(
-            (probe.stdout + " " + probe.stderr).split()
-        )
-    return ok, attempt.stdout.strip(), error
-
-
 def installed_extension_dir(prefix: Path) -> Path | None:
     return next(
         (path for path in sorted((prefix / "lib" / "php" / "extensions").glob("*")) if path.is_dir()),
@@ -1066,27 +1023,6 @@ def collect_licences(tree: Path, source: Path, bundled: dict[str, Path]) -> None
     )
 
 
-SMOKE_SCRIPT = r"""<?php
-// Deliberately PHP 5-era syntax: this same script has to parse on 7.0.
-$results = array();
-$results['openssl'] = strlen(openssl_digest('mixengine', 'sha256')) === 64;
-$curl = curl_version();
-$results['curl'] = !empty($curl['version']);
-$results['mbstring'] = mb_strtoupper('mixengine') === 'MIXENGINE';
-$results['intl'] = numfmt_format(numfmt_create('en_US', NumberFormatter::DECIMAL), 1234.5) !== false;
-$image = imagecreatetruecolor(1, 1);
-$results['gd'] = !empty($image);
-$results['zip'] = class_exists('ZipArchive');
-$database = new SQLite3(':memory:');
-$results['sqlite3'] = $database->querySingle('select 1') == 1;
-$xml = simplexml_load_string('<a><b>c</b></a>');
-$results['xml'] = $xml && (string) $xml->b === 'c';
-$failed = array();
-foreach ($results as $name => $ok) { if (!$ok) { $failed[] = $name; } }
-echo $failed ? 'FAILED: ' . implode(',', $failed) : 'OK';
-"""
-
-
 def smoke(tree: Path, provides: dict[str, str], shared: list[str]) -> tuple[str, dict]:
     """Exercise the build from a directory it has never seen, with its libraries beside it.
 
@@ -1113,9 +1049,7 @@ def smoke(tree: Path, provides: dict[str, str], shared: list[str]) -> tuple[str,
         if name != "php":
             run(str(elsewhere / path), "-v")
 
-    script = elsewhere.parent / "smoke.php"
-    script.write_text(SMOKE_SCRIPT, encoding="utf-8")
-    answer = run(str(elsewhere / "bin" / "php"), "-n", str(script)).strip()
+    answer = php_smoke.libraries(elsewhere / "bin" / "php", elsewhere.parent / "smoke.php")
     if not answer.endswith("OK"):
         raise SystemExit(f"the relocated build cannot use its own libraries: {answer}")
     print("every bundled library answered from the relocated tree")

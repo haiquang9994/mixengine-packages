@@ -40,6 +40,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
+import php_smoke
 import relocate
 
 SPC_VERSION = "2.8.5"
@@ -233,10 +234,22 @@ def smoke(tree: Path, provides: dict[str, str], shared: list[str]) -> tuple[str,
 
     A build tested where it was produced proves nothing about relocatability, which is the single
     property this whole repository exists to guarantee.
+
+    The same four things are proven here as in the 7.0–8.0 recipe, and for the same reasons: that
+    nothing in the tree still reaches outside it, that the SAPIs start, that the bundled libraries
+    are *called* rather than merely linked, and that every shared extension loads through a
+    generated ini. This half used to prove two of them, which made `smoke.relocated` mean something
+    different depending on which branch produced it.
     """
     elsewhere = Path(tempfile.mkdtemp(prefix="mixengine-smoke-")) / "moved here" / "php"
     elsewhere.parent.mkdir(parents=True)
-    shutil.copytree(tree, elsewhere)
+    shutil.copytree(tree, elsewhere, symlinks=True)
+
+    problems = relocate.verify(elsewhere)
+    for problem in problems:
+        print(f"error: {problem}", file=sys.stderr)
+    if problems:
+        raise SystemExit("the relocated tree still reaches outside itself")
 
     banner = run(str(elsewhere / "bin" / "php"), "-v").splitlines()[0]
     version = re.search(r"PHP (\d+\.\d+\.\d+)", banner)
@@ -248,32 +261,36 @@ def smoke(tree: Path, provides: dict[str, str], shared: list[str]) -> tuple[str,
         if name != "php":
             run(str(elsewhere / path), "-v")
 
-    # Through a generated php.ini with every value quoted, exactly as the Windows recipe does and
-    # for the same reason: this is the mechanism the daemon will use, so it is the one worth
-    # proving, and a check that goes through -d proves a different one.
-    loaded = None
-    for candidate in shared:
-        name = candidate.removeprefix("php_")
-        ini = elsewhere.parent / "php.ini"
-        ini.write_text(
-            f'display_errors=stderr\n'
-            f'extension_dir="{elsewhere / "ext"}"\n'
-            f'zend_extension="{elsewhere / "ext" / (candidate + ".so")}"\n',
-            encoding="utf-8",
-        )
-        answer = run(
-            str(elsewhere / "bin" / "php"), "-n", "-c", str(ini),
-            "-r", f"echo extension_loaded({name!r}) ? 'yes' : 'no';",
-        ).strip()
-        if answer.endswith("yes"):
-            loaded = candidate
-            print(f"loaded {name} from the relocated ext/, through a generated php.ini")
-            break
-        print(f"{name} did not load: {answer!r}")
+    answer = php_smoke.libraries(elsewhere / "bin" / "php", elsewhere.parent / "smoke.php")
+    if not answer.endswith("OK"):
+        raise SystemExit(f"the relocated build cannot use its own libraries: {answer}")
+    print("every bundled library answered from the relocated tree")
 
-    proof = {"relocated": True, "ran": ran}
-    if loaded:
-        proof["loaded_extension"] = loaded
+    # Every shared extension, not the first one that loads. There is only one of them today, which
+    # is exactly why stopping at the first was survivable and would not have stayed so.
+    loaded, refused = [], []
+    ini = elsewhere.parent / "php.ini"
+    php = elsewhere / "bin" / "php"
+    for candidate in shared:
+        ok, said, error = php_smoke.loads(php, elsewhere / "ext", candidate, ini)
+        if ok:
+            loaded.append(candidate)
+            print(f"loaded {candidate} from the relocated ext/, through a generated php.ini")
+            continue
+        refused.append(candidate)
+        print(f"{candidate} did not load: {said!r}", file=sys.stderr)
+        for line in error.splitlines():
+            print(f"  {line}", file=sys.stderr)
+
+    if refused:
+        # `--build-shared` was asked for these by name, so one that will not load is a build that
+        # did not produce what it was told to. Publishing it would put an `ext/` in the archive
+        # holding a file the daemon can offer and PHP will refuse.
+        raise SystemExit(
+            f"built but cannot be loaded: {', '.join(refused)}"
+        )
+
+    proof = {"relocated": True, "ran": ran, "loaded_extensions": loaded}
     shutil.rmtree(elsewhere.parent.parent, ignore_errors=True)
     return version.group(1), proof
 
