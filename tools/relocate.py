@@ -276,7 +276,12 @@ def bundle(tree: Path, libdir: str = "lib") -> dict[str, Path]:
             shutil.copy2(resolved.resolve(), destination)
             destination.chmod(destination.stat().st_mode | 0o644)
             bundled[name] = resolved
-            queue.append(destination)
+            # The *original* goes back on the queue, not the copy. A library's dependencies are
+            # often written relative to itself — Homebrew's libwebp asks for
+            # `@rpath/libsharpyuv.0.dylib` and finds it beside itself — and asking the copy resolves
+            # those against a directory that does not have them yet, which reads as a dependency
+            # missing from the machine rather than as one not copied over yet.
+            queue.append(resolved)
 
     rewrite(tree, libdir, set(bundled), executable_dir)
     return dict(sorted(bundled.items()))

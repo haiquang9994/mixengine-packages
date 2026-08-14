@@ -746,6 +746,56 @@ def build_extensions(prefix: Path, version: str, work: Path,
     return chosen
 
 
+def loads(php: Path, extension_dir: Path, module: str, ini: Path) -> tuple[bool, str, str]:
+    """Try to load one extension through a generated ini, and report what PHP said about it.
+
+    The ini is the mechanism the daemon will use, so it is the one worth proving — and
+    ``display_startup_errors`` is turned on because loading an extension happens at startup, where
+    PHP's default is to refuse in silence. A refusal nobody can see is the failure this whole check
+    exists to catch.
+    """
+    name = EXTENSION_NAMES.get(module, module)
+    directive = "zend_extension" if module in ZEND_EXTENSIONS else "extension"
+    lines = ["display_errors=stderr\n", "display_startup_errors=On\n", "error_reporting=E_ALL\n",
+             f'extension_dir="{extension_dir}"\n']
+    if module == "redis" and (extension_dir / "igbinary.so").exists():
+        lines.append(f'extension="{extension_dir / "igbinary.so"}"\n')
+    lines.append(f'{directive}="{extension_dir / (module + ".so")}"\n')
+    ini.write_text("".join(lines), encoding="ascii")
+
+    attempt = subprocess.run(
+        [str(php), "-c", str(ini), "-r", f"echo extension_loaded({name!r}) ? 'yes' : 'no';"],
+        capture_output=True, text=True, timeout=300,
+    )
+    return attempt.stdout.strip().endswith("yes"), attempt.stdout.strip(), attempt.stderr.strip()
+
+
+def installed_extension_dir(prefix: Path) -> Path | None:
+    return next(
+        (path for path in sorted((prefix / "lib" / "php" / "extensions").glob("*")) if path.is_dir()),
+        None,
+    )
+
+
+def check_where_installed(prefix: Path, work: Path) -> None:
+    """Load every built extension where it was installed, before anything has been moved.
+
+    This is here to cut a two-sided question in half. When an extension will not load out of the
+    finished archive, the cause is either the build or the packing — and those need entirely
+    different fixes. Asking before the packing starts says which one it is, and costs seconds.
+    """
+    extension_dir = installed_extension_dir(prefix)
+    if not extension_dir:
+        return
+    modules = sorted(path.stem for path in extension_dir.glob("*.so"))
+    print(f"loading {len(modules)} extension(s) where they were installed, before packing")
+    for module in modules:
+        ok, answer, error = loads(prefix / "bin" / "php", extension_dir, module, work / "check.ini")
+        print(f"  {module}: {'loads' if ok else f'does NOT load ({answer!r})'}")
+        for line in error.splitlines():
+            print(f"    {line}")
+
+
 def assemble(prefix: Path, work: Path) -> tuple[Path, dict[str, str], list[str]]:
     """Lay the installed prefix out as the archive, and report what it provides.
 
@@ -765,10 +815,7 @@ def assemble(prefix: Path, work: Path) -> tuple[Path, dict[str, str], list[str]]
         raise SystemExit("no php binary was installed")
 
     shared = []
-    extensions = next(
-        (path for path in sorted((prefix / "lib" / "php" / "extensions").glob("*")) if path.is_dir()),
-        None,
-    )
+    extensions = installed_extension_dir(prefix)
     if extensions:
         (tree / "ext").mkdir(exist_ok=True)
         for module in sorted(extensions.glob("*.so")):
@@ -887,65 +934,31 @@ def smoke(tree: Path, provides: dict[str, str], shared: list[str]) -> tuple[str,
     # log, and `redis` is exactly the case, since it resolves igbinary's symbols only at load time.
     loaded, refused = [], []
     ini = elsewhere.parent / "php.ini"
+    php = elsewhere / "bin" / "php"
     for candidate in shared:
-        directive = "zend_extension" if candidate in ZEND_EXTENSIONS else "extension"
-        # Every value quoted, as the Windows recipe does and for the same reason: this is the
-        # mechanism the daemon uses, so it is the one worth proving.
-        # `display_startup_errors` is Off by default, and loading an extension happens at startup —
-        # so without it PHP refuses an extension and says nothing at all, which is indistinguishable
-        # from not having been asked. Two rounds of this pipeline were spent on that silence.
-        lines = ['display_errors=stderr\n', 'display_startup_errors=On\n',
-                 'error_reporting=E_ALL\n', f'extension_dir="{elsewhere / "ext"}"\n']
-        if candidate == "redis" and "igbinary" in shared:
-            lines.append(f'extension="{elsewhere / "ext" / "igbinary.so"}"\n')
-        lines.append(f'{directive}="{elsewhere / "ext" / (candidate + ".so")}"\n')
-        ini.write_text("".join(lines), encoding="ascii")
-        # No `-n` beside `-c`. The two argue about the same thing — one says "use no ini", the other
-        # says "use this ini" — and an ini that is silently not read looks exactly like an extension
-        # that silently will not load: no warning, no diagnosis, just `extension_loaded()` false.
-        # `-c` alone is also closer to what the daemon does.
-        #
-        # Run directly rather than through `run`: a refusal exits zero, so the reason is on stderr
-        # of a command that succeeded, and `run` only shows stderr when a command fails. Without
-        # this the whole diagnosis is the string 'no'.
-        name = EXTENSION_NAMES.get(candidate, candidate)
-        attempt = subprocess.run(
-            [str(elsewhere / "bin" / "php"), "-c", str(ini),
-             "-r", f"echo extension_loaded({name!r}) ? 'yes' : 'no';"],
-            capture_output=True, text=True, timeout=300,
-        )
-        if attempt.stdout.strip().endswith("yes"):
+        ok, answer, error = loads(php, elsewhere / "ext", candidate, ini)
+        if ok:
             loaded.append(candidate)
             print(f"loaded {candidate} from the relocated ext/, through a generated php.ini")
-        else:
-            refused.append(candidate)
-            print(f"{candidate} did not load: {attempt.stdout.strip()!r}", file=sys.stderr)
-            for line in (attempt.stderr or "").splitlines():
-                print(f"  {line}", file=sys.stderr)
-            # Two faults look identical from out here — the ini was not read, or it was read and the
-            # extension refused — and only one of them is the extension's. So when PHP has nothing
-            # to say, it is asked which configuration file it used, and the same load is tried
-            # again through `-d`, which needs no file at all. If `-d` works and the ini does not,
-            # the fault is the ini's.
-            if not attempt.stderr.strip():
-                print("  nothing on stderr; asking PHP what it actually read", file=sys.stderr)
-                report = subprocess.run(
-                    [str(elsewhere / "bin" / "php"), "-c", str(ini), "-i"],
-                    capture_output=True, text=True, timeout=300,
-                ).stdout
-                for line in report.splitlines():
-                    if "Configuration File" in line or line.startswith("extension_dir"):
-                        print(f"  {line}", file=sys.stderr)
-                direct = subprocess.run(
-                    [str(elsewhere / "bin" / "php"), "-n",
-                     "-d", f"extension_dir={elsewhere / 'ext'}",
-                     "-d", f"{directive}={elsewhere / 'ext' / (candidate + '.so')}",
-                     "-r", f"echo extension_loaded({name!r}) ? 'yes' : 'no';"],
-                    capture_output=True, text=True, timeout=300,
-                )
-                print(f"  through -d instead: {direct.stdout.strip()!r}", file=sys.stderr)
-                for line in (direct.stderr or "").splitlines():
-                    print(f"    {line}", file=sys.stderr)
+            continue
+        refused.append(candidate)
+        print(f"{candidate} did not load: {answer!r}", file=sys.stderr)
+        for line in error.splitlines():
+            print(f"  {line}", file=sys.stderr)
+        if not error:
+            # Nothing on stderr is its own diagnosis: PHP did not object, so it may not have been
+            # asked. What it read, and what it ended up with, come from PHP rather than from a guess.
+            print("  nothing on stderr; asking PHP what it read and what it has", file=sys.stderr)
+            report = subprocess.run(
+                [str(php), "-c", str(ini), "-i"], capture_output=True, text=True, timeout=300
+            ).stdout
+            for line in report.splitlines():
+                if "Configuration File" in line or line.startswith("extension_dir"):
+                    print(f"  {line}", file=sys.stderr)
+            modules = subprocess.run(
+                [str(php), "-c", str(ini), "-m"], capture_output=True, text=True, timeout=300
+            ).stdout.split()
+            print(f"  php -m: {' '.join(modules)}", file=sys.stderr)
 
     missing = sorted(PECL_REQUIRED - set(loaded))
     if missing:
@@ -1022,6 +1035,7 @@ def main() -> None:
 
     build(source, prefix, branch, environment, prefixes)
     pecl_versions = build_extensions(prefix, version, work, environment)
+    check_where_installed(prefix, work)
     tree, provides, shared = assemble(prefix, work)
 
     bundled = relocate.bundle(tree)
