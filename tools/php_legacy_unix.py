@@ -151,6 +151,10 @@ DNF_PACKAGES = [
 # the reasons in SOURCE_LIBRARIES. Homebrew still installs openssl@3 as somebody else's dependency
 # (libpq's), which is harmless — it is simply never what PHP is pointed at.
 BREW_PACKAGES = [
+    # `phpize` regenerates a configure script, so building any PECL extension needs autoconf — and a
+    # macOS runner does not have one. On the branches before 7.4 the 2.69 built below shadows this
+    # one, because those cannot be phpize'd by a current autoconf at all.
+    "autoconf", "automake", "libtool", "pkg-config",
     "icu4c", "libzip", "oniguruma", "libsodium", "libpq", "gmp", "jpeg-turbo", "libpng",
     "freetype", "webp", "sqlite", "libiconv", "bzip2",
     "readline",   # macOS ships libedit, not readline, and PHP's `--with-readline` wants the latter
@@ -619,6 +623,10 @@ PECL_REQUIRED = {"redis", "mongodb"}
 # as a shared module by default, so it arrives in `ext/` alongside the PECL ones.
 ZEND_EXTENSIONS = {"xdebug", "opcache"}
 
+# What `extension_loaded()` answers to, where that is not the file name. Only opcache so far, and
+# missing it makes a perfectly loaded extension report as absent.
+EXTENSION_NAMES = {"opcache": "Zend OPcache"}
+
 
 def pecl_candidates(package: str, version: tuple[int, ...], work: Path):
     """Yield ``(release, tarball)`` for each stable release that says it supports this PHP.
@@ -883,7 +891,11 @@ def smoke(tree: Path, provides: dict[str, str], shared: list[str]) -> tuple[str,
         directive = "zend_extension" if candidate in ZEND_EXTENSIONS else "extension"
         # Every value quoted, as the Windows recipe does and for the same reason: this is the
         # mechanism the daemon uses, so it is the one worth proving.
-        lines = ['display_errors=stderr\n', f'extension_dir="{elsewhere / "ext"}"\n']
+        # `display_startup_errors` is Off by default, and loading an extension happens at startup —
+        # so without it PHP refuses an extension and says nothing at all, which is indistinguishable
+        # from not having been asked. Two rounds of this pipeline were spent on that silence.
+        lines = ['display_errors=stderr\n', 'display_startup_errors=On\n',
+                 'error_reporting=E_ALL\n', f'extension_dir="{elsewhere / "ext"}"\n']
         if candidate == "redis" and "igbinary" in shared:
             lines.append(f'extension="{elsewhere / "ext" / "igbinary.so"}"\n')
         lines.append(f'{directive}="{elsewhere / "ext" / (candidate + ".so")}"\n')
@@ -896,9 +908,10 @@ def smoke(tree: Path, provides: dict[str, str], shared: list[str]) -> tuple[str,
         # Run directly rather than through `run`: a refusal exits zero, so the reason is on stderr
         # of a command that succeeded, and `run` only shows stderr when a command fails. Without
         # this the whole diagnosis is the string 'no'.
+        name = EXTENSION_NAMES.get(candidate, candidate)
         attempt = subprocess.run(
             [str(elsewhere / "bin" / "php"), "-c", str(ini),
-             "-r", f"echo extension_loaded({candidate!r}) ? 'yes' : 'no';"],
+             "-r", f"echo extension_loaded({name!r}) ? 'yes' : 'no';"],
             capture_output=True, text=True, timeout=300,
         )
         if attempt.stdout.strip().endswith("yes"):
@@ -909,14 +922,13 @@ def smoke(tree: Path, provides: dict[str, str], shared: list[str]) -> tuple[str,
             print(f"{candidate} did not load: {attempt.stdout.strip()!r}", file=sys.stderr)
             for line in (attempt.stderr or "").splitlines():
                 print(f"  {line}", file=sys.stderr)
-            # Silence here means PHP never read the file, which is a different fault from an
-            # extension that refuses to load and has to be told apart from it. So the build says
-            # which ini PHP actually used, out of PHP's own mouth.
+            # Two faults look identical from out here — the ini was not read, or it was read and the
+            # extension refused — and only one of them is the extension's. So when PHP has nothing
+            # to say, it is asked which configuration file it used, and the same load is tried
+            # again through `-d`, which needs no file at all. If `-d` works and the ini does not,
+            # the fault is the ini's.
             if not attempt.stderr.strip():
-                print(f"  nothing on stderr, so the ini may not have been read at all:",
-                      file=sys.stderr)
-                print("  " + ini.read_text(encoding="ascii").replace("\n", "\n  "),
-                      file=sys.stderr)
+                print("  nothing on stderr; asking PHP what it actually read", file=sys.stderr)
                 report = subprocess.run(
                     [str(elsewhere / "bin" / "php"), "-c", str(ini), "-i"],
                     capture_output=True, text=True, timeout=300,
@@ -924,6 +936,16 @@ def smoke(tree: Path, provides: dict[str, str], shared: list[str]) -> tuple[str,
                 for line in report.splitlines():
                     if "Configuration File" in line or line.startswith("extension_dir"):
                         print(f"  {line}", file=sys.stderr)
+                direct = subprocess.run(
+                    [str(elsewhere / "bin" / "php"), "-n",
+                     "-d", f"extension_dir={elsewhere / 'ext'}",
+                     "-d", f"{directive}={elsewhere / 'ext' / (candidate + '.so')}",
+                     "-r", f"echo extension_loaded({name!r}) ? 'yes' : 'no';"],
+                    capture_output=True, text=True, timeout=300,
+                )
+                print(f"  through -d instead: {direct.stdout.strip()!r}", file=sys.stderr)
+                for line in (direct.stderr or "").splitlines():
+                    print(f"    {line}", file=sys.stderr)
 
     missing = sorted(PECL_REQUIRED - set(loaded))
     if missing:
