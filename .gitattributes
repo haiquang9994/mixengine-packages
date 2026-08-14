@@ -1,0 +1,6 @@
+# Everything here is read by a Linux or macOS runner at some point, including the shell fragments
+# inside the workflow YAML. A CRLF that reaches bash turns `set -euo pipefail` into a command not
+# found, so the line ending is pinned rather than left to whatever core.autocrlf a contributor has.
+* text=auto eol=lf
+*.png binary
+*.zip binary

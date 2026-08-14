@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/haiquang9994/mixengine-packages/schema/index.schema.json",
+  "title": "MixEngine package index",
+  "description": "The single signed document a MixEngine daemon reads to learn what runtimes and services exist and where to fetch them. Versions are never removed from it: a blueprint pinning an old one has to keep working, which is also why no url here may point at an upstream host.",
+  "type": "object",
+  "required": ["schema", "generated_at", "packages"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": 1,
+      "description": "Bumped only for a change a current client cannot read. Adding an optional field is not one."
+    },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "packages": { "type": "array", "items": { "$ref": "#/$defs/package" } }
+  },
+  "$defs": {
+    "package": {
+      "type": "object",
+      "required": ["kind", "version", "channel", "artifacts"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "description": "php | node | python | ruby | caddy | nginx | mariadb | postgresql | redis | memcached …"
+        },
+        "version": {
+          "type": "string",
+          "description": "The upstream version exactly as upstream writes it. Not normalised, not zero-padded — it is what the user pinned."
+        },
+        "channel": { "enum": ["stable", "rc", "beta"] },
+        "eol": {
+          "type": "string",
+          "format": "date",
+          "description": "Upstream's end of life, when upstream states one. A version past it stays installable and is marked in the GUI; PHP is offered well past its grace period on purpose, see MixEngine's version policy."
+        },
+        "artifacts": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/artifact" }
+        }
+      }
+    },
+
+    "artifact": {
+      "type": "object",
+      "description": "One OS/arch build. Everything that varies per platform lives here rather than on the package, because it does vary: a Windows PHP has no php-fpm and needs a VC++ redistributable, and neither statement is true of the same version on Linux.",
+      "required": ["os", "arch", "url", "sha256", "size", "provides"],
+      "additionalProperties": false,
+      "properties": {
+        "os": { "enum": ["windows", "macos", "linux"] },
+        "arch": { "enum": ["x86_64", "aarch64"] },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "A release asset of this repository. Never an upstream URL — upstreams prune, and the index promises they do not."
+        },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "size": { "type": "integer", "minimum": 1 },
+        "provides": {
+          "type": "object",
+          "description": "Executable name -> path inside the archive. A map rather than a list because the daemon needs to know where each binary is, and a borrowed archive keeps its publisher's layout rather than being rearranged into ours.",
+          "minProperties": 1,
+          "patternProperties": { "^[a-z][a-z0-9._-]*$": { "type": "string" } },
+          "additionalProperties": false
+        },
+        "requires": {
+          "type": "object",
+          "description": "Preconditions the daemon checks before installing, and prompts about rather than silently satisfying.",
+          "additionalProperties": false,
+          "properties": {
+            "vcredist": {
+              "enum": ["2015", "2017", "2019", "2022"],
+              "description": "Per branch, not per runtime: PHP 7.0-7.1 are VC14, 7.2-7.3 VC15, 7.4-8.3 VS16, 8.4+ VS17."
+            },
+            "macos": { "type": "string", "description": "Minimum macOS version, e.g. \"11.0\"." },
+            "glibc": { "type": "string", "description": "Minimum glibc, e.g. \"2.28\"." }
+          }
+        },
+        "extension_dir": {
+          "type": "string",
+          "description": "Where dynamically loadable extensions live inside the archive, relative to its root. Present whenever the runtime can load any; the generated config always sets this explicitly, because upstream PHP for Windows bakes an absolute C:\\php\\ext that would otherwise be consulted by accident on a machine where it happens to exist."
+        },
+        "extensions": {
+          "type": "object",
+          "description": "What this build can offer. The split is not cosmetic: a static extension cannot be turned off, and a shared one has to be present on disk before it can be turned on.",
+          "additionalProperties": false,
+          "properties": {
+            "static": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Compiled in. Always loaded, never disableable."
+            },
+            "shared": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Loadable modules shipped inside this archive."
+            }
+          }
+        }
+      }
+    }
+  }
+}

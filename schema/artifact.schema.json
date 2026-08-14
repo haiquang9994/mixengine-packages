@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/haiquang9994/mixengine-packages/schema/artifact.schema.json",
+  "title": "mixengine-artifact.json",
+  "description": "Written into the root of every archive this repository publishes. It is the reason the daemon can install a borrowed artifact without knowing anything about how its publisher lays out a directory: the archive keeps that layout, and this file says where things are. An archive without one is not an artifact.",
+  "type": "object",
+  "required": ["schema", "kind", "version", "os", "arch", "source", "provides"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": 1 },
+    "kind": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "version": { "type": "string" },
+    "os": { "enum": ["windows", "macos", "linux"] },
+    "arch": { "enum": ["x86_64", "aarch64"] },
+    "source": {
+      "enum": ["borrowed", "built"],
+      "description": "Whether the payload came from a publisher who already produces something relocatable, or was compiled here. It is recorded because the two age differently: a borrowed artifact goes stale when its publisher moves, a built one when its recipe stops compiling."
+    },
+    "upstream": {
+      "type": "object",
+      "description": "Where a borrowed payload came from, kept so a reader can check that what is in the archive is what upstream published — even after upstream has deleted it.",
+      "required": ["url", "sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "url": { "type": "string", "format": "uri" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "verified_against": {
+          "type": "string",
+          "description": "What the hash was checked against — for PHP on Windows, windows.php.net's own releases.json rather than a hash we computed and then trusted."
+        }
+      }
+    },
+    "recipe": {
+      "type": "string",
+      "description": "For a built payload: the tool and version that produced it, e.g. \"static-php-cli 2.7.1\"."
+    },
+    "provides": {
+      "type": "object",
+      "minProperties": 1,
+      "patternProperties": { "^[a-z][a-z0-9._-]*$": { "type": "string" } },
+      "additionalProperties": false
+    },
+    "extension_dir": { "type": "string" },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "static": { "type": "array", "items": { "type": "string" } },
+        "shared": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "requires": { "type": "object" },
+    "smoke": {
+      "type": "object",
+      "description": "What was actually proven about this archive before it was published, on the machine that built it. `php -v` alone is not enough: it passes with a broken extension_dir, because the built-in extensions are static and never consult it.",
+      "additionalProperties": false,
+      "properties": {
+        "relocated": {
+          "type": "boolean",
+          "description": "The archive was extracted, moved to an unrelated directory, and exercised from there — never from where it was produced."
+        },
+        "ran": { "type": "array", "items": { "type": "string" } },
+        "loaded_extension": {
+          "type": "string",
+          "description": "A shared extension that was loaded from extension_dir after relocation. Absent when the build has none to load."
+        }
+      }
+    }
+  }
+}

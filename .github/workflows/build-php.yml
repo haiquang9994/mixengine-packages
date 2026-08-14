@@ -1,0 +1,96 @@
+name: build php
+
+# Asked for, never automatic. Building PHP for four targets costs real runner minutes and upstream
+# releases on its own schedule, so a human decides when a version is wanted.
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'PHP branch (8.3) or exact version (8.3.33). Windows reaches 7.0; macOS and Linux start at 8.1.'
+        required: true
+        type: string
+      release:
+        description: 'Publish as a GitHub release. Off means build and keep the artifacts for inspection only.'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    # Borrowed, not built: windows.php.net already publishes something relocatable, so this job
+    # fetches, proves and repacks rather than compiling anything.
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: borrow and repack
+        run: python tools/php_windows.py --version "${{ inputs.branch }}" --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: php-windows-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  unix:
+    # Built with static-php-cli. macOS is aarch64 only by policy — MixEngine offers no Intel-only
+    # PHP there — so there is no macos x86_64 leg and its absence is deliberate, not an omission.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-14,       os: macos, arch: aarch64 }
+          - { runner: ubuntu-24.04,    os: linux, arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, os: linux, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: build
+        run: python3 tools/php_unix.py --branch "${{ inputs.branch }}" --out dist
+        timeout-minutes: 180
+      - uses: actions/upload-artifact@v4
+        with:
+          name: php-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    # One release per exact version, holding every artifact of it. The version is read back out of
+    # each manifest rather than taken from the input, because the input may be a branch and the
+    # three legs resolve it independently — Windows against releases.json, the others against
+    # whatever static-php-cli downloaded. If they disagree, they land in different releases, which
+    # is the honest outcome rather than a mislabelled asset.
+    needs: [windows, unix]
+    if: inputs.release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: incoming, merge-multiple: true }
+      - name: publish one release per version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          versions=$(jq -r '.version' incoming/*.json | sort -u)
+          for version in $versions; do
+            tag="php-$version"
+            assets=()
+            for manifest in incoming/*.json; do
+              [ "$(jq -r '.version' "$manifest")" = "$version" ] || continue
+              archive="${manifest%.json}"
+              assets+=("$archive")
+            done
+            echo "== $tag: ${#assets[@]} artifact(s)"
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              gh release create "$tag" \
+                --title "PHP $version" \
+                --notes "Relocatable PHP $version for MixEngine. Every artifact was run from a directory it had been moved to before being published; see mixengine-artifact.json inside each one for what was proven."
+            fi
+            gh release upload "$tag" "${assets[@]}" --clobber
+          done

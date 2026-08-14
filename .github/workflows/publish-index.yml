@@ -1,0 +1,94 @@
+name: publish index
+
+# The index is regenerated from what the releases actually contain, never from what a build job
+# thought it produced. A release that failed to upload is therefore absent from the index rather
+# than present and broken — which is the failure mode worth designing for, because the index is
+# signed and a client has no way to doubt it afterwards.
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Upload the signed index. Off means generate and verify only.'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  INDEX_TAG: index
+  BASE_URL: https://github.com/${{ github.repository }}/releases/download
+  PUBLISHED: https://github.com/${{ github.repository }}/releases/download/index/index.json
+
+jobs:
+  index:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install jsonschema
+
+      - name: collect every published artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # The manifest is what describes an artifact, so an asset without one is not an artifact
+          # and is skipped rather than guessed about.
+          for tag in $(gh release list --limit 500 --json tagName -q '.[].tagName' | grep -v "^${INDEX_TAG}$"); do
+            gh release download "$tag" --dir dist --pattern '*' --clobber
+          done
+          ls -la dist
+
+      - name: generate
+        run: |
+          python tools/mkindex.py \
+            --artifacts dist \
+            --previous "$PUBLISHED" \
+            --base-url "$BASE_URL" \
+            --out dist/index.json
+
+      - name: verify before signing
+        run: |
+          python tools/verify.py dist/index.json --previous "$PUBLISHED" || \
+          python tools/verify.py dist/index.json
+          cat dist/index.json
+
+      - name: sign
+        if: inputs.publish
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "::error::MINISIGN_SECRET_KEY is not set. Generate a key with 'minisign -G',"
+            echo "::error::commit minisign.pub, and put the private key in this repository's secrets."
+            exit 1
+          fi
+          sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+          printf '%s' "$MINISIGN_SECRET_KEY" > minisign.key
+          printf '%s\n' "$MINISIGN_PASSWORD" | minisign -S -m dist/index.json -s minisign.key
+          shred -u minisign.key
+          # Prove the signature against the key in the tree, which is the same key compiled into
+          # MixEngine. Signing with a key nobody can check is worth nothing.
+          minisign -V -m dist/index.json -p minisign.pub
+
+      - name: publish
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view "$INDEX_TAG" >/dev/null 2>&1 || \
+            gh release create "$INDEX_TAG" --title "Package index" \
+              --notes "The signed index MixEngine reads. Always the newest one; the tag is moved rather than added to, so the URL never changes."
+          gh release upload "$INDEX_TAG" dist/index.json dist/index.json.minisig --clobber
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: index
+          path: dist/index.json*
