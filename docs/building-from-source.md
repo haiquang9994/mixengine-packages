@@ -165,11 +165,18 @@ than patching around a current distribution.
 | `xmlError` is const | libxml2 2.12. Pin 2.9.14 |
 | `ext/intl` finds no ICU before 7.4 | those branches only know `icu-config`, which modern ICU dropped |
 | `res_9_dn_expand` undefined on macOS | since the macOS 14 SDK, configure stops asking for `-lresolv` |
+| "Cannot find libz" on a Mac that has zlib | there has been no `/usr/include` since Xcode 10. Pre-7.4 probes read `$DIR/include/zlib.h` and search `/usr/local` and `/usr`, so the SDK has to be named: `--with-zlib=$(xcrun --show-sdk-path)/usr` |
 | ICU 60.3 will not build on macOS | its 2017 `config.sub` predates `arm64-apple-darwin`, and its Darwin makefile emits `-install_namelibicudata.60.dylib` as one argument. Borrow ICU instead |
 
 Before reading any of these too literally, check whether the compiler actually rejected *this*
 source or merely rejected a `configure` probe an hour earlier — see above. Both of the Linux entries
 that looked like PHP failing to compile were that.
+
+The macOS SDK deserves a sentence of its own, because it cuts both ways. A dependency may be
+*pointed* at it — that is the only way `--with-zlib` can be answered before 7.4 — but `<sdk>/usr`
+must never join the include and library flags every compile gets. Put it there and Apple's headers
+sit ahead of the Homebrew prefixes, which is how a build compiles against the system `iconv.h` while
+linking GNU libiconv: no error until a dyld symbol failure at startup.
 
 Two configure-flag habits worth keeping, both learned by shipping past a warning:
 

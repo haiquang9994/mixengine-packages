@@ -199,6 +199,26 @@ def attempt(*command: str, timeout: int = 1800) -> bool:
     return subprocess.run(command, capture_output=True, timeout=timeout).returncode == 0
 
 
+_sdk: list[Path | None] = []
+
+
+def macos_sdk() -> Path | None:
+    """Where macOS keeps the headers and stub libraries that used to be in ``/usr``.
+
+    Since Xcode 10 there is no ``/usr/include`` on a Mac at all, which matters here because build
+    systems written before that assume there is. Asked once and remembered: ``xcrun`` is not free
+    and the answer cannot change mid-build.
+    """
+    if sys.platform != "darwin":
+        return None
+    if not _sdk:
+        answer = subprocess.run(
+            ["xcrun", "--show-sdk-path"], capture_output=True, text=True, timeout=120
+        ).stdout.strip()
+        _sdk.append(Path(answer) if answer else None)
+    return _sdk[0]
+
+
 def fetch(url: str, timeout: int = 300) -> bytes:
     with urllib.request.urlopen(url, timeout=timeout) as response:
         return response.read()
@@ -471,7 +491,9 @@ COMMON = [
     "--enable-pcntl", "--enable-shmop", "--enable-soap", "--enable-sockets",
     "--enable-sysvmsg", "--enable-sysvsem", "--enable-sysvshm",
     "--with-mysqli=mysqlnd", "--with-pdo-mysql=mysqlnd",
-    "--with-curl", "--with-zlib", "--with-sqlite3", "--with-pdo-sqlite",
+    "--with-sqlite3", "--with-pdo-sqlite",
+    # `--with-curl` and `--with-zlib` are not here: before 7.4 they take a directory on macOS. See
+    # the branch split below.
 ]
 
 # Flags that take a directory in every branch this recipe covers, so a keg-only Homebrew prefix can
@@ -511,6 +533,8 @@ def configure_arguments(branch: tuple[int, int], prefixes: dict[str, Path]) -> l
     arguments.append(switch("libpq", "--with-pdo-pgsql"))
 
     if branch >= (7, 4):
+        # Both go through pkg-config from 7.4, where a directory is not what the flag means.
+        arguments += ["--with-curl", "--with-zlib"]
         arguments += ["--enable-gd", "--with-jpeg", "--with-freetype", "--with-zip", "--with-libxml"]
         if "webp" in prefixes or have_library("libwebp"):
             arguments.append("--with-webp")
@@ -518,6 +542,9 @@ def configure_arguments(branch: tuple[int, int], prefixes: dict[str, Path]) -> l
         # a warning rather than an error and therefore easy to ship past. mbstring finds oniguruma
         # through pkg-config, and PKG_CONFIG_PATH already points at ours when we built it.
     else:
+        # Switches, not hints: dropping either would drop the extension. On Linux there is no prefix
+        # for them and the bare form is right, because `/usr/include/zlib.h` is where they look.
+        arguments += [switch("curl", "--with-curl"), switch("zlib", "--with-zlib")]
         arguments += ["--with-gd", "--enable-zip"]
         arguments += hint("libpng", "--with-png-dir")
         arguments += hint("jpeg", "--with-jpeg-dir")
@@ -545,6 +572,15 @@ def dependency_prefixes(built_from_source: dict[str, Path]) -> dict[str, Path]:
     if sys.platform == "darwin":
         found = {name: brew_prefix(formula) for name, formula in BREW_FORMULAE.items()}
         prefixes = {name: prefix for name, prefix in found.items() if prefix}
+        sdk = macos_sdk()
+        if sdk and (sdk / "usr" / "include" / "zlib.h").is_file():
+            # zlib and curl are Apple's, and before 7.4 PHP hunts for them by reading
+            # `$DIR/include/zlib.h` and `$DIR/include/curl/easy.h`, searching `/usr/local` and
+            # `/usr`. Neither exists on a macOS since Xcode 10 — the system's headers moved into the
+            # SDK — so a bare `--with-zlib` fails with "Cannot find libz" on a machine that has had
+            # zlib all along. 7.4 and newer are unaffected: they ask pkg-config, which is answered
+            # by putting the SDK on its path below.
+            prefixes["zlib"] = prefixes["curl"] = sdk / "usr"
     else:
         prefixes = {}
     prefixes.update(built_from_source)
@@ -553,23 +589,29 @@ def dependency_prefixes(built_from_source: dict[str, Path]) -> dict[str, Path]:
 
 def build_environment(prefixes: dict[str, Path], extra: Path) -> dict[str, str]:
     environment = {**os.environ}
+    sdk = macos_sdk()
+
+    # Prefixes the platform owns rather than this recipe. A dependency may still be *pointed* at one
+    # of these — that is how `--with-zlib` is answered on macOS — but neither may go into the flags
+    # every compile gets. `-I/usr/include` shadows the SDK; `-I<sdk>/usr/include` is worse, because
+    # it puts Apple's headers ahead of the Homebrew prefixes further down the list. That is how a
+    # build ends up compiling against the system's `iconv.h` while linking GNU libiconv, which does
+    # not fail until a `dyld` symbol error at startup.
+    platform_owned = {Path("/usr")} | ({sdk / "usr"} if sdk else set())
+
     pkgconfig, includes, libraries = [], [], []
     for prefix in [extra] + sorted(set(prefixes.values())):
-        if prefix == Path("/usr"):
-            continue          # already where the compiler looks; adding it only shadows the SDK
+        if prefix in platform_owned:
+            continue
         pkgconfig.append(str(prefix / "lib" / "pkgconfig"))
         includes.append(f"-I{prefix / 'include'}")
         libraries.append(f"-L{prefix / 'lib'}")
 
-    if sys.platform == "darwin":
+    if sdk:
         # curl, zlib and sqlite are Apple's on macOS, and from 7.4 PHP looks for them through
         # pkg-config. Their `.pc` files live inside the SDK, which is not on pkg-config's default
         # search path — so it is put there rather than relied upon.
-        sdk = subprocess.run(
-            ["xcrun", "--show-sdk-path"], capture_output=True, text=True, timeout=120
-        ).stdout.strip()
-        if sdk:
-            pkgconfig.append(f"{sdk}/usr/lib/pkgconfig")
+        pkgconfig.append(str(sdk / "usr" / "lib" / "pkgconfig"))
 
     existing = environment.get("PKG_CONFIG_PATH")
     environment["PKG_CONFIG_PATH"] = os.pathsep.join(pkgconfig + ([existing] if existing else []))
