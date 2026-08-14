@@ -41,6 +41,11 @@ stranger's configuration file that happens to sit where the build machine's did.
 makes ``phpize`` work: an extension is configured through ``php-config``, which answers with the
 prefix, so the prefix has to be somewhere that really exists on the build machine.
 
+The per-branch configure table below is archaeology, and so is a good deal of what is *not* in it.
+``docs/building-from-source.md`` records the failures behind both — including the four rounds spent
+on extensions that were never loaded because ``HAVE_LIBDL`` was missing, which is the reason
+``-ldl`` appears in ``LDFLAGS`` for no visible reason.
+
 .. _static-php-cli: https://github.com/crazywhalecc/static-php-cli
 """
 
@@ -412,6 +417,12 @@ def icu_config_shim(prefix: Path, icu: Path) -> Path:
     Building an ICU old enough to still ship the real thing was the alternative, and it costs more
     than it returns: see the note in SOURCE_LIBRARIES. The version is read from ICU's own pkg-config
     file rather than from the formula name, because the formula name is where it is least reliable.
+
+    Everything this recipe generates is written as UTF-8, including shell. It used to be written as
+    ASCII on the reasoning that generated program text has no business carrying anything else, and
+    that cost a macOS build: the em dash in the comment above is inside the template, so every
+    branch that needs this shim — 7.0 through 7.3, and only those — died here rather than in a
+    compiler. A build must not be able to fail over the punctuation in its own comments.
     """
     version = "60.1"
     for candidate in (icu / "lib" / "pkgconfig" / "icu-uc.pc", icu / "lib" / "pkgconfig" / "icu-i18n.pc"):
@@ -423,7 +434,7 @@ def icu_config_shim(prefix: Path, icu: Path) -> Path:
                 break
     (prefix / "bin").mkdir(parents=True, exist_ok=True)
     shim = prefix / "bin" / "icu-config"
-    shim.write_text(ICU_CONFIG_SHIM.format(prefix=icu, version=version), encoding="ascii")
+    shim.write_text(ICU_CONFIG_SHIM.format(prefix=icu, version=version), encoding="utf-8")
     shim.chmod(0o755)
     print(f"wrote an icu-config for ICU {version} at {shim}")
     return shim
@@ -571,7 +582,30 @@ def build_environment(prefixes: dict[str, Path], extra: Path) -> dict[str, str]:
     # returning `_Bool` where `mc_mincover_t *` was expected") and `xdebug` ("too many arguments to
     # xdebug_develop_minit"), neither of which had anything to do with the PHP version they were
     # being built against.
-    environment["CFLAGS"] = f"-std=gnu17 {environment.get('CFLAGS', '')}".strip()
+    #
+    # Choosing the standard is not enough on its own, because the second half of that change was
+    # about *diagnostics*: gcc 14 and clang 16 turned six long-standing warnings into errors. The
+    # code they reject is mostly not PHP's — it is `configure`'s own probe programs, written when
+    # implicit declarations were ordinary C. A probe that fails to compile does not stop the build;
+    # it answers "no", and autoconf writes the wrong answer into `php_config.h`:
+    #
+    #   * 7.0 — the broken-sprintf probe is `main() {char buf[20];exit(sprintf(buf,"…")!=11);}`,
+    #     with no includes at all. Rejected, so configure concludes sprintf *is* broken and declares
+    #     `int zend_sprintf(…)` in `php_config.h`. That header has no include guard, `ext/intl`
+    #     reaches it once at C++ scope and once inside `extern "C"`, and the build dies on a
+    #     conflicting linkage error naming a function nobody asked for.
+    #   * 7.3 — the readdir_r probe passes a `DIR *` to `close()`. Rejected, so configure falls
+    #     through to "old-style", and `main/reentrancy.c` calls the two-argument readdir_r that no
+    #     libc has shipped in twenty years.
+    #
+    # Both look like PHP failing to compile. Neither is. Restoring the era's diagnostics is the
+    # same argument as choosing the era's distribution, applied to the compiler's opinions.
+    relaxed = ["implicit-function-declaration", "implicit-int", "int-conversion",
+               "incompatible-pointer-types"]
+    if sys.platform != "darwin":
+        relaxed += ["return-mismatch", "declaration-missing-parameter-type"]   # gcc spellings
+    permit = " ".join(f"-Wno-error={name}" for name in relaxed)
+    environment["CFLAGS"] = f"-std=gnu17 {permit} {environment.get('CFLAGS', '')}".strip()
     environment["CXXFLAGS"] = f"-std=gnu++17 {environment.get('CXXFLAGS', '')}".strip()
 
     link = list(libraries)
@@ -773,7 +807,7 @@ def loads(php: Path, extension_dir: Path, module: str, ini: Path) -> tuple[bool,
     if module == "redis" and (extension_dir / "igbinary.so").exists():
         lines.append(f'extension="{extension_dir / "igbinary.so"}"\n')
     lines.append(f'{directive}="{extension_dir / (module + ".so")}"\n')
-    ini.write_text("".join(lines), encoding="ascii")
+    ini.write_text("".join(lines), encoding="utf-8")
 
     attempt = subprocess.run(
         [str(php), "-c", str(ini), "-r", f"echo extension_loaded({name!r}) ? 'yes' : 'no';"],
@@ -951,7 +985,7 @@ def smoke(tree: Path, provides: dict[str, str], shared: list[str]) -> tuple[str,
             run(str(elsewhere / path), "-v")
 
     script = elsewhere.parent / "smoke.php"
-    script.write_text(SMOKE_SCRIPT, encoding="ascii")
+    script.write_text(SMOKE_SCRIPT, encoding="utf-8")
     answer = run(str(elsewhere / "bin" / "php"), "-n", str(script)).strip()
     if not answer.endswith("OK"):
         raise SystemExit(f"the relocated build cannot use its own libraries: {answer}")

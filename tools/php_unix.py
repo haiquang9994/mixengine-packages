@@ -224,7 +224,7 @@ def smoke(tree: Path, provides: dict[str, str], shared: list[str]) -> tuple[str,
             f'display_errors=stderr\n'
             f'extension_dir="{elsewhere / "ext"}"\n'
             f'zend_extension="{elsewhere / "ext" / (candidate + ".so")}"\n',
-            encoding="ascii",
+            encoding="utf-8",
         )
         answer = run(
             str(elsewhere / "bin" / "php"), "-n", "-c", str(ini),

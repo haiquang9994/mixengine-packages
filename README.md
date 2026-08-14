@@ -19,6 +19,7 @@ tools/        the recipes themselves, plus index generation and verification —
               only for anything that runs on a build machine; `verify.py` alone pulls in
               `jsonschema`
 .github/      the workflows that run the recipes on GitHub runners
+docs/         what building the "built" rows taught us, for whoever adds the next one
 ```
 
 Nothing here is built on a developer's machine on purpose. There is no macOS or Linux in this
@@ -49,6 +50,11 @@ runs a handful of times rather than being kept current for every security releas
 compiles them and `relocate.py` makes the result carry its own libraries. On macOS both
 architectures are built on a runner of their own: nothing is cross-compiled and nothing runs under
 Rosetta, so a branch that will not compile natively for an architecture is simply not offered there.
+
+Getting those two rows green took ten rounds of CI, and almost all of it went on builds that exited
+zero and shipped something wrong rather than on code that failed to compile.
+[`docs/building-from-source.md`](docs/building-from-source.md) is what that was worth keeping — read
+it before opening any other **built** cell, because little of it is about PHP.
 
 ## Repack, do not rearrange
 

@@ -57,21 +57,38 @@ def fetch(url: str) -> bytes:
         return response.read()
 
 
-def newest_patch(branch: str) -> str:
-    """Turn ``8.3`` into the newest patch upstream currently ships for it.
+def newest_patch(branch: str, arch: str) -> str:
+    """Turn ``8.3`` into the newest patch of it there is, supported or not.
 
-    Only a supported branch can answer this — ``releases.json`` describes those and nothing else. An
-    archived branch has no "newest": it has a last, and asking for it by name is the caller saying
-    which one they mean, so they are required to.
+    ``releases.json`` answers for supported branches. An archived branch is not in it, and used to
+    be refused here on the reasoning that it has no "newest" — only a last — so naming it was the
+    caller's job. That reasoning stopped holding the moment the Unix recipes reached back to 7.0:
+    they resolve a branch to its final patch by themselves, so one dispatch of ``7.0`` produced four
+    artifacts of 7.0.33 and one error from this leg alone.
+
+    A frozen branch is in fact the easier of the two to answer for. "Newest" of a supported branch
+    is a moving claim; the last patch of a branch that will never have another is a fact, and the
+    archive listing states it. So it is read from there.
     """
     releases = json.loads(fetch(f"{RELEASES}/releases.json"))
     current = releases.get(branch)
-    if not current:
+    if current:
+        return current["version"]
+
+    zip_arch = {"x86_64": "x64"}[arch]
+    listing = fetch(f"{ARCHIVES}/").decode("utf-8", "replace")
+    # Exactly three numeric parts: `php-7.0.0RC1-nts-…` is in there too, and a release candidate is
+    # not a patch of anything.
+    pattern = re.compile(
+        rf"php-({re.escape(branch)}\.\d+)-nts-Win32-[A-Za-z]+\d+-{zip_arch}\.zip"
+    )
+    found = {m.group(1) for m in pattern.finditer(listing)}
+    if not found:
         raise SystemExit(
-            f"php {branch} is not a currently-supported branch, so it has no newest patch. "
-            f"Name the exact version — every one of them is in archives/."
+            f"php {branch} is in neither releases.json nor archives/ as an nts {zip_arch} build. "
+            f"Name an exact version if it is somewhere else."
         )
-    return current["version"]
+    return max(found, key=lambda version: tuple(int(part) for part in version.split(".")))
 
 
 def resolve(version: str, arch: str) -> tuple[str, str | None]:
@@ -218,7 +235,7 @@ def smoke(tree: Path, version: str, manifest: dict) -> dict:
             f'display_errors=stderr\n'
             f'extension_dir="{elsewhere / "ext"}"\n'
             f'extension="php_{candidate}.dll"\n',
-            encoding="ascii",
+            encoding="utf-8",
         )
         answer, complaint = php(
             elsewhere / "php.exe",
@@ -245,7 +262,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--version", required=True,
-        help="exact PHP version (8.3.33), or a supported branch (8.3) for its newest patch",
+        help="exact PHP version (8.3.33), or a branch (8.3) for its newest patch",
     )
     parser.add_argument("--arch", default="x86_64", choices=["x86_64"])
     parser.add_argument("--out", default="dist", type=Path)
@@ -255,7 +272,7 @@ def main() -> None:
         raise SystemExit("this recipe smoke-tests the binaries it packs, so it runs on Windows")
 
     if args.version.count(".") == 1:
-        args.version = newest_patch(args.version)
+        args.version = newest_patch(args.version, args.arch)
         print(f"branch resolved to {args.version}")
 
     url, upstream_hash = resolve(args.version, args.arch)

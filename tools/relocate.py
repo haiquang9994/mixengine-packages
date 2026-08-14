@@ -29,6 +29,10 @@ dyld shared cache), and there is nothing there to copy even if it were wanted.
 load at all — it is killed by the kernel rather than diagnosed by the linker. So every file this
 touches is re-signed ad-hoc afterwards. Missing that step produces a build that works on the Intel
 runner and dies on arm64 with "Killed: 9" and no explanation.
+
+Three more Mach-O traps, and the reason `verify` runs from a directory the build has never named,
+are written up in ``docs/building-from-source.md``. Each of them cost a round of CI, and each
+produced an archive that passed every check made in place.
 """
 
 from __future__ import annotations
