@@ -444,21 +444,70 @@ def macos_dependencies(work: Path, extra: Path) -> dict[str, Path]:
     return built
 
 
+# What a narrow view of the SDK has to contain for PHP to accept it as a library's home.
+SDK_VIEWS = {
+    "zlib": (["zlib.h", "zconf.h"], ["libz.tbd", "libz.dylib"], "zlib.pc"),
+    "curl": (["curl"], ["libcurl.tbd", "libcurl.dylib"], "libcurl.pc"),
+}
+
+
+def sdk_view(extra: Path, name: str) -> Path | None:
+    """A prefix holding *name* and nothing else, linked out of the macOS SDK.
+
+    Handing PHP ``--with-zlib=<sdk>/usr`` does find zlib, and then does something else: ext/zlib
+    calls ``PHP_ADD_INCLUDE`` and ``PHP_ADD_LIBPATH`` with whatever directory it was given, and for
+    a static build those go into the flags *every* compile and link gets. The whole SDK therefore
+    lands at the front of both search paths, ahead of the Homebrew prefixes — and the SDK has a
+    `libreadline` that is really libedit, and a `libiconv` that is Apple's rather than GNU's. The
+    link then fails on `_rl_done` and `_libiconv_open`, in extensions that have nothing to do with
+    zlib, having found real libraries that are the wrong ones.
+
+    Keeping the SDK out of *our* flags was not enough, because this path never went through them.
+    So what PHP is pointed at is a directory containing one library: symlinks are free, and a prefix
+    that holds only what it claims to hold cannot shadow anything.
+    """
+    sdk = macos_sdk()
+    if not sdk:
+        return None
+    headers, libraries, package = SDK_VIEWS[name]
+    root = extra / f"sdk-{name}"
+    linked = False
+    for source, destination in (
+        *((sdk / "usr" / "include" / header, root / "include" / header) for header in headers),
+        *((sdk / "usr" / "lib" / library, root / "lib" / library) for library in libraries),
+        (sdk / "usr" / "lib" / "pkgconfig" / package, root / "lib" / "pkgconfig" / package),
+    ):
+        if not source.exists() or destination.exists():
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.symlink_to(source)
+        linked = linked or destination.parent.name == "include"
+    return root if linked else None
+
+
 ICU_CONFIG_SHIM = """#!/bin/sh
 # Written by mixengine-packages. ext/intl before PHP 7.4 finds ICU only by running `icu-config`,
 # which ICU deprecated in 61 and has since stopped shipping. This answers the handful of questions
 # PHP's PHP_SETUP_ICU actually asks, from a prefix fixed at build time, and is not general-purpose.
+#
+# Every option is answered, not just the first: PHP asks `icu-config --ldflags --ldflags-icuio` in
+# one call. A shim that reads only "$1" silently drops -licuio, and the build then runs to
+# completion and fails at the last step, linking the CLI, on _u_sprintf.
 prefix="{prefix}"
-case "$1" in
-  --prefix|--prefix=*) echo "$prefix" ;;
-  --version) echo "{version}" ;;
-  --cflags|--cxxflags) echo "" ;;
-  --cppflags|--cppflags-searchpath) echo "-I$prefix/include" ;;
-  --ldflags|--ldflags-searchpath) echo "-L$prefix/lib -licui18n -licuuc -licudata" ;;
-  --ldflags-icuio) echo "-licuio" ;;
-  --ldflags-libsonly) echo "-licui18n -licuuc -licudata" ;;
-  *) echo "" ;;
-esac
+answer=""
+for option in "$@"; do
+  case "$option" in
+    --prefix|--prefix=*) answer="$answer $prefix" ;;
+    --version) answer="$answer {version}" ;;
+    --cflags|--cxxflags) ;;
+    --cppflags|--cppflags-searchpath) answer="$answer -I$prefix/include" ;;
+    --ldflags-searchpath) answer="$answer -L$prefix/lib" ;;
+    --ldflags-libsonly) answer="$answer -licui18n -licuuc -licudata" ;;
+    --ldflags) answer="$answer -L$prefix/lib -licui18n -licuuc -licudata" ;;
+    --ldflags-icuio) answer="$answer -licuio" ;;
+  esac
+done
+echo "$answer"
 """
 
 
@@ -593,7 +642,7 @@ def configure_arguments(branch: tuple[int, int], prefixes: dict[str, Path]) -> l
     return arguments
 
 
-def dependency_prefixes(built_from_source: dict[str, Path]) -> dict[str, Path]:
+def dependency_prefixes(built_from_source: dict[str, Path], extra: Path) -> dict[str, Path]:
     """Where each dependency lives — which on macOS is nowhere the compiler looks by default.
 
     On Linux the answer is "where they always are", and saying so explicitly is worse than saying
@@ -604,15 +653,16 @@ def dependency_prefixes(built_from_source: dict[str, Path]) -> dict[str, Path]:
     if sys.platform == "darwin":
         found = {name: brew_prefix(formula) for name, formula in BREW_FORMULAE.items()}
         prefixes = {name: prefix for name, prefix in found.items() if prefix}
-        sdk = macos_sdk()
-        if sdk and (sdk / "usr" / "include" / "zlib.h").is_file():
-            # zlib and curl are Apple's, and before 7.4 PHP hunts for them by reading
-            # `$DIR/include/zlib.h` and `$DIR/include/curl/easy.h`, searching `/usr/local` and
-            # `/usr`. Neither exists on a macOS since Xcode 10 — the system's headers moved into the
-            # SDK — so a bare `--with-zlib` fails with "Cannot find libz" on a machine that has had
-            # zlib all along. 7.4 and newer are unaffected: they ask pkg-config, which is answered
-            # by putting the SDK on its path below.
-            prefixes["zlib"] = prefixes["curl"] = sdk / "usr"
+        # zlib and curl are Apple's, and before 7.4 PHP hunts for them by reading
+        # `$DIR/include/zlib.h` and `$DIR/include/curl/easy.h`, searching `/usr/local` and `/usr`.
+        # Neither exists on a macOS since Xcode 10 — the system's headers moved into the SDK — so a
+        # bare `--with-zlib` fails with "Cannot find libz" on a machine that has had zlib all along.
+        # What PHP is given is a view of the SDK holding one library; see `sdk_view` for why not
+        # the SDK itself. 7.4 and newer ask pkg-config instead and are unaffected either way.
+        for name in SDK_VIEWS:
+            view = sdk_view(extra, name)
+            if view:
+                prefixes[name] = view
     else:
         prefixes = {}
     prefixes.update(built_from_source)
@@ -680,7 +730,12 @@ def build_environment(prefixes: dict[str, Path], extra: Path) -> dict[str, str]:
         relaxed += ["return-mismatch", "declaration-missing-parameter-type"]   # gcc spellings
     permit = " ".join(f"-Wno-error={name}" for name in relaxed)
     environment["CFLAGS"] = f"-std=gnu17 {permit} {environment.get('CFLAGS', '')}".strip()
-    environment["CXXFLAGS"] = f"-std=gnu++17 {environment.get('CXXFLAGS', '')}".strip()
+    # `register` was removed as a storage class in C++17, and PHP 7 still has it in headers that
+    # ext/intl's C++ includes — Zend/zend_string.h, Zend/zend_hash.h, main/snprintf.h. gcc calls
+    # that a warning and clang calls it an error, which is why only the macOS legs ever saw it.
+    environment["CXXFLAGS"] = (
+        f"-std=gnu++17 -Wno-register {environment.get('CXXFLAGS', '')}".strip()
+    )
 
     link = list(libraries)
     if sys.platform.startswith("linux"):
@@ -1161,7 +1216,7 @@ def main() -> None:
             # not this release still ships one. ext/intl before 7.4 finds ICU no other way.
             icu_config_shim(extra, extra)
 
-    prefixes = dependency_prefixes(built_from_source)
+    prefixes = dependency_prefixes(built_from_source, extra)
     environment = build_environment(prefixes, extra)
     if operating_system == "macos" and branch < (7, 4):
         # ICU 61 stopped emitting `using namespace icu;` from its headers, and ext/intl on these

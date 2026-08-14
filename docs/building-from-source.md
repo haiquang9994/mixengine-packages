@@ -196,11 +196,18 @@ outside the source at all — leaving no choice but to build a pinned ICU 67 alo
 that only compiles against a *range* of versions is the strongest reason to control the toolchain
 rather than accept whatever a package manager installed this month.
 
-The macOS SDK deserves a sentence of its own, because it cuts both ways. A dependency may be
-*pointed* at it — that is the only way `--with-zlib` can be answered before 7.4 — but `<sdk>/usr`
-must never join the include and library flags every compile gets. Put it there and Apple's headers
-sit ahead of the Homebrew prefixes, which is how a build compiles against the system `iconv.h` while
-linking GNU libiconv: no error until a dyld symbol failure at startup.
+**A prefix you hand a build system becomes part of every compile.** This one is worth stating on its
+own, because it is invisible and it bites twice. `--with-zlib=<dir>` does not only find zlib:
+ext/zlib passes that directory to `PHP_ADD_INCLUDE` and `PHP_ADD_LIBPATH`, and in a static build
+those land in the flags *every* compile and link gets. Point it at `<sdk>/usr` — the obvious answer,
+since that is where the system's zlib now lives — and the whole SDK moves to the front of both
+search paths, ahead of the Homebrew prefixes. The SDK has a `libreadline` that is really libedit and
+a `libiconv` that is Apple's rather than GNU's, so the link fails on `_rl_done` and `_libiconv_open`
+in extensions that have nothing to do with zlib, having found real libraries that are the wrong
+ones. Keeping the SDK out of *our* flags did not help; this path never went through them.
+
+The fix generalises: **hand a build system a prefix containing only what you are claiming it
+contains.** A directory of symlinks costs nothing and cannot shadow anything.
 
 Two configure-flag habits worth keeping, both learned by shipping past a warning:
 
