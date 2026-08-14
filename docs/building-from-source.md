@@ -160,6 +160,8 @@ than patching around a current distribution.
 | --- | --- |
 | `false` is not a null pointer constant; `f()` takes no parameters | gcc-toolset defaults to **C23**. Ask for `-std=gnu17` / `-std=gnu++17` |
 | `ext/intl` cannot find `TRUE`/`FALSE` | ICU 68 removed the macros. `-DU_DEFINE_FALSE_AND_TRUE=1` |
+| `unknown type name 'UnicodeString'` | ICU 61 stopped emitting `using namespace icu;`. `-DU_USING_ICU_NAMESPACE=1` |
+| `operator==` overrides with the wrong return type | ICU 70 changed those virtuals from `UBool` to `bool`. **No macro fixes this** — the version guard has to be in the source, so anything released before ICU 70 needs an ICU older than 70 |
 | `phpize` fails on ≤ 7.3 | autoconf 2.70 broke it. Build 2.69, or use a distribution that has it |
 | `RSA_SSLV23_PADDING` undefined | OpenSSL 3 removed it. PHP 7 wants 1.1.1 |
 | `xmlError` is const | libxml2 2.12. Pin 2.9.14 |
@@ -171,6 +173,13 @@ than patching around a current distribution.
 Before reading any of these too literally, check whether the compiler actually rejected *this*
 source or merely rejected a `configure` probe an hour earlier — see above. Both of the Linux entries
 that looked like PHP failing to compile were that.
+
+The ICU rows are worth one more sentence, because they are the sharpest evidence for the
+old-distribution argument. On Linux, inside AlmaLinux 8, none of them happen: ICU 60 is simply what
+is there. On macOS all three had to be discovered, and the third cannot be worked around from
+outside the source at all — leaving no choice but to build a pinned ICU 67 alongside. A dependency
+that only compiles against a *range* of versions is the strongest reason to control the toolchain
+rather than accept whatever a package manager installed this month.
 
 The macOS SDK deserves a sentence of its own, because it cuts both ways. A dependency may be
 *pointed* at it — that is the only way `--with-zlib` can be answered before 7.4 — but `<sdk>/usr`

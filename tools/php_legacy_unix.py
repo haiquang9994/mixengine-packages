@@ -88,10 +88,10 @@ PECL = ["igbinary", "redis", "mongodb", "xdebug"]
 # Libraries this recipe compiles rather than takes from the system, keyed by the name the configure
 # table below knows them as. `provides` is the key each one answers for there.
 #
-# Two different reasons appear in this table. On Linux the first three are built only when the image
-# turns out not to package them, because they move between EPEL, CRB and nowhere. On macOS the last
-# four are built **always**, because there is no old distribution to build inside and these are
-# precisely the libraries whose APIs moved under PHP 7's feet:
+# Two different reasons appear in this table. On Linux `oniguruma`, `libzip` and `libwebp` are built
+# only when the image turns out not to package them, because they move between EPEL, CRB and nowhere.
+# On macOS the rest are built **always**, because there is no old distribution to build inside and
+# these are precisely the libraries whose APIs moved under PHP 7's feet:
 #
 #   openssl   PHP gained OpenSSL 3 support in 8.1. Everything older uses RSA_SSLV23_PADDING, which
 #             OpenSSL 3 removed, so it does not compile against the version Homebrew has.
@@ -100,14 +100,32 @@ PECL = ["igbinary", "redis", "mongodb", "xdebug"]
 #   libxslt   only because it has to match the libxml2 above — two libxml2 in one process is not a
 #             thing that can be shipped.
 #
-# ICU is deliberately *not* here, though it has the same shape of problem — modern ICU dropped
-# `icu-config`, which is the only way ext/intl before 7.4 finds it, and ICU 68 removed the
-# TRUE/FALSE macros that code uses. Building 60.3 was tried and is not worth what it costs: its
-# 2017 `config.sub` does not know `arm64-apple-darwin`, and its Darwin makefile hands a current
-# clang `-install_namelibicudata.60.dylib` as one argument. Both are fixable and neither is
-# interesting. Homebrew's ICU is used instead, with `icu_config_shim` standing in for the missing
-# tool and ICU's own `U_DEFINE_FALSE_AND_TRUE` restoring the macros — see below.
+#   icu       the largest one, and the clearest illustration of why the Linux legs build inside an
+#             old distribution. AlmaLinux 8 has ICU 60 and every branch here compiles against it
+#             untouched; macOS has whatever Homebrew installed this month, currently 78, and
+#             ext/intl before 7.4 does not compile against it for two independent reasons. ICU 61
+#             stopped putting its classes into the global namespace, so 7.0 fails with "unknown type
+#             name 'UnicodeString'; did you mean 'icu_78::UnicodeString'?". ICU 70 changed the
+#             virtuals in `CharacterIterator` from returning `UBool` to returning `bool`, so 7.3
+#             fails overriding `operator==` with the wrong return type. The second has no macro and
+#             no workaround: 7.4.33 carries `#if U_ICU_VERSION_MAJOR_NUM >= 70` around that
+#             declaration, and 7.3.33 was released before ICU 70 existed, so it never could.
+#
+#             67.1 is therefore the pin: the last ICU that still defines TRUE/FALSE natively, three
+#             releases before the `bool` change, and new enough that its autotools handle a modern
+#             macOS — which 60.3 did not, having a 2017 `config.sub` that does not know Apple
+#             Silicon and a Darwin makefile that emits `-install_namelibicudata.60.dylib` as one
+#             argument. It still needs `U_USING_ICU_NAMESPACE=1`, because 67 is past ICU 61.
 SOURCE_LIBRARIES = {
+    "icu": {
+        "url": "https://github.com/unicode-org/icu/releases/download/release-67-1/icu4c-67_1-src.tgz",
+        "build": "autotools", "subdirectory": "source", "pkgconfig": "icu-uc", "provides": "icu",
+        # `--build` and `--host` are named, and named identically so this stays a native build:
+        # left to itself, ICU's `config.guess` reports `arm64-apple-darwin`, which a `config.sub`
+        # of this vintage rejects outright. `aarch64` is the spelling it has understood for years.
+        "arguments": ["--build={triple}", "--host={triple}", "--disable-samples",
+                      "--disable-tests", "--disable-extras", "--disable-layoutex"],
+    },
     "oniguruma": {
         "url": "https://github.com/kkos/oniguruma/releases/download/v6.9.9/onig-6.9.9.tar.gz",
         "build": "autotools", "pkgconfig": "oniguruma", "provides": "oniguruma",
@@ -346,8 +364,12 @@ def build_library(work: Path, prefix: Path, name: str) -> None:
         unpacked = unpacked / recipe["subdirectory"]
 
     jobs = str(os.cpu_count() or 2)
-    triple = f"{platform.machine()}-apple-darwin" if sys.platform == "darwin" \
-        else f"{platform.machine()}-pc-linux-gnu"
+    # `arm64` is what the kernel calls it and `aarch64` is what config.sub has understood since long
+    # before Apple Silicon existed. Old autotools know only the second spelling, so that is the one
+    # handed to anything old enough to need telling.
+    machine = {"arm64": "aarch64"}.get(platform.machine(), platform.machine())
+    triple = f"{machine}-apple-darwin" if sys.platform == "darwin" \
+        else f"{machine}-pc-linux-gnu"
     arguments = [argument.format(prefix=prefix, triple=triple)
                  for argument in recipe.get("arguments", [])]
     environment = {**os.environ, **recipe.get("environment", {})}
@@ -414,9 +436,8 @@ def macos_dependencies(work: Path, extra: Path) -> dict[str, Path]:
 
 ICU_CONFIG_SHIM = """#!/bin/sh
 # Written by mixengine-packages. ext/intl before PHP 7.4 finds ICU only by running `icu-config`,
-# which ICU deprecated in 61 and removed in 64 — so there is nothing to run on any ICU a current
-# Homebrew will install. This answers the handful of questions PHP's PHP_SETUP_ICU actually asks,
-# from a prefix fixed at build time, and is not general-purpose.
+# which ICU deprecated in 61 and has since stopped shipping. This answers the handful of questions
+# PHP's PHP_SETUP_ICU actually asks, from a prefix fixed at build time, and is not general-purpose.
 prefix="{prefix}"
 case "$1" in
   --prefix|--prefix=*) echo "$prefix" ;;
@@ -432,11 +453,12 @@ esac
 
 
 def icu_config_shim(prefix: Path, icu: Path) -> Path:
-    """Put an ``icu-config`` in *prefix* that answers for Homebrew's ICU.
+    """Put an ``icu-config`` in *prefix* that answers for the ICU at *icu*.
 
-    Building an ICU old enough to still ship the real thing was the alternative, and it costs more
-    than it returns: see the note in SOURCE_LIBRARIES. The version is read from ICU's own pkg-config
-    file rather than from the formula name, because the formula name is where it is least reliable.
+    Whether the pinned release still ships a real one is not worth depending on — it is written
+    afterwards either way, so there is exactly one answer and it is this recipe's. The version is
+    read from ICU's own pkg-config file rather than assumed from the pin, because a shim that lies
+    about the version is worse than no shim: PHP compares it.
 
     Everything this recipe generates is written as UTF-8, including shell. It used to be written as
     ASCII on the reasoning that generated program text has no business carrying anything else, and
@@ -1112,21 +1134,28 @@ def main() -> None:
         built_from_source = macos_dependencies(work, extra)
         if branch < (7, 4):
             autoconf_269(work, extra)
-            # ext/intl before 7.4 looks for `<--with-icu-dir>/bin/icu-config`, so the directory PHP
-            # is pointed at is the one holding the shim, not Homebrew's.
-            icu = brew_prefix("icu4c")
-            if icu:
-                icu_config_shim(extra, icu)
-                built_from_source["icu"] = extra
+            # Homebrew's ICU is what 7.4 and newer build against, and what nothing older can. See
+            # SOURCE_LIBRARIES: ext/intl on these branches predates both the namespace change and
+            # the `bool` change, and the second is not fixable from outside the source.
+            print("building icu from source: see SOURCE_LIBRARIES for why this one is pinned")
+            build_library(work, extra, "icu")
+            built_from_source["icu"] = extra
+            # Written after ICU is installed, so ours is the `icu-config` that survives whether or
+            # not this release still ships one. ext/intl before 7.4 finds ICU no other way.
+            icu_config_shim(extra, extra)
 
     prefixes = dependency_prefixes(built_from_source)
     environment = build_environment(prefixes, extra)
     if operating_system == "macos" and branch < (7, 4):
-        # ICU 68 removed the TRUE/FALSE macros that ext/intl still uses on these branches. This is
-        # ICU's own escape hatch for exactly that, and it is narrower than defining them globally:
-        # only ICU's headers are affected, so nothing else in PHP gets a surprise macro.
+        # ICU 61 stopped emitting `using namespace icu;` from its headers, and ext/intl on these
+        # branches spells its types unqualified. This is ICU's own switch for exactly that, and it
+        # is narrower than a `using` of our own: only ICU's headers are affected.
+        #
+        # The TRUE/FALSE macros are not an issue against the pinned 67, which still defines them —
+        # they went in 68. Bumping that pin means adding `-DU_DEFINE_FALSE_AND_TRUE=1` back, and
+        # cannot go past 69 at all.
         environment["CPPFLAGS"] = (
-            environment.get("CPPFLAGS", "") + " -DU_DEFINE_FALSE_AND_TRUE=1"
+            environment.get("CPPFLAGS", "") + " -DU_USING_ICU_NAMESPACE=1"
         ).strip()
     source, version = source_tree(work, arguments.branch)
 
