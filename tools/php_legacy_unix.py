@@ -80,21 +80,63 @@ CEILING = (8, 1)
 # off is not a debugger anybody wants.
 PECL = ["igbinary", "redis", "mongodb", "xdebug"]
 
-# Built from source only when the distribution has no package for them. AlmaLinux 8 has most of what
-# PHP 7 wants; these three move between EPEL, CRB and nowhere depending on the image.
+# Libraries this recipe compiles rather than takes from the system, keyed by the name the configure
+# table below knows them as. `provides` is the key each one answers for there.
+#
+# Two different reasons appear in this table. On Linux the first three are built only when the image
+# turns out not to package them, because they move between EPEL, CRB and nowhere. On macOS the last
+# four are built **always**, because there is no old distribution to build inside and these are
+# precisely the libraries whose APIs moved under PHP 7's feet:
+#
+#   openssl   PHP gained OpenSSL 3 support in 8.1. Everything older uses RSA_SSLV23_PADDING, which
+#             OpenSSL 3 removed, so it does not compile against the version Homebrew has.
+#   libxml2   2.12 made the error struct const in callback signatures; PHP 7 predates it and fails
+#             with "incompatible function pointer types" in ext/libxml.
+#   libxslt   only because it has to match the libxml2 above — two libxml2 in one process is not a
+#             thing that can be shipped.
+#   icu       modern ICU dropped `icu-config`, which is the only way ext/intl before 7.4 finds it,
+#             and ICU 68 removed the TRUE/FALSE macros that same code uses. 60.3 is what AlmaLinux 8
+#             carries, so this pins macOS to the version the Linux legs already build against.
 SOURCE_LIBRARIES = {
-    "oniguruma": (
-        "https://github.com/kkos/oniguruma/releases/download/v6.9.9/onig-6.9.9.tar.gz",
-        "autotools", "oniguruma",
-    ),
-    "libzip": (
-        "https://libzip.org/download/libzip-1.10.1.tar.gz", "cmake", "libzip",
-    ),
-    "libwebp": (
-        "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.3.2.tar.gz",
-        "autotools", "libwebp",
-    ),
+    "oniguruma": {
+        "url": "https://github.com/kkos/oniguruma/releases/download/v6.9.9/onig-6.9.9.tar.gz",
+        "build": "autotools", "pkgconfig": "oniguruma", "provides": "oniguruma",
+    },
+    "libzip": {
+        "url": "https://libzip.org/download/libzip-1.10.1.tar.gz",
+        "build": "cmake", "pkgconfig": "libzip", "provides": "libzip",
+    },
+    "libwebp": {
+        "url": "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.3.2.tar.gz",
+        "build": "autotools", "pkgconfig": "libwebp", "provides": "webp",
+    },
+    "openssl": {
+        "url": "https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-1.1.1w.tar.gz",
+        "build": "openssl", "pkgconfig": "openssl", "provides": "openssl",
+    },
+    "libxml2": {
+        "url": "https://download.gnome.org/sources/libxml2/2.9/libxml2-2.9.14.tar.xz",
+        "build": "autotools", "pkgconfig": "libxml-2.0", "provides": "libxml2",
+        "arguments": ["--without-python", "--without-lzma"],
+    },
+    "libxslt": {
+        "url": "https://download.gnome.org/sources/libxslt/1.1/libxslt-1.1.35.tar.xz",
+        "build": "autotools", "pkgconfig": "libxslt", "provides": "libxslt",
+        "arguments": ["--without-python", "--with-libxml-prefix={prefix}"],
+    },
+    "icu": {
+        "url": "https://github.com/unicode-org/icu/releases/download/release-60-3/icu4c-60_3-src.tgz",
+        "build": "autotools", "pkgconfig": "icu-i18n", "provides": "icu", "subdirectory": "source",
+        "arguments": ["--disable-samples", "--disable-tests", "--build={triple}"],
+        # ICU 60 is 2017 C++, and a current clang defaults to C++17 — which removed the `register`
+        # keyword that code still uses. The triple is given explicitly for the same era reason: its
+        # `config.guess` predates Apple Silicon.
+        "environment": {"CXXFLAGS": "-std=c++11"},
+    },
 }
+
+# What macOS compiles every time, in dependency order — libxslt links the libxml2 above it.
+MACOS_SOURCE_LIBRARIES = ["openssl", "libxml2", "libxslt", "icu"]
 
 # Everything AlmaLinux 8 does have and PHP 7 needs. Deliberately a named list rather than a `dnf
 # group`: it is a list a reader can check against the configure flags below.
@@ -109,21 +151,20 @@ DNF_PACKAGES = [
 
 # Homebrew's names for the same set. Keg-only formulae are the norm here, so nothing is assumed to be
 # on the compiler's default search path — every one is asked for its own prefix below.
+# openssl, icu4c, libxml2 and libxslt are deliberately absent: those four are compiled here instead,
+# for the reasons in SOURCE_LIBRARIES. Homebrew still installs openssl@3 as somebody else's
+# dependency (libpq's), which is harmless — it is simply never what PHP is pointed at.
 BREW_PACKAGES = [
-    "openssl@3", "icu4c", "libzip", "oniguruma", "libsodium", "libpq", "gmp", "libxslt",
-    "jpeg-turbo", "libpng", "freetype", "webp", "sqlite", "libxml2", "libiconv", "bzip2",
+    "libzip", "oniguruma", "libsodium", "libpq", "gmp", "jpeg-turbo", "libpng", "freetype",
+    "webp", "sqlite", "libiconv", "bzip2",
     "readline",   # macOS ships libedit, not readline, and PHP's `--with-readline` wants the latter
 ]
 
-# The Homebrew formula behind each name the configure table uses. `icu4c` is versioned now
-# (`icu4c@78`) and the number moves, which is why the lookup below tries the versioned spellings
-# rather than trusting any one of them.
+# The Homebrew formula behind each name the configure table uses.
 BREW_FORMULAE = {
-    "openssl": "openssl@3", "icu": "icu4c", "libzip": "libzip", "oniguruma": "oniguruma",
-    "libsodium": "libsodium", "libpq": "libpq", "gmp": "gmp", "libxslt": "libxslt",
-    "jpeg": "jpeg-turbo", "libpng": "libpng", "freetype": "freetype", "webp": "webp",
-    "sqlite": "sqlite", "libxml2": "libxml2", "libiconv": "libiconv", "bzip2": "bzip2",
-    "readline": "readline",
+    "libzip": "libzip", "oniguruma": "oniguruma", "libsodium": "libsodium", "libpq": "libpq",
+    "gmp": "gmp", "jpeg": "jpeg-turbo", "libpng": "libpng", "freetype": "freetype", "webp": "webp",
+    "sqlite": "sqlite", "libiconv": "libiconv", "bzip2": "bzip2", "readline": "readline",
 }
 
 
@@ -264,27 +305,45 @@ def have_library(name: str) -> bool:
 
 
 def build_library(work: Path, prefix: Path, name: str) -> None:
-    """Compile one of the few libraries the distribution may not carry."""
-    url, system, _ = SOURCE_LIBRARIES[name]
+    """Compile one of the libraries this recipe pins or the distribution does not carry."""
+    recipe = SOURCE_LIBRARIES[name]
     directory = work / f"lib-{name}"
     directory.mkdir(parents=True, exist_ok=True)
-    tarball = directory / url.rsplit("/", 1)[-1]
-    tarball.write_bytes(fetch(url))
+    tarball = directory / recipe["url"].rsplit("/", 1)[-1]
+    tarball.write_bytes(fetch(recipe["url"]))
     with tarfile.open(tarball) as archive:
         archive.extractall(directory)
     unpacked = next(path for path in sorted(directory.iterdir()) if path.is_dir())
+    if "subdirectory" in recipe:
+        unpacked = unpacked / recipe["subdirectory"]
 
-    if system == "cmake":
+    jobs = str(os.cpu_count() or 2)
+    triple = f"{platform.machine()}-apple-darwin" if sys.platform == "darwin" \
+        else f"{platform.machine()}-pc-linux-gnu"
+    arguments = [argument.format(prefix=prefix, triple=triple)
+                 for argument in recipe.get("arguments", [])]
+    environment = {**os.environ, **recipe.get("environment", {})}
+
+    if recipe["build"] == "cmake":
         build = unpacked / "build"
         run("cmake", "-S", str(unpacked), "-B", str(build), f"-DCMAKE_INSTALL_PREFIX={prefix}",
             "-DCMAKE_INSTALL_LIBDIR=lib", "-DBUILD_SHARED_LIBS=ON", "-DBUILD_TOOLS=OFF",
-            "-DBUILD_EXAMPLES=OFF", "-DBUILD_DOC=OFF", "-DBUILD_REGRESS=OFF", capture=False)
-        run("cmake", "--build", str(build), "--target", "install",
-            "-j", str(os.cpu_count() or 2), capture=False)
+            "-DBUILD_EXAMPLES=OFF", "-DBUILD_DOC=OFF", "-DBUILD_REGRESS=OFF",
+            env=environment, capture=False)
+        run("cmake", "--build", str(build), "--target", "install", "-j", jobs,
+            env=environment, capture=False)
+    elif recipe["build"] == "openssl":
+        # OpenSSL has its own configure, and `install_sw` is the difference between three minutes
+        # and twenty: the rest of `install` is documentation nothing here reads.
+        run("./config", f"--prefix={prefix}", f"--openssldir={prefix}/ssl", "shared", "no-tests",
+            cwd=unpacked, env=environment, capture=False)
+        run("make", f"-j{jobs}", cwd=unpacked, env=environment, capture=False)
+        run("make", "install_sw", cwd=unpacked, env=environment, capture=False)
     else:
-        run("./configure", f"--prefix={prefix}", "--disable-static", cwd=unpacked, capture=False)
-        run("make", f"-j{os.cpu_count() or 2}", cwd=unpacked, capture=False)
-        run("make", "install", cwd=unpacked, capture=False)
+        run("./configure", f"--prefix={prefix}", "--disable-static", *arguments,
+            cwd=unpacked, env=environment, capture=False)
+        run("make", f"-j{jobs}", cwd=unpacked, env=environment, capture=False)
+        run("make", "install", cwd=unpacked, env=environment, capture=False)
 
 
 def linux_dependencies(work: Path, extra: Path) -> dict[str, Path]:
@@ -299,19 +358,30 @@ def linux_dependencies(work: Path, extra: Path) -> dict[str, Path]:
         attempt("dnf", "install", "-y", package)
 
     built = {}
-    for name, (_, _, pkgconfig) in SOURCE_LIBRARIES.items():
-        if not have_library(pkgconfig):
+    # Only the three that move around. Everything else in this image is already the version PHP 7
+    # was written against, which is the whole reason the Linux legs build here.
+    for name in ("oniguruma", "libzip", "libwebp"):
+        recipe = SOURCE_LIBRARIES[name]
+        if not have_library(recipe["pkgconfig"]):
             print(f"{name} is not packaged in this image; building it from source")
             build_library(work, extra, name)
-            built[{"oniguruma": "oniguruma", "libzip": "libzip", "libwebp": "webp"}[name]] = extra
+            built[recipe["provides"]] = extra
     return built
 
 
-def macos_dependencies() -> None:
+def macos_dependencies(work: Path, extra: Path) -> dict[str, Path]:
+    """Install what Homebrew can give, and compile the four PHP 7 is version-sensitive about."""
     # Installed one at a time for the same reason as on Linux, and because a formula Homebrew has
     # since renamed would otherwise fail the whole install rather than one line of it.
     for package in BREW_PACKAGES:
         attempt("brew", "install", package, timeout=3600)
+
+    built = {}
+    for name in MACOS_SOURCE_LIBRARIES:
+        print(f"building {name} from source: see SOURCE_LIBRARIES for why this one is pinned")
+        build_library(work, extra, name)
+        built[SOURCE_LIBRARIES[name]["provides"]] = extra
+    return built
 
 
 def autoconf_269(work: Path, prefix: Path) -> None:
@@ -365,52 +435,62 @@ def configure_arguments(branch: tuple[int, int], prefixes: dict[str, Path]) -> l
     from ``--enable-zip`` to ``--with-zip``, and libxml, curl and intl started going through
     pkg-config. Passing 8.x's spelling to 7.2 does not fail loudly; it quietly builds a PHP without
     the extension, which is then discovered by a user whose site needs it.
+
+    Two kinds of flag, and the difference matters. **Switches** turn an extension on and are passed
+    with or without a directory — dropping one would drop the extension. **Hints** only say where to
+    look, and are passed *only* when there is somewhere to point them: a bare ``--with-icu-dir``
+    does not mean "search the usual places", it sets the value to ``yes`` and PHP then runs
+    ``yes/bin/icu-config``.
     """
-    def directory(name: str, flag: str) -> str:
+    def switch(name: str, flag: str) -> str:
         prefix = prefixes.get(name)
         return f"{flag}={prefix}" if prefix else flag
 
+    def hint(name: str, flag: str) -> list[str]:
+        prefix = prefixes.get(name)
+        return [f"{flag}={prefix}"] if prefix else []
+
     arguments = list(COMMON)
-    arguments += [directory(name, flag) for name, flag in DIRECTED.items()]
-    arguments.append(directory("libpq", "--with-pdo-pgsql"))
+    arguments += [switch(name, flag) for name, flag in DIRECTED.items()]
+    arguments.append(switch("libpq", "--with-pdo-pgsql"))
 
     if branch >= (7, 4):
         arguments += ["--enable-gd", "--with-jpeg", "--with-freetype", "--with-zip", "--with-libxml"]
         if "webp" in prefixes or have_library("libwebp"):
             arguments.append("--with-webp")
-        arguments.append(directory("oniguruma", "--with-onig"))
+        # No `--with-onig`: 7.4 has no such option and answers with "unrecognized options", which is
+        # a warning rather than an error and therefore easy to ship past. mbstring finds oniguruma
+        # through pkg-config, and PKG_CONFIG_PATH already points at ours when we built it.
     else:
         arguments += ["--with-gd", "--enable-zip"]
-        arguments.append(directory("libpng", "--with-png-dir"))
-        arguments.append(directory("jpeg", "--with-jpeg-dir"))
-        arguments.append(directory("freetype", "--with-freetype-dir"))
-        if "webp" in prefixes or Path("/usr/include/webp/decode.h").exists():
-            arguments.append(directory("webp", "--with-webp-dir"))
-        arguments.append(directory("libxml2", "--with-libxml-dir"))
-        arguments.append(directory("icu", "--with-icu-dir"))
+        arguments += hint("libpng", "--with-png-dir")
+        arguments += hint("jpeg", "--with-jpeg-dir")
+        arguments += hint("freetype", "--with-freetype-dir")
+        arguments += hint("webp", "--with-webp-dir")
+        arguments += hint("libxml2", "--with-libxml-dir")
+        arguments += hint("icu", "--with-icu-dir")
         if branch == (7, 3):
             # 7.3 deprecated the bundled libzip and 7.4 removed it. Using the system one a branch
             # early means one fewer thing that behaves differently between two adjacent versions.
-            arguments.append(directory("libzip", "--with-libzip"))
+            arguments += hint("libzip", "--with-libzip")
     if branch >= (7, 2):
-        arguments.append(directory("libsodium", "--with-sodium"))
+        arguments.append(switch("libsodium", "--with-sodium"))
     return arguments
 
 
 def dependency_prefixes(built_from_source: dict[str, Path]) -> dict[str, Path]:
     """Where each dependency lives — which on macOS is nowhere the compiler looks by default.
 
-    On Linux everything the image packaged is under ``/usr``, and the flags that take a directory
-    are given it explicitly rather than left bare: ``--with-icu-dir`` with no argument is not a
-    default, it is a configure error.
+    On Linux the answer is "where they always are", and saying so explicitly is worse than saying
+    nothing: ``--with-iconv=/usr`` makes PHP look for a *libiconv*, which glibc does not have
+    because iconv is part of the C library — the build then fails asking for it to be reinstalled.
+    So on Linux only the libraries this recipe compiled itself get a directory.
     """
     if sys.platform == "darwin":
         found = {name: brew_prefix(formula) for name, formula in BREW_FORMULAE.items()}
         prefixes = {name: prefix for name, prefix in found.items() if prefix}
     else:
-        prefixes = {name: Path("/usr") for name in BREW_FORMULAE}
-        if not Path("/usr/include/webp/decode.h").exists():
-            prefixes.pop("webp", None)
+        prefixes = {}
     prefixes.update(built_from_source)
     return prefixes
 
@@ -424,6 +504,16 @@ def build_environment(prefixes: dict[str, Path], extra: Path) -> dict[str, str]:
         pkgconfig.append(str(prefix / "lib" / "pkgconfig"))
         includes.append(f"-I{prefix / 'include'}")
         libraries.append(f"-L{prefix / 'lib'}")
+
+    if sys.platform == "darwin":
+        # curl, zlib and sqlite are Apple's on macOS, and from 7.4 PHP looks for them through
+        # pkg-config. Their `.pc` files live inside the SDK, which is not on pkg-config's default
+        # search path — so it is put there rather than relied upon.
+        sdk = subprocess.run(
+            ["xcrun", "--show-sdk-path"], capture_output=True, text=True, timeout=120
+        ).stdout.strip()
+        if sdk:
+            pkgconfig.append(f"{sdk}/usr/lib/pkgconfig")
 
     existing = environment.get("PKG_CONFIG_PATH")
     environment["PKG_CONFIG_PATH"] = os.pathsep.join(pkgconfig + ([existing] if existing else []))
@@ -738,11 +828,10 @@ def main() -> None:
     extra.mkdir(parents=True)
     os.environ["PATH"] = f"{extra / 'bin'}{os.pathsep}{os.environ['PATH']}"
 
-    built_from_source: dict[str, Path] = {}
     if operating_system == "linux":
         built_from_source = linux_dependencies(work, extra)
     else:
-        macos_dependencies()
+        built_from_source = macos_dependencies(work, extra)
         if branch < (7, 4):
             autoconf_269(work, extra)
 
