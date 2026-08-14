@@ -67,6 +67,16 @@ not fail, it shipped an artifact missing an extension the index promised. Read t
 cheaper than 40 was against tarballs. And a declared range is a *claim*: where the newest release
 that claims a branch will not compile against it, try the next one down.
 
+**A library that links but cannot load.** Build systems older than `@rpath` sometimes set a dylib's
+install name to its bare file name, with no directory — ICU's Darwin makefile is one. Linking works,
+because `-L` tells the *linker* where the file is; loading never can, because the bare name is
+copied into everything that links it and dyld has nowhere to look. What that does to `configure` is
+the interesting part: **link probes keep passing while every run probe fails to launch**, so
+autoconf records "this platform cannot do that" feature after feature and finally stops on whichever
+one it cannot live without. PHP announced that macOS has no `struct flock`. The real fault was a
+library installed twenty minutes earlier. If a run of `configure` suddenly answers "no" to things
+the platform obviously can do, suspect the last library you installed, not the platform.
+
 **Measuring the wrong number.** `otool -l` spells two different things `version`: inside
 `LC_VERSION_MIN_MACOSX` it is the minimum, and inside `LC_BUILD_VERSION` it appears again in the
 list of *tools* that produced the file, where it is the linker's. Grepping the dump for `version` and

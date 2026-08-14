@@ -1139,6 +1139,13 @@ def main() -> None:
             # the `bool` change, and the second is not fixable from outside the source.
             print("building icu from source: see SOURCE_LIBRARIES for why this one is pinned")
             build_library(work, extra, "icu")
+            # ICU's Darwin makefile still names its libraries after themselves and nothing else, so
+            # what it installs links but cannot be loaded. Left alone that does not announce itself:
+            # configure's link probes go on passing while every *run* probe fails to launch, and PHP
+            # stops several screens later claiming this system has no `struct flock`.
+            repaired = relocate.absolutise(extra / "lib")
+            print(f"gave {len(repaired)} librar{'y' if len(repaired) == 1 else 'ies'} "
+                  f"an install name dyld can resolve")
             built_from_source["icu"] = extra
             # Written after ICU is installed, so ours is the `icu-config` that survives whether or
             # not this release still ships one. ext/intl before 7.4 finds ICU no other way.

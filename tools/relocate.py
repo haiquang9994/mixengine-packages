@@ -217,6 +217,45 @@ def macho_sign(path: Path) -> None:
     run("codesign", "--force", "--sign", "-", "--timestamp=none", str(path))
 
 
+def absolutise(libdir: Path) -> list[Path]:
+    """Give the dylibs in *libdir* install names dyld can actually resolve.
+
+    A build system that predates ``@rpath`` may set a library's install name to its bare file name,
+    with no directory at all — ICU's Darwin makefile is one, and it is not the only one. Such a
+    library links perfectly: ``-L`` tells the *linker* where it is. It then cannot be loaded, because
+    the bare name is copied into everything that links it and dyld has nowhere to look.
+
+    That failure is invisible in the worst way. `configure` link probes keep passing while every
+    *run* probe fails to launch, so autoconf writes "this platform cannot do that" for feature after
+    feature and stops on whichever one it cannot live without. What was actually wrong is that a
+    library installed twenty minutes earlier is unloadable.
+
+    So each install name here is made absolute, along with every reference between them. That is
+    only a build-time arrangement: whatever ends up in the artifact is rewritten again by `bundle`,
+    which cannot see these libraries until they are loadable in the first place.
+    """
+    if sys.platform != "darwin":
+        return []
+    repaired = []
+    for path in sorted(libdir.glob("*.dylib")):
+        if path.is_symlink() or kind(path) != "macho":
+            continue
+        identity = macho_id(path)
+        changed = False
+        if identity and "/" not in identity:
+            run("install_name_tool", "-id", str(libdir / identity), str(path))
+            changed = True
+        for spelling, _ in macho_dependencies(path, libdir):
+            if "/" in spelling or not (libdir / spelling).exists():
+                continue
+            run("install_name_tool", "-change", spelling, str(libdir / spelling), str(path))
+            changed = True
+        if changed:
+            macho_sign(path)
+            repaired.append(path)
+    return repaired
+
+
 # ------------------------------------------------------------------------------------ shared ---
 
 
