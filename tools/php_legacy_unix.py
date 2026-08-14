@@ -575,6 +575,10 @@ def build_environment(prefixes: dict[str, Path], extra: Path) -> dict[str, str]:
         # lengthen a path — which is the entire relocation step, failing after the build rather than
         # before it.
         link.append("-Wl,-headerpad_max_install_names")
+        # `dns_get_record` needs the resolver, and since the macOS 14 SDK PHP's configure no longer
+        # works out that it has to ask for it — the build gets all the way to linking the binary and
+        # then cannot find `res_9_dn_expand`. Homebrew's PHP formulae patch around the same thing.
+        link.append("-lresolv")
         # ICU is C++ and current releases need C++17; PHP's own configure never says so.
         environment["ICU_CXXFLAGS"] = "-std=c++17"
     environment["LDFLAGS"] = " ".join(link + [environment.get("LDFLAGS", "")]).strip()
@@ -874,8 +878,8 @@ def smoke(tree: Path, provides: dict[str, str], shared: list[str]) -> tuple[str,
     # and then cannot be loaded is the failure this is looking for — it is invisible in the build
     # log, and `redis` is exactly the case, since it resolves igbinary's symbols only at load time.
     loaded, refused = [], []
+    ini = elsewhere.parent / "php.ini"
     for candidate in shared:
-        ini = elsewhere.parent / "php.ini"
         directive = "zend_extension" if candidate in ZEND_EXTENSIONS else "extension"
         # Every value quoted, as the Windows recipe does and for the same reason: this is the
         # mechanism the daemon uses, so it is the one worth proving.
@@ -884,11 +888,16 @@ def smoke(tree: Path, provides: dict[str, str], shared: list[str]) -> tuple[str,
             lines.append(f'extension="{elsewhere / "ext" / "igbinary.so"}"\n')
         lines.append(f'{directive}="{elsewhere / "ext" / (candidate + ".so")}"\n')
         ini.write_text("".join(lines), encoding="ascii")
+        # No `-n` beside `-c`. The two argue about the same thing — one says "use no ini", the other
+        # says "use this ini" — and an ini that is silently not read looks exactly like an extension
+        # that silently will not load: no warning, no diagnosis, just `extension_loaded()` false.
+        # `-c` alone is also closer to what the daemon does.
+        #
         # Run directly rather than through `run`: a refusal exits zero, so the reason is on stderr
         # of a command that succeeded, and `run` only shows stderr when a command fails. Without
         # this the whole diagnosis is the string 'no'.
         attempt = subprocess.run(
-            [str(elsewhere / "bin" / "php"), "-n", "-c", str(ini),
+            [str(elsewhere / "bin" / "php"), "-c", str(ini),
              "-r", f"echo extension_loaded({candidate!r}) ? 'yes' : 'no';"],
             capture_output=True, text=True, timeout=300,
         )
@@ -900,6 +909,21 @@ def smoke(tree: Path, provides: dict[str, str], shared: list[str]) -> tuple[str,
             print(f"{candidate} did not load: {attempt.stdout.strip()!r}", file=sys.stderr)
             for line in (attempt.stderr or "").splitlines():
                 print(f"  {line}", file=sys.stderr)
+            # Silence here means PHP never read the file, which is a different fault from an
+            # extension that refuses to load and has to be told apart from it. So the build says
+            # which ini PHP actually used, out of PHP's own mouth.
+            if not attempt.stderr.strip():
+                print(f"  nothing on stderr, so the ini may not have been read at all:",
+                      file=sys.stderr)
+                print("  " + ini.read_text(encoding="ascii").replace("\n", "\n  "),
+                      file=sys.stderr)
+                report = subprocess.run(
+                    [str(elsewhere / "bin" / "php"), "-c", str(ini), "-i"],
+                    capture_output=True, text=True, timeout=300,
+                ).stdout
+                for line in report.splitlines():
+                    if "Configuration File" in line or line.startswith("extension_dir"):
+                        print(f"  {line}", file=sys.stderr)
 
     missing = sorted(PECL_REQUIRED - set(loaded))
     if missing:
