@@ -111,7 +111,19 @@ def sha256(path: Path) -> str:
 
 def build(spc: Path, work: Path, branch: str) -> Path:
     extensions = ",".join(STATIC_EXTENSIONS)
-    env = {**os.environ, "SPC_SKIP_PHP_VERSION_CHECK": "no"}
+    env = {**os.environ}
+
+    if sys.platform.startswith("linux"):
+        # static-php-cli defaults to musl on Linux, and a statically linked musl has no `dlopen` at
+        # all — it refuses the build outright the moment a shared extension is asked for. The choice
+        # is therefore forced rather than preferred: MixEngine ships loadable extensions, so it
+        # links glibc.
+        #
+        # The price is a floor. A glibc binary will not start on a distribution older than the one
+        # that built it, where the musl build would have run anywhere. That floor is measured off
+        # the finished binary and recorded in the manifest rather than assumed, so the index can
+        # state it and a client can refuse the install instead of producing a loader error.
+        env["SPC_LIBC"] = "glibc"
 
     run(str(spc), "doctor", "--auto-fix", cwd=work, env=env)
     # The download has to cover the shared extensions too. `--build-shared` does not fetch anything
@@ -169,6 +181,30 @@ def assemble(buildroot: Path, work: Path) -> tuple[Path, dict[str, str], list[st
         if source.exists():
             shutil.copy2(source, tree / "LICENSE")
     return tree, provides, shared
+
+
+def glibc_floor(binary: Path) -> str | None:
+    """The oldest glibc this binary will start on, read off the binary itself.
+
+    Every glibc symbol a program imports carries the version it was introduced in, so the highest
+    of those *is* the requirement — which is a measurement, unlike "whatever the runner had", which
+    is a guess that happens to be conservative until the day it is not.
+    """
+    if sys.platform != "linux":
+        return None
+    try:
+        symbols = subprocess.run(
+            ["objdump", "-T", str(binary)], capture_output=True, text=True, timeout=120
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    versions = {
+        tuple(int(part) for part in match.split("."))
+        for match in re.findall(r"GLIBC_(\d+\.\d+(?:\.\d+)?)", symbols)
+    }
+    if not versions:
+        return None
+    return ".".join(str(part) for part in max(versions))
 
 
 def smoke(tree: Path, provides: dict[str, str], shared: list[str]) -> tuple[str, dict]:
@@ -250,6 +286,10 @@ def main() -> None:
     }
     if shared:
         manifest["extension_dir"] = "ext"
+    floor = glibc_floor(tree / "bin" / "php")
+    if floor:
+        manifest["requires"] = {"glibc": floor}
+        print(f"needs glibc {floor} or newer")
     (tree / "mixengine-artifact.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
