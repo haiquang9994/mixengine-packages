@@ -28,7 +28,9 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - name: borrow and repack
-        run: python tools/php_windows.py --version "${{ inputs.branch }}" --out dist
+        # -u because a failure here is diagnosed from the log, and block-buffered stdout arrives
+        # after the traceback that explains it.
+        run: python -u tools/php_windows.py --version "${{ inputs.branch }}" --out dist
       - uses: actions/upload-artifact@v4
         with:
           name: php-windows-x86_64
@@ -51,7 +53,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - name: build
-        run: python3 tools/php_unix.py --branch "${{ inputs.branch }}" --out dist
+        run: python3 -u tools/php_unix.py --branch "${{ inputs.branch }}" --out dist
         timeout-minutes: 180
       - uses: actions/upload-artifact@v4
         with:

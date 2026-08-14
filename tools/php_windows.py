@@ -44,6 +44,13 @@ VCREDIST = {"vc14": "2015", "vc15": "2017", "vs16": "2019", "vs17": "2022"}
 # ``extension_dir`` is honoured after relocation, which is the half ``php -v`` cannot prove.
 SMOKE_EXTENSIONS = ("openssl", "curl", "mbstring", "sqlite3")
 
+# ``-v`` is run against these and no others. ``php-win.exe`` is the GUI-subsystem build and writes
+# nothing to a console at all — asking it for a version banner produces an empty string and an
+# exit code of zero, which is the most confusing possible way for a check to fail. ``phpdbg.exe``
+# is an interactive debugger and is not asked either. Both stay in ``provides`` because they are in
+# the box; neither is something MixEngine will ever start.
+VERSION_CHECKED = ("php", "php-cgi")
+
 
 def fetch(url: str) -> bytes:
     with urllib.request.urlopen(url, timeout=120) as response:
@@ -126,6 +133,13 @@ def describe(tree: Path, version: str, arch: str, url: str, upstream_hash: str |
         php(tree / "php.exe", "-n", "-r", "echo json_encode(get_loaded_extensions());")
     )
     shared = sorted(p.stem.removeprefix("php_") for p in (tree / "ext").glob("php_*.dll"))
+    print(f"{len(static)} static extension(s), {len(shared)} loadable module(s) in ext/")
+    if not shared:
+        raise SystemExit(
+            f"no php_*.dll under {tree / 'ext'} — the archive is not laid out the way this recipe "
+            f"expects, and every dynamic extension would be missing. Contents: "
+            f"{sorted(p.name for p in tree.iterdir())[:20]}"
+        )
 
     compiler = re.search(r"-(vc\d+|vs\d+)-", url, re.IGNORECASE)
     requires = {}
@@ -171,31 +185,40 @@ def smoke(tree: Path, version: str, manifest: dict) -> dict:
     shutil.copytree(tree, elsewhere)
 
     ran = []
-    for name, relative in manifest["provides"].items():
-        binary = elsewhere / relative
-        banner = php(binary, "-v").splitlines()[0]
+    for name in VERSION_CHECKED:
+        relative = manifest["provides"].get(name)
+        if relative is None:
+            raise SystemExit(f"the archive provides no {name}")
+        banner = php(elsewhere / relative, "-v").splitlines()[0]
         if version not in banner:
             raise SystemExit(f"{relative} reports {banner!r}, expected {version}")
+        print(f"{relative}: {banner}")
         ran.append(f"{relative} -v")
 
-    loaded = None
+    loaded, refused = None, []
     for candidate in SMOKE_EXTENSIONS:
         if candidate not in manifest["extensions"]["shared"]:
             continue
+        # Warnings go to stderr on purpose. PHP's CLI default is to display them on *stdout*, so a
+        # failed load would otherwise arrive mixed into the answer being parsed.
         answer = php(
             elsewhere / "php.exe",
             "-n",
+            "-d", "display_errors=stderr",
             "-d", f"extension_dir={elsewhere / 'ext'}",
             "-d", f"extension={candidate}",
             "-r", f"echo extension_loaded({candidate!r}) ? 'yes' : 'no';",
         )
         if answer == "yes":
             loaded = candidate
+            print(f"loaded {candidate} from the relocated ext/")
             break
+        refused.append(f"{candidate}={answer!r}")
     if loaded is None:
         raise SystemExit(
-            "no shared extension could be loaded after relocation — extension_dir is not being "
-            "honoured, and every dynamic extension would fail on a user's machine"
+            "no shared extension could be loaded after relocation, so extension_dir is not being "
+            "honoured and every dynamic extension would fail on a user's machine. Tried: "
+            f"{', '.join(refused) or 'nothing — none of the candidates is in this build'}"
         )
 
     shutil.rmtree(elsewhere.parent.parent, ignore_errors=True)
