@@ -114,6 +114,27 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def run_spc(command: list[str], work: Path, env: dict) -> str:
+    """Run static-php-cli, and make a failure of it legible.
+
+    It sends compiler output to log files of its own rather than to stdout, so a build that dies in
+    `make` reaches CI as `make exited 2` and nothing else — a line that names no file, no symbol and
+    no reason. The logs sit in the work directory, which is deleted on the way out, so the only
+    moment they can be read is this one.
+    """
+    try:
+        return run(*command, cwd=work, env=env)
+    except SystemExit:
+        for name in ("spc.output.log", "spc.shell.log"):
+            log = work / "log" / name
+            if not log.exists():
+                continue
+            tail = log.read_text(errors="replace").splitlines()[-300:]
+            print(f"\n===== last {len(tail)} lines of {name} =====", file=sys.stderr)
+            print("\n".join(tail), file=sys.stderr)
+        raise
+
+
 def build(spc: Path, work: Path, branch: str) -> Path:
     extensions = ",".join(STATIC_EXTENSIONS)
     env = {**os.environ}
@@ -130,7 +151,7 @@ def build(spc: Path, work: Path, branch: str) -> Path:
         # state it and a client can refuse the install instead of producing a loader error.
         env["SPC_LIBC"] = "glibc"
 
-    run(str(spc), "doctor", "--auto-fix", cwd=work, env=env)
+    run_spc([str(spc), "doctor", "--auto-fix"], work, env)
     # The download has to cover the shared extensions too. `--build-shared` does not fetch anything
     # of its own: it links what `download` already put in place, and refuses at the very end of a
     # build otherwise, which is the most expensive moment to find out.
@@ -142,14 +163,14 @@ def build(spc: Path, work: Path, branch: str) -> Path:
             "403 that surfaces as a type error inside its downloader.",
             file=sys.stderr,
         )
-    run(str(spc), "download", f"--with-php={branch}", f"--for-extensions={everything}",
-        "--retry=5", "--ignore-cache-sources=php-src", cwd=work, env=env)
+    run_spc([str(spc), "download", f"--with-php={branch}", f"--for-extensions={everything}",
+             "--retry=5", "--ignore-cache-sources=php-src"], work, env)
 
     arguments = [str(spc), "build", extensions]
     arguments += [f"--build-{sapi}" for sapi in SAPIS]
     if SHARED_EXTENSIONS:
         arguments.append(f"--build-shared={','.join(SHARED_EXTENSIONS)}")
-    run(*arguments, cwd=work, env=env)
+    run_spc(arguments, work, env)
 
     buildroot = work / "buildroot"
     if not (buildroot / "bin" / "php").exists():
