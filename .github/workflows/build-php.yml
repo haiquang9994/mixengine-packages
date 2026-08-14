@@ -1,12 +1,12 @@
 name: build php
 
-# Asked for, never automatic. Building PHP for four targets costs real runner minutes and upstream
+# Asked for, never automatic. Building PHP for five targets costs real runner minutes and upstream
 # releases on its own schedule, so a human decides when a version is wanted.
 on:
   workflow_dispatch:
     inputs:
       branch:
-        description: 'PHP branch (8.3) or exact version (8.3.33). Windows reaches 7.0; macOS and Linux start at 8.1.'
+        description: 'PHP branch (8.3) or exact version (8.3.33). 7.0 upwards on every target.'
         required: true
         type: string
       release:
@@ -19,9 +19,33 @@ permissions:
   contents: write
 
 jobs:
+  plan:
+    # Which recipe a branch belongs to is one comparison, and it is made once here rather than in
+    # four `if:` expressions that could disagree with each other.
+    runs-on: ubuntu-24.04
+    outputs:
+      legacy: ${{ steps.decide.outputs.legacy }}
+    steps:
+      - id: decide
+        run: |
+          set -euo pipefail
+          branch="${{ inputs.branch }}"
+          major="${branch%%.*}"; rest="${branch#*.}"; minor="${rest%%.*}"
+          if [ "$major" -lt 7 ]; then
+            echo "::error::MixEngine offers PHP from 7.0"; exit 1
+          fi
+          # static-php-cli starts at 8.1. Everything below it is compiled from source instead.
+          if [ "$major" -lt 8 ] || { [ "$major" -eq 8 ] && [ "$minor" -lt 1 ]; }; then
+            echo "legacy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "legacy=false" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$GITHUB_OUTPUT"
+
   windows:
     # Borrowed, not built: windows.php.net already publishes something relocatable, so this job
-    # fetches, proves and repacks rather than compiling anything.
+    # fetches, proves and repacks rather than compiling anything — for every branch alike, which is
+    # why it needs no `plan`.
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
@@ -38,19 +62,21 @@ jobs:
           if-no-files-found: error
 
   unix:
-    # Built with static-php-cli. macOS is aarch64 only by policy — MixEngine offers no Intel-only
-    # PHP there — so there is no macos x86_64 leg and its absence is deliberate, not an omission.
+    # 8.1 and newer, with static-php-cli.
     #
     # Linux builds on the **oldest** image GitHub still offers, not the newest. A glibc build only
     # runs on a glibc at least as new as the one that produced it, so the runner choice *is* the
     # compatibility floor: 24.04 measured out at glibc 2.38, which excludes Ubuntu 22.04 LTS and
     # Debian 12 — both of which a person running a local development environment is very likely to
     # be on. 22.04 puts the floor at 2.35 and costs nothing else.
+    needs: plan
+    if: needs.plan.outputs.legacy == 'false'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { runner: macos-14,        os: macos, arch: aarch64 }
+          - { runner: macos-14,         os: macos, arch: aarch64 }
+          - { runner: macos-15-intel,   os: macos, arch: x86_64 }
           - { runner: ubuntu-22.04,     os: linux, arch: x86_64 }
           - { runner: ubuntu-22.04-arm, os: linux, arch: aarch64 }
     runs-on: ${{ matrix.runner }}
@@ -74,14 +100,82 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  legacy-macos:
+    # 7.0 – 8.0, compiled from source. Each architecture on a runner of its own: nothing is
+    # cross-compiled and nothing runs under Rosetta, because an x86_64 build filed under aarch64
+    # would be an artifact that installs on Apple Silicon and then emulates.
+    #
+    # macos-14 is deprecated and used anyway. These branches are final — the job runs six times in
+    # total and is then finished — and the runner's own macOS is the floor of everything Homebrew
+    # hands it, so the oldest image available is the widest artifact. If it is retired before all
+    # six are built, the floor rises to 15 and the manifest says so.
+    needs: plan
+    if: needs.plan.outputs.legacy == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-14,       os: macos, arch: aarch64 }
+          - { runner: macos-15-intel, os: macos, arch: x86_64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: build from source
+        run: python3 -u tools/php_legacy_unix.py --branch "${{ inputs.branch }}" --out dist
+        timeout-minutes: 180
+      - uses: actions/upload-artifact@v4
+        with:
+          name: php-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  legacy-linux:
+    # 7.0 – 8.0, compiled inside AlmaLinux 8 rather than on the runner.
+    #
+    # The glibc floor that falls out of it — 2.28 instead of the 2.35 the 8.1+ artifacts have — is
+    # the smaller half of the reason. The larger one is that this image's OpenSSL is 1.1.1, its ICU
+    # is 60 and its autoconf is 2.69, which is the toolchain PHP 7 was written against. On a current
+    # distribution all three are wrong at once and each needs its own patch set.
+    needs: plan
+    if: needs.plan.outputs.legacy == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04,     image: quay.io/pypa/manylinux_2_28_x86_64,  arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, image: quay.io/pypa/manylinux_2_28_aarch64, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: build from source
+        # AlmaLinux 8's own python is 3.6, which this recipe does not run on. The image ships
+        # current interpreters for its actual purpose; the newest of those is used rather than
+        # installing another one.
+        run: |
+          set -euo pipefail
+          python="$(ls -d /opt/python/cp31*/bin/python 2>/dev/null | sort -V | tail -1 || true)"
+          "${python:-python3}" -u tools/php_legacy_unix.py --branch "${{ inputs.branch }}" --out dist
+        timeout-minutes: 180
+      - uses: actions/upload-artifact@v4
+        with:
+          name: php-linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
   release:
     # One release per exact version, holding every artifact of it. The version is read back out of
     # each manifest rather than taken from the input, because the input may be a branch and the
-    # three legs resolve it independently — Windows against releases.json, the others against
-    # whatever static-php-cli downloaded. If they disagree, they land in different releases, which
-    # is the honest outcome rather than a mislabelled asset.
-    needs: [windows, unix]
-    if: inputs.release
+    # legs resolve it independently — Windows against releases.json, the others against what they
+    # downloaded. If they disagree, they land in different releases, which is the honest outcome
+    # rather than a mislabelled asset.
+    #
+    # Exactly one of `unix` and the two `legacy-*` jobs runs for any given branch, so the others are
+    # skipped rather than failed — hence `!failure()` instead of a plain dependency.
+    needs: [windows, unix, legacy-macos, legacy-linux]
+    if: ${{ inputs.release && !failure() && !cancelled() }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

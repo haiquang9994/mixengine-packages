@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Build a relocatable PHP for macOS or Linux with static-php-cli, and pack it as an artifact.
 
-This is the "built" half of the PHP row. It exists because no publisher ships a relocatable PHP for
-these two systems: Homebrew's is bound to its prefix and the distro packages are bound to ``/usr``.
-`static-php-cli`_ already solved that, is MIT, and covers **PHP 8.1 upwards** — which is why the
-version policy floors macOS and Linux at 8.1 while Windows reaches back to 7.0.
+This is the "built" half of the PHP row, for **PHP 8.1 and newer**. It exists because no publisher
+ships a relocatable PHP for these two systems: Homebrew's is bound to its prefix and the distro
+packages are bound to ``/usr``. `static-php-cli`_ already solved that, is MIT, and covers 8.1
+upwards; everything older is compiled by ``php_legacy_unix.py``, which is a different recipe because
+it is a different problem — no dependency solver, an era's toolchain, and libraries bundled beside
+the binary rather than linked into it.
 
 Two settings here are load-bearing rather than preferences:
 
@@ -38,6 +40,8 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
+import relocate
+
 SPC_VERSION = "2.8.5"
 SPC_URL = "https://github.com/crazywhalecc/static-php-cli/releases/download/{v}/spc-{target}.tar.gz"
 
@@ -66,11 +70,12 @@ def host() -> tuple[str, str, str]:
     if arch is None:
         raise SystemExit(f"unsupported machine {platform.machine()}")
     if sys.platform == "darwin":
-        if arch != "aarch64":
-            raise SystemExit(
-                "MixEngine offers no Intel-only PHP on macOS — the version policy is arm64 or "
-                "nothing there, so an x86_64 mac build would be an artifact nobody can install"
-            )
+        # Both architectures, each built on a runner of its own. The policy used to be arm64 or
+        # nothing here, on the argument that a version with no arm64 build should not be offered at
+        # all; that argument survives, but it never implied the reverse. Intel Macs run the daemon
+        # (MixEngine ships a universal binary) and PHP 7 is disproportionately what they are kept
+        # around for, so an Intel row that exists for 7.x and stops at 8.0 would be the odder
+        # matrix. Nothing is cross-compiled and nothing runs under Rosetta.
         return "macos", arch, f"macos-{arch}"
     if sys.platform.startswith("linux"):
         return "linux", arch, f"linux-{arch}"
@@ -188,30 +193,6 @@ def assemble(buildroot: Path, work: Path) -> tuple[Path, dict[str, str], list[st
     return tree, provides, shared
 
 
-def glibc_floor(binary: Path) -> str | None:
-    """The oldest glibc this binary will start on, read off the binary itself.
-
-    Every glibc symbol a program imports carries the version it was introduced in, so the highest
-    of those *is* the requirement — which is a measurement, unlike "whatever the runner had", which
-    is a guess that happens to be conservative until the day it is not.
-    """
-    if sys.platform != "linux":
-        return None
-    try:
-        symbols = subprocess.run(
-            ["objdump", "-T", str(binary)], capture_output=True, text=True, timeout=120
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-    versions = {
-        tuple(int(part) for part in match.split("."))
-        for match in re.findall(r"GLIBC_(\d+\.\d+(?:\.\d+)?)", symbols)
-    }
-    if not versions:
-        return None
-    return ".".join(str(part) for part in max(versions))
-
-
 def smoke(tree: Path, provides: dict[str, str], shared: list[str]) -> tuple[str, dict]:
     """Exercise the build from a directory it has never seen.
 
@@ -274,7 +255,7 @@ def main() -> None:
 
     if tuple(int(part) for part in args.branch.split(".")) < (8, 1):
         raise SystemExit(
-            f"static-php-cli builds PHP 8.1 and newer; {args.branch} on this OS is T27a's problem"
+            f"static-php-cli builds PHP 8.1 and newer; {args.branch} is php_legacy_unix.py's"
         )
 
     operating_system, arch, target = host()
@@ -303,10 +284,13 @@ def main() -> None:
     }
     if shared:
         manifest["extension_dir"] = "ext"
-    floor = glibc_floor(tree / "bin" / "php")
-    if floor:
-        manifest["requires"] = {"glibc": floor}
-        print(f"needs glibc {floor} or newer")
+    # Measured off the finished archive rather than assumed from the runner, and on macOS as well as
+    # Linux: a build produced on macos-14 does not start on macos-13, and an index that says nothing
+    # about that hands the user a loader error instead of a refusal with a reason.
+    measured = relocate.floor(tree)
+    if measured:
+        manifest["requires"] = {measured[0]: measured[1]}
+        print(f"needs {measured[0]} {measured[1]} or newer")
     (tree / "mixengine-artifact.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )

@@ -14,9 +14,10 @@ point at an upstream URL.
 
 ```
 schema/       the index and artifact formats, as JSON Schema, versioned
-recipes/      one directory per runtime; how its artifacts are produced
-tools/        index generation, signing, verification — Python 3, stdlib only for anything
-              that runs on a build machine; `verify.py` alone pulls in `jsonschema`
+data/         upstream end-of-life dates, so the index can carry them
+tools/        the recipes themselves, plus index generation and verification — Python 3, stdlib
+              only for anything that runs on a build machine; `verify.py` alone pulls in
+              `jsonschema`
 .github/      the workflows that run the recipes on GitHub runners
 ```
 
@@ -32,13 +33,22 @@ current for every security release, for as long as MixEngine offers the version.
 and what each one settled, live in
 [MixEngine's `runtime-packaging.md`](https://github.com/haiquang9994/MixEngine/blob/master/.claude/operations/runtime-packaging.md).
 
-For PHP, as of the first index:
+For PHP:
 
 | OS / arch | Range | How |
 | --- | --- | --- |
 | Windows x86_64 | 7.0 – newest | **borrowed** — official windows.php.net builds, repacked |
-| macOS aarch64 | 8.1 – newest | **built** — [`static-php-cli`](https://github.com/crazywhalecc/static-php-cli) |
+| macOS aarch64, x86_64 | 8.1 – newest | **built** — [`static-php-cli`](https://github.com/crazywhalecc/static-php-cli) |
+| macOS aarch64, x86_64 | 7.0 – 8.0 | **built** — from source, dependencies bundled beside the binary |
 | Linux x86_64, aarch64 | 8.1 – newest | **built** — `static-php-cli` |
+| Linux x86_64, aarch64 | 7.0 – 8.0 | **built** — from source inside AlmaLinux 8, dependencies bundled |
+
+The last two rows are the range `static-php-cli` does not build. They are affordable because those
+six branches are *final* — 7.0.33 through 8.0.30 will never have another release — so the pipeline
+runs a handful of times rather than being kept current for every security release. `php_legacy_unix.py`
+compiles them and `relocate.py` makes the result carry its own libraries. On macOS both
+architectures are built on a runner of their own: nothing is cross-compiled and nothing runs under
+Rosetta, so a branch that will not compile natively for an architecture is simply not offered there.
 
 ## Repack, do not rearrange
 
@@ -70,16 +80,20 @@ The daemon reads that file and never guesses a path. An archive without one is n
 # Windows: borrow, repack, verify, smoke-test — runs anywhere Python 3 does
 python tools/php_windows.py --version 8.3.33 --out dist/
 
-# macOS / Linux: build it. This is what the workflow runs; it needs a toolchain.
-recipes/php/build-unix.sh 8.3.33
+# macOS / Linux, 8.1 and newer: static-php-cli builds it
+python3 tools/php_unix.py --branch 8.3 --out dist/
+
+# macOS / Linux, 7.0 – 8.0: compiled from source, then made to carry its own libraries
+python3 tools/php_legacy_unix.py --branch 7.4 --out dist/
 
 # Then regenerate and sign the index from what the releases actually contain
-python tools/mkindex.py --out dist/index.json
+python tools/mkindex.py --base-url … --out dist/index.json
 minisign -Sm dist/index.json -s minisign.key
 ```
 
-In practice none of that is run by hand: `.github/workflows/build-php.yml` takes a version, produces
-all three, and `publish-index.yml` regenerates and signs the index from every release that exists.
+In practice none of that is run by hand: `.github/workflows/build-php.yml` takes a version, picks the
+recipe from it and produces every target, and `publish-index.yml` regenerates and signs the index
+from every release that exists.
 
 ## The signing key
 
