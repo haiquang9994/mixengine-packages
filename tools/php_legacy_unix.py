@@ -374,6 +374,16 @@ def build_library(work: Path, prefix: Path, name: str) -> None:
                  for argument in recipe.get("arguments", [])]
     environment = {**os.environ, **recipe.get("environment", {})}
 
+    if sys.platform == "darwin":
+        # Everything built here is destined to have its install names rewritten — by `absolutise`
+        # now if the build system wrote a bare one, and by `relocate.bundle` later in the artifact.
+        # A Mach-O whose load commands were packed tight cannot be rewritten at all: the linker has
+        # to leave room, and only the linker can. PHP's own build gets this flag for the same
+        # reason; a library is no different, and finding out afterwards costs the whole build.
+        environment["LDFLAGS"] = (
+            "-Wl,-headerpad_max_install_names " + environment.get("LDFLAGS", "")
+        ).strip()
+
     if recipe["build"] == "cmake":
         build = unpacked / "build"
         run("cmake", "-S", str(unpacked), "-B", str(build), f"-DCMAKE_INSTALL_PREFIX={prefix}",

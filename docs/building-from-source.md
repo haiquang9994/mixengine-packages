@@ -159,6 +159,11 @@ ELF relocation is one `patchelf --set-rpath '$ORIGIN'`. Mach-O has four ways to 
 - **Ask the original what it needs, not the copy.** `@rpath` resolves relative to the file asking, so
   a copy sitting alone in a half-filled `lib/` cannot answer for itself: `libwebp` wanting
   `@rpath/libsharpyuv.0.dylib` looked missing while sitting next to it in the Cellar.
+- **Only the linker can leave room for a longer path.** `install_name_tool` cannot lengthen anything
+  in a Mach-O whose load commands were packed tight — "larger updated load commands do not fit". So
+  every binary and every library that will later be rewritten has to be *linked* with
+  `-Wl,-headerpad_max_install_names`, including dependencies built along the way. It costs nothing
+  and cannot be added afterwards.
 
 ## Loud failures, catalogued
 
