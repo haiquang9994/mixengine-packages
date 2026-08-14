@@ -94,9 +94,14 @@ PECL = ["igbinary", "redis", "mongodb", "xdebug"]
 #             with "incompatible function pointer types" in ext/libxml.
 #   libxslt   only because it has to match the libxml2 above — two libxml2 in one process is not a
 #             thing that can be shipped.
-#   icu       modern ICU dropped `icu-config`, which is the only way ext/intl before 7.4 finds it,
-#             and ICU 68 removed the TRUE/FALSE macros that same code uses. 60.3 is what AlmaLinux 8
-#             carries, so this pins macOS to the version the Linux legs already build against.
+#
+# ICU is deliberately *not* here, though it has the same shape of problem — modern ICU dropped
+# `icu-config`, which is the only way ext/intl before 7.4 finds it, and ICU 68 removed the
+# TRUE/FALSE macros that code uses. Building 60.3 was tried and is not worth what it costs: its
+# 2017 `config.sub` does not know `arm64-apple-darwin`, and its Darwin makefile hands a current
+# clang `-install_namelibicudata.60.dylib` as one argument. Both are fixable and neither is
+# interesting. Homebrew's ICU is used instead, with `icu_config_shim` standing in for the missing
+# tool and ICU's own `U_DEFINE_FALSE_AND_TRUE` restoring the macros — see below.
 SOURCE_LIBRARIES = {
     "oniguruma": {
         "url": "https://github.com/kkos/oniguruma/releases/download/v6.9.9/onig-6.9.9.tar.gz",
@@ -124,19 +129,10 @@ SOURCE_LIBRARIES = {
         "build": "autotools", "pkgconfig": "libxslt", "provides": "libxslt",
         "arguments": ["--without-python", "--with-libxml-prefix={prefix}"],
     },
-    "icu": {
-        "url": "https://github.com/unicode-org/icu/releases/download/release-60-3/icu4c-60_3-src.tgz",
-        "build": "autotools", "pkgconfig": "icu-i18n", "provides": "icu", "subdirectory": "source",
-        "arguments": ["--disable-samples", "--disable-tests", "--build={triple}"],
-        # ICU 60 is 2017 C++, and a current clang defaults to C++17 — which removed the `register`
-        # keyword that code still uses. The triple is given explicitly for the same era reason: its
-        # `config.guess` predates Apple Silicon.
-        "environment": {"CXXFLAGS": "-std=c++11"},
-    },
 }
 
 # What macOS compiles every time, in dependency order — libxslt links the libxml2 above it.
-MACOS_SOURCE_LIBRARIES = ["openssl", "libxml2", "libxslt", "icu"]
+MACOS_SOURCE_LIBRARIES = ["openssl", "libxml2", "libxslt"]
 
 # Everything AlmaLinux 8 does have and PHP 7 needs. Deliberately a named list rather than a `dnf
 # group`: it is a list a reader can check against the configure flags below.
@@ -151,20 +147,23 @@ DNF_PACKAGES = [
 
 # Homebrew's names for the same set. Keg-only formulae are the norm here, so nothing is assumed to be
 # on the compiler's default search path — every one is asked for its own prefix below.
-# openssl, icu4c, libxml2 and libxslt are deliberately absent: those four are compiled here instead,
-# for the reasons in SOURCE_LIBRARIES. Homebrew still installs openssl@3 as somebody else's
-# dependency (libpq's), which is harmless — it is simply never what PHP is pointed at.
+# openssl, libxml2 and libxslt are deliberately absent: those three are compiled here instead, for
+# the reasons in SOURCE_LIBRARIES. Homebrew still installs openssl@3 as somebody else's dependency
+# (libpq's), which is harmless — it is simply never what PHP is pointed at.
 BREW_PACKAGES = [
-    "libzip", "oniguruma", "libsodium", "libpq", "gmp", "jpeg-turbo", "libpng", "freetype",
-    "webp", "sqlite", "libiconv", "bzip2",
+    "icu4c", "libzip", "oniguruma", "libsodium", "libpq", "gmp", "jpeg-turbo", "libpng",
+    "freetype", "webp", "sqlite", "libiconv", "bzip2",
     "readline",   # macOS ships libedit, not readline, and PHP's `--with-readline` wants the latter
 ]
 
-# The Homebrew formula behind each name the configure table uses.
+# The Homebrew formula behind each name the configure table uses. `icu4c` is versioned now
+# (`icu4c@78`) and the number moves, which is why the lookup below tries the versioned spellings
+# rather than trusting any one of them.
 BREW_FORMULAE = {
-    "libzip": "libzip", "oniguruma": "oniguruma", "libsodium": "libsodium", "libpq": "libpq",
-    "gmp": "gmp", "jpeg": "jpeg-turbo", "libpng": "libpng", "freetype": "freetype", "webp": "webp",
-    "sqlite": "sqlite", "libiconv": "libiconv", "bzip2": "bzip2", "readline": "readline",
+    "icu": "icu4c", "libzip": "libzip", "oniguruma": "oniguruma", "libsodium": "libsodium",
+    "libpq": "libpq", "gmp": "gmp", "jpeg": "jpeg-turbo", "libpng": "libpng",
+    "freetype": "freetype", "webp": "webp", "sqlite": "sqlite", "libiconv": "libiconv",
+    "bzip2": "bzip2", "readline": "readline",
 }
 
 
@@ -384,6 +383,48 @@ def macos_dependencies(work: Path, extra: Path) -> dict[str, Path]:
     return built
 
 
+ICU_CONFIG_SHIM = """#!/bin/sh
+# Written by mixengine-packages. ext/intl before PHP 7.4 finds ICU only by running `icu-config`,
+# which ICU deprecated in 61 and removed in 64 — so there is nothing to run on any ICU a current
+# Homebrew will install. This answers the handful of questions PHP's PHP_SETUP_ICU actually asks,
+# from a prefix fixed at build time, and is not general-purpose.
+prefix="{prefix}"
+case "$1" in
+  --prefix|--prefix=*) echo "$prefix" ;;
+  --version) echo "{version}" ;;
+  --cflags|--cxxflags) echo "" ;;
+  --cppflags|--cppflags-searchpath) echo "-I$prefix/include" ;;
+  --ldflags|--ldflags-searchpath) echo "-L$prefix/lib -licui18n -licuuc -licudata" ;;
+  --ldflags-icuio) echo "-licuio" ;;
+  --ldflags-libsonly) echo "-licui18n -licuuc -licudata" ;;
+  *) echo "" ;;
+esac
+"""
+
+
+def icu_config_shim(prefix: Path, icu: Path) -> Path:
+    """Put an ``icu-config`` in *prefix* that answers for Homebrew's ICU.
+
+    Building an ICU old enough to still ship the real thing was the alternative, and it costs more
+    than it returns: see the note in SOURCE_LIBRARIES. The version is read from ICU's own pkg-config
+    file rather than from the formula name, because the formula name is where it is least reliable.
+    """
+    version = "60.1"
+    for candidate in (icu / "lib" / "pkgconfig" / "icu-uc.pc", icu / "lib" / "pkgconfig" / "icu-i18n.pc"):
+        if candidate.is_file():
+            found = re.search(r"^Version:\s*(\S+)", candidate.read_text(encoding="utf-8", errors="replace"),
+                              re.MULTILINE)
+            if found:
+                version = found.group(1)
+                break
+    (prefix / "bin").mkdir(parents=True, exist_ok=True)
+    shim = prefix / "bin" / "icu-config"
+    shim.write_text(ICU_CONFIG_SHIM.format(prefix=icu, version=version), encoding="ascii")
+    shim.chmod(0o755)
+    print(f"wrote an icu-config for ICU {version} at {shim}")
+    return shim
+
+
 def autoconf_269(work: Path, prefix: Path) -> None:
     """Put autoconf 2.69 on PATH, for ``phpize`` on the branches that need it.
 
@@ -518,6 +559,16 @@ def build_environment(prefixes: dict[str, Path], extra: Path) -> dict[str, str]:
     existing = environment.get("PKG_CONFIG_PATH")
     environment["PKG_CONFIG_PATH"] = os.pathsep.join(pkgconfig + ([existing] if existing else []))
     environment["CPPFLAGS"] = " ".join(includes + [environment.get("CPPFLAGS", "")]).strip()
+
+    # The era applies to the language too, not only to the libraries. AlmaLinux 8's gcc-toolset is
+    # new enough to default to C23, under which `false` stopped being a null pointer constant and
+    # `f()` came to mean "no parameters" rather than "unspecified" — so C written before it stops
+    # compiling. That is not a hypothetical: it is what stopped `mongodb` ("incompatible types when
+    # returning `_Bool` where `mc_mincover_t *` was expected") and `xdebug` ("too many arguments to
+    # xdebug_develop_minit"), neither of which had anything to do with the PHP version they were
+    # being built against.
+    environment["CFLAGS"] = f"-std=gnu17 {environment.get('CFLAGS', '')}".strip()
+    environment["CXXFLAGS"] = f"-std=gnu++17 {environment.get('CXXFLAGS', '')}".strip()
     link = list(libraries)
     if sys.platform == "darwin":
         # Without this the load commands are packed tight, and `install_name_tool` later refuses to
@@ -557,6 +608,12 @@ PECL_ATTEMPTS = 5
 # was told it must carry on every version, so an artifact without one is an artifact that lies about
 # what it can run.
 PECL_REQUIRED = {"redis", "mongodb"}
+
+# Loaded with `zend_extension=` rather than `extension=`. Getting this wrong does not look like a
+# configuration mistake from the outside — the extension simply reports as not loaded, which is
+# indistinguishable from a broken build. `opcache` is here as well as `xdebug` because PHP builds it
+# as a shared module by default, so it arrives in `ext/` alongside the PECL ones.
+ZEND_EXTENSIONS = {"xdebug", "opcache"}
 
 
 def pecl_candidates(package: str, version: tuple[int, ...], work: Path):
@@ -819,7 +876,7 @@ def smoke(tree: Path, provides: dict[str, str], shared: list[str]) -> tuple[str,
     loaded, refused = [], []
     for candidate in shared:
         ini = elsewhere.parent / "php.ini"
-        directive = "zend_extension" if candidate == "xdebug" else "extension"
+        directive = "zend_extension" if candidate in ZEND_EXTENSIONS else "extension"
         # Every value quoted, as the Windows recipe does and for the same reason: this is the
         # mechanism the daemon uses, so it is the one worth proving.
         lines = ['display_errors=stderr\n', f'extension_dir="{elsewhere / "ext"}"\n']
@@ -827,16 +884,22 @@ def smoke(tree: Path, provides: dict[str, str], shared: list[str]) -> tuple[str,
             lines.append(f'extension="{elsewhere / "ext" / "igbinary.so"}"\n')
         lines.append(f'{directive}="{elsewhere / "ext" / (candidate + ".so")}"\n')
         ini.write_text("".join(lines), encoding="ascii")
-        answer = run(
-            str(elsewhere / "bin" / "php"), "-n", "-c", str(ini),
-            "-r", f"echo extension_loaded({candidate!r}) ? 'yes' : 'no';",
-        ).strip()
-        if answer.endswith("yes"):
+        # Run directly rather than through `run`: a refusal exits zero, so the reason is on stderr
+        # of a command that succeeded, and `run` only shows stderr when a command fails. Without
+        # this the whole diagnosis is the string 'no'.
+        attempt = subprocess.run(
+            [str(elsewhere / "bin" / "php"), "-n", "-c", str(ini),
+             "-r", f"echo extension_loaded({candidate!r}) ? 'yes' : 'no';"],
+            capture_output=True, text=True, timeout=300,
+        )
+        if attempt.stdout.strip().endswith("yes"):
             loaded.append(candidate)
             print(f"loaded {candidate} from the relocated ext/, through a generated php.ini")
         else:
             refused.append(candidate)
-            print(f"{candidate} did not load: {answer!r}", file=sys.stderr)
+            print(f"{candidate} did not load: {attempt.stdout.strip()!r}", file=sys.stderr)
+            for line in (attempt.stderr or "").splitlines():
+                print(f"  {line}", file=sys.stderr)
 
     missing = sorted(PECL_REQUIRED - set(loaded))
     if missing:
@@ -886,9 +949,22 @@ def main() -> None:
         built_from_source = macos_dependencies(work, extra)
         if branch < (7, 4):
             autoconf_269(work, extra)
+            # ext/intl before 7.4 looks for `<--with-icu-dir>/bin/icu-config`, so the directory PHP
+            # is pointed at is the one holding the shim, not Homebrew's.
+            icu = brew_prefix("icu4c")
+            if icu:
+                icu_config_shim(extra, icu)
+                built_from_source["icu"] = extra
 
     prefixes = dependency_prefixes(built_from_source)
     environment = build_environment(prefixes, extra)
+    if operating_system == "macos" and branch < (7, 4):
+        # ICU 68 removed the TRUE/FALSE macros that ext/intl still uses on these branches. This is
+        # ICU's own escape hatch for exactly that, and it is narrower than defining them globally:
+        # only ICU's headers are affected, so nothing else in PHP gets a surprise macro.
+        environment["CPPFLAGS"] = (
+            environment.get("CPPFLAGS", "") + " -DU_DEFINE_FALSE_AND_TRUE=1"
+        ).strip()
     source, version = source_tree(work, arguments.branch)
 
     prefix = Path("/opt/mixengine") / f"php-{version}"
