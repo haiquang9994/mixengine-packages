@@ -302,7 +302,15 @@ def rewrite(tree: Path, libdir: str, bundled: set[str], executable_dir: Path) ->
             anchor = "@loader_path" if relative == "." else f"@loader_path/{relative}"
             if inside(path, library_directory):
                 run("install_name_tool", "-id", f"@rpath/{path.name}", str(path))
-            for spelling, _ in macho_dependencies(path, executable_dir):
+            for spelling, resolved in macho_dependencies(path, executable_dir):
+                # A reference into /usr/lib is never redirected, even when a bundled library happens
+                # to share its file name. macOS ships its own `libiconv.2.dylib`, and Homebrew ships
+                # one too under the same name but exporting GNU's `_libiconv` rather than the
+                # system's `_iconv` — so matching on the file name alone quietly points the system's
+                # own gettext at the wrong library, and the whole binary aborts on startup with a
+                # missing symbol.
+                if is_system(spelling, resolved):
+                    continue
                 if Path(spelling).name in bundled and not spelling.startswith("@rpath/"):
                     run("install_name_tool", "-change", spelling,
                         f"@rpath/{Path(spelling).name}", str(path))

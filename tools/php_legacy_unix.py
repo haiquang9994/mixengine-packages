@@ -651,7 +651,10 @@ def pecl_candidates(package: str, version: tuple[int, ...], work: Path):
         return
     candidates = [
         found for found, stability in re.findall(r"<v>([^<]+)</v>\s*<s>([^<]+)</s>", catalogue)
-        if stability == "stable"
+        # Both halves are needed. PECL's declared stability is what the packager typed, and
+        # `igbinary 3.2.17RC1` is declared stable there — the version string is the more honest of
+        # the two, and a release candidate is not what a runtime manager should be shipping.
+        if stability == "stable" and re.fullmatch(r"[0-9.]+", found)
     ]
     candidates.sort(key=parts, reverse=True)
 
