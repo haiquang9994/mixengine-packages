@@ -114,13 +114,18 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def php(binary: Path, *args: str) -> str:
+def php(binary: Path, *args: str) -> tuple[str, str]:
+    """Run *binary* and return its output and its complaints, separately.
+
+    Both halves are returned because PHP answers a question on stdout and explains a refusal on
+    stderr, and a check that reads only the first can report "it said no" without ever saying why.
+    """
     result = subprocess.run(
         [str(binary), *args], capture_output=True, text=True, timeout=120
     )
     if result.returncode != 0:
         raise SystemExit(f"{binary.name} {' '.join(args)} failed:\n{result.stderr}")
-    return result.stdout.strip()
+    return result.stdout.strip(), result.stderr.strip()
 
 
 def describe(tree: Path, version: str, arch: str, url: str, upstream_hash: str | None) -> dict:
@@ -130,7 +135,7 @@ def describe(tree: Path, version: str, arch: str, url: str, upstream_hash: str |
         raise SystemExit("no php.exe in the archive")
 
     static = json.loads(
-        php(tree / "php.exe", "-n", "-r", "echo json_encode(get_loaded_extensions());")
+        php(tree / "php.exe", "-n", "-r", "echo json_encode(get_loaded_extensions());")[0]
     )
     shared = sorted(p.stem.removeprefix("php_") for p in (tree / "ext").glob("php_*.dll"))
     print(f"{len(static)} static extension(s), {len(shared)} loadable module(s) in ext/")
@@ -189,7 +194,7 @@ def smoke(tree: Path, version: str, manifest: dict) -> dict:
         relative = manifest["provides"].get(name)
         if relative is None:
             raise SystemExit(f"the archive provides no {name}")
-        banner = php(elsewhere / relative, "-v").splitlines()[0]
+        banner = php(elsewhere / relative, "-v")[0].splitlines()[0]
         if version not in banner:
             raise SystemExit(f"{relative} reports {banner!r}, expected {version}")
         print(f"{relative}: {banner}")
@@ -201,24 +206,24 @@ def smoke(tree: Path, version: str, manifest: dict) -> dict:
             continue
         # Warnings go to stderr on purpose. PHP's CLI default is to display them on *stdout*, so a
         # failed load would otherwise arrive mixed into the answer being parsed.
-        answer = php(
+        answer, complaint = php(
             elsewhere / "php.exe",
             "-n",
             "-d", "display_errors=stderr",
             "-d", f"extension_dir={elsewhere / 'ext'}",
-            "-d", f"extension={candidate}",
+            "-d", f"extension=php_{candidate}.dll",
             "-r", f"echo extension_loaded({candidate!r}) ? 'yes' : 'no';",
         )
         if answer == "yes":
             loaded = candidate
             print(f"loaded {candidate} from the relocated ext/")
             break
-        refused.append(f"{candidate}={answer!r}")
+        refused.append(f"{candidate}: {answer!r} {complaint.splitlines()[:2]}")
     if loaded is None:
         raise SystemExit(
             "no shared extension could be loaded after relocation, so extension_dir is not being "
-            "honoured and every dynamic extension would fail on a user's machine. Tried: "
-            f"{', '.join(refused) or 'nothing — none of the candidates is in this build'}"
+            "honoured and every dynamic extension would fail on a user's machine.\n  "
+            + "\n  ".join(refused or ["none of the candidates is in this build"])
         )
 
     shutil.rmtree(elsewhere.parent.parent, ignore_errors=True)
