@@ -101,15 +101,28 @@ For Ruby, one of the three columns turned out to be borrowable and two did not:
 | --- | --- | --- |
 | Windows x86_64 | **3.2 – newest** | **borrowed** — [RubyInstaller](https://github.com/oneclick/rubyinstaller2) `.7z`, repacked |
 | Windows aarch64 | **3.4 – newest** | ditto; upstream's first ARM64 archive is in the 3.4 line |
-| macOS aarch64, x86_64 | — | **built**, and not yet: MixEngine's T27b |
-| Linux x86_64, aarch64 | — | ditto |
+| macOS aarch64, x86_64 | **3.2 – newest** | **built** — from ruby-lang.org's source, dependencies bundled |
+| Linux x86_64, aarch64 | **3.2 – newest** | **built** — the same, inside AlmaLinux 8 for the glibc floor |
 
 RubyInstaller configures Ruby with `--enable-load-relative`, so the standard library, the gem home
 and the CA bundle are all computed from the executable's own location — `tools/ruby.py` checks all
 four from a directory the archive has been moved to. The macOS and Linux cells have no such
 publisher: Homebrew's `portable-ruby` is relocatable and publishes exactly one version,
 `ruby/ruby-builder`'s artifacts "embed the install path when built and cannot be moved around" in
-its own README's words, and RVM's binaries are prefix-bound and years stale.
+its own README's words, and RVM's binaries are prefix-bound and years stale. So `tools/ruby_unix.py`
+passes the same flag to a build of its own — and the two recipes share `tools/ruby_smoke.py`, which
+is *what they claim* rather than how they got there, because a daemon installing one of these cannot
+tell which produced it.
+
+The CA store is the part that is not obvious. A Ruby linked against a distribution's OpenSSL
+inherits that distribution's `OPENSSLDIR` — `/etc/pki/tls` on the Red Hat family, `/etc/ssl` on the
+Debian one — so an artifact built on one verifies certificates perfectly on the build machine and
+fails every handshake on a user running the other, with an error that names nothing. OpenSSL is
+therefore compiled here with its four default-path functions taught to answer relative to the
+loaded `libcrypto`'s own location, which is `--enable-load-relative` applied one library down, and
+the bundle itself ships inside the tree. `OpenSSL::X509::DEFAULT_CERT_FILE` names a file inside the
+artifact on all six targets, and the smoke test verifies a real chain over the network rather than
+trusting the path.
 
 ## Repack, do not rearrange
 
@@ -153,8 +166,11 @@ python tools/node.py --version 22 --out dist/
 # Python: likewise, from python-build-standalone's newest release unless one is pinned
 python tools/python.py --version 3.12 --out dist/
 
-# Ruby: Windows only — macOS and Linux are compiled, and that is T27b
+# Ruby: Windows borrows RubyInstaller's archive
 python tools/ruby.py --version 3.4 --out dist/
+
+# Ruby on macOS / Linux: compiled, with its own OpenSSL and its own CA bundle
+python3 tools/ruby_unix.py --version 3.4 --out dist/
 
 # Then regenerate and sign the index from what the releases actually contain
 python tools/mkindex.py --base-url … --out dist/index.json
@@ -163,14 +179,16 @@ minisign -Sm dist/index.json -s minisign.key
 
 In practice none of that is run by hand: `.github/workflows/build-php.yml` takes a version, picks the
 recipe from it and produces every target; `build-node.yml` and `build-python.yml` do the same with
-one recipe and six; `build-ruby.yml` runs two legs, both Windows; and `publish-index.yml` regenerates
-and signs the index from every release that exists.
+one recipe and six; `build-ruby.yml` runs six legs across two recipes; and `publish-index.yml`
+regenerates and signs the index from every release that exists.
 
 The four borrowed recipes share `tools/borrow.py` — downloading, hashing, unwrapping the publisher's
 wrapper directory, packing, and running a program with a `PATH` the runner cannot answer. What none
 of them share is the smoke test, deliberately: the mechanics are the same for every publisher and the
 *claim* is not, and this repository has already been bitten once by two producers writing the same
-manifest field to mean two different strengths of proof.
+manifest field to mean two different strengths of proof. The one exception proves the rule —
+`tools/ruby_smoke.py` is shared by the two Ruby recipes precisely *because* they produce the same
+runtime for one table row, so there the claim is the thing that must not differ.
 
 ## The signing key
 

@@ -1,17 +1,20 @@
 name: build ruby
 
-# **Two legs, and both of them are Windows.** That is not this workflow being unfinished; it is where
-# the Ruby row of MixEngine's runtime table actually stands. RubyInstaller publishes relocatable
-# archives for Windows on both architectures and nothing for anyone else, and the three relocatable
-# Ruby distributions that exist for macOS and Linux were each checked and each refused — see
-# `.claude/operations/runtime-packaging.md` in the mixengine repository. Those two targets are
-# compiled rather than borrowed, which is a build pipeline and therefore a task of its own (T27b);
-# when it lands it will be a workflow of its own too, the way the PHP recipes are split.
+# **Six legs and two recipes**, which is the shape the Ruby row of MixEngine's runtime table actually
+# has. RubyInstaller publishes relocatable archives for Windows on both architectures, so those two
+# legs fetch, prove and repack; the three relocatable Ruby distributions that exist for macOS and
+# Linux were each checked and each refused — see `.claude/operations/runtime-packaging.md` in the
+# mixengine repository — so those four compile from source.
+#
+# One workflow rather than two, unlike what this file used to predict, and the release job is the
+# reason: it is keyed on the exact version, and two workflows dispatched for one line would race to
+# create the same `ruby-<version>` tag. `build-php.yml` has the same shape for the same reason —
+# four jobs, two recipes, one release.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Ruby line (3.4), exact version (3.4.10), or 'latest'. 3.2 upwards; ARM64 from 3.4."
+        description: "Ruby line (3.4), exact version (3.4.10), or 'latest'. 3.2 upwards; Windows ARM64 from 3.4."
         required: true
         type: string
       release:
@@ -24,7 +27,7 @@ permissions:
   contents: write
 
 jobs:
-  pack:
+  windows:
     # Each leg runs on the architecture it packs for, because the recipe smoke-tests what it packed:
     # it moves the tree somewhere it has never been and makes Ruby find its own library, its own gem
     # home and its own CA bundle from there. An ARM64 archive unpacked on an x64 runner could not run
@@ -72,11 +75,76 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  macos:
+    # Compiled from source, each architecture on a runner of its own: nothing is cross-compiled and
+    # nothing runs under Rosetta, because an x86_64 build filed under aarch64 would be an artifact
+    # that installs on Apple Silicon and then emulates — which is the thing a native runtime manager
+    # exists to avoid.
+    #
+    # The runner's own macOS is the floor of everything the build links against, so the oldest image
+    # available is the widest artifact. `relocate.floor` measures what came out rather than assuming
+    # it, and the manifest carries the number.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-14,       arch: aarch64 }
+          - { runner: macos-15-intel, arch: x86_64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: build from source
+        run: python3 -u tools/ruby_unix.py --version "${{ inputs.version }}" --out dist
+        timeout-minutes: 180
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ruby-macos-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  linux:
+    # Compiled inside AlmaLinux 8 rather than on the runner, which is the same choice the PHP 7
+    # legs make and here it is *only* about the floor: nothing in Ruby 3.2+ wants an old toolchain,
+    # and the image carries a current gcc. What it buys is glibc 2.28 instead of the runner's 2.39,
+    # which is the difference between an artifact that runs on Debian 12 and Ubuntu 22.04 and one
+    # that refuses to start on both.
+    #
+    # Everything Ruby *is* version-sensitive about — OpenSSL, libyaml, libffi — is compiled by the
+    # recipe on every target alike, so the old image costs nothing on the other side of the ledger.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04,     image: quay.io/pypa/manylinux_2_28_x86_64,  arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, image: quay.io/pypa/manylinux_2_28_aarch64, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: build from source
+        # AlmaLinux 8's own python is 3.6, which this recipe does not run on. The image ships
+        # current interpreters for its actual purpose; the newest of those is used rather than
+        # installing another one.
+        run: |
+          set -euo pipefail
+          python="$(ls -d /opt/python/cp31*/bin/python 2>/dev/null | sort -V | tail -1 || true)"
+          "${python:-python3}" -u tools/ruby_unix.py --version "${{ inputs.version }}" --out dist
+        timeout-minutes: 180
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ruby-linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
   release:
     # One release per exact Ruby version, holding every artifact of it. The version is read back out
     # of each manifest rather than taken from the input, because the input may be a line or `latest`
-    # and each leg resolves it against upstream's tags independently.
-    needs: pack
+    # and each leg resolves it independently — Windows against RubyInstaller's tags, the others
+    # against ruby-lang.org's own index. If they disagree they land in different releases, which is
+    # the honest outcome rather than a mislabelled asset.
+    needs: [windows, macos, linux]
     if: ${{ inputs.release && !failure() && !cancelled() }}
     runs-on: ubuntu-24.04
     steps:
@@ -100,7 +168,7 @@ jobs:
             if ! gh release view "$tag" >/dev/null 2>&1; then
               gh release create "$tag" \
                 --title "Ruby $version" \
-                --notes "Relocatable Ruby $version for MixEngine, repacked from oneclick/rubyinstaller2. Windows only — Ruby for macOS and Linux is compiled rather than borrowed. Every artifact was run from a directory it had been moved to before being published: Ruby's library path, gem home and CA bundle all resolving inside the moved tree, and gem, bundle, rake and irb each reporting the version packed beside them. See mixengine-artifact.json inside each one."
+                --notes "Relocatable Ruby $version for MixEngine. Windows is repacked from oneclick/rubyinstaller2; macOS and Linux are compiled from ruby-lang.org's own source with --enable-load-relative, their dependencies bundled beside the binary and their CA bundle inside the tree. Every artifact was run from a directory it had been moved to before being published: Ruby's library path, gem home and CA bundle all resolving inside the moved tree, a real certificate chain verified over the network, and gem, bundle, rake and irb each reporting the version packed beside them. See mixengine-artifact.json inside each one."
             fi
             gh release upload "$tag" "${assets[@]}" --clobber
           done

@@ -23,7 +23,10 @@ built on; ``ruby/ruby-builder``'s artifacts are what ``ruby/setup-ruby`` install
 says they "embed the install path when built and cannot be moved around"; and RVM's binaries are
 prefix-bound, per distribution release, and the newest of them are years old.
 
-Everything mechanical is in :mod:`borrow`, shared with the Node.js and Python recipes.
+Everything mechanical is in :mod:`borrow`, shared with the Node.js and Python recipes, and
+everything this recipe *claims* about a Ruby is in :mod:`ruby_smoke`, shared with the one that
+compiles the other two systems — a Ruby packed here and a Ruby compiled there are the same runtime
+to a MixEngine daemon, so they must be the same claim as well.
 
 Python 3 stdlib only, by policy: this runs on a GitHub runner with nothing installed.
 """
@@ -43,6 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import borrow  # noqa: E402  — siblings, and this directory is not importable as a package
+import ruby_smoke  # noqa: E402
 
 API = "https://api.github.com/repos/oneclick/rubyinstaller2/releases"
 
@@ -73,35 +77,6 @@ LAYOUT = {
 }
 
 REQUIRED = ("ruby", "gem", "bundle")
-
-# Required from the relocated tree. Every one is a compiled extension or the thing that proves one
-# works: no `openssl` is no `gem install` and no `bundle install`, no `psych` is no YAML and
-# therefore no `config/database.yml`, no `fiddle` is no FFI, and `zlib` is how every gem arrives.
-MODULES = (
-    "openssl", "zlib", "psych", "fiddle", "digest", "socket", "json", "stringio",
-    "bigdecimal", "io/console", "date", "etc",
-)
-
-PROBE = """
-require "json"
-require "openssl"
-require "digest"
-require "zlib"
-require "rbconfig"
-puts JSON.generate({
-  version: RUBY_VERSION,
-  platform: RUBY_PLATFORM,
-  ruby: RbConfig.ruby,
-  rubylibdir: RbConfig::CONFIG["rubylibdir"],
-  archdir: RbConfig::CONFIG["archdir"],
-  gem_dir: Gem.dir,
-  openssl: OpenSSL::OPENSSL_VERSION,
-  zlib: Zlib.zlib_version,
-  sha256: Digest::SHA256.hexdigest("mixengine"),
-  cert_file: OpenSSL::X509::DEFAULT_CERT_FILE,
-  cert_file_exists: File.exist?(OpenSSL::X509::DEFAULT_CERT_FILE),
-})
-"""
 
 
 def releases() -> list[dict]:
@@ -226,118 +201,19 @@ def describe(tree: Path, version: str, arch: str, tag: str, url: str, digest: st
     }
 
 
-def gem_versions(tree: Path) -> dict[str, str]:
-    """Which version of each bundled gem is *in this archive*, read off its gemspecs.
-
-    The point is to have an expectation that did not come from running the thing being tested. When
-    ``bundle --version`` says 2.6.9 and the archive contains ``bundler-2.6.9.gemspec``, the batch
-    file ran this tree's Ruby; when it says something else, another Ruby on the machine answered and
-    the artifact has proven nothing about itself.
-    """
-    found: dict[str, str] = {}
-    for gems in sorted((tree / "lib" / "ruby" / "gems").glob("*/specifications")):
-        for spec in list(gems.glob("*.gemspec")) + list((gems / "default").glob("*.gemspec")):
-            name, _, version = spec.name[: -len(".gemspec")].rpartition("-")
-            found.setdefault(name, version)
-    # `bundle` is the command; `bundler` is the gem. The one alias worth spelling out, because it is
-    # the only place in this table where a command and its gem are named differently.
-    if "bundler" in found:
-        found.setdefault("bundle", found["bundler"])
-    return found
-
-
 def smoke(tree: Path, version: str, manifest: dict) -> dict:
     """Run the artifact from somewhere it has never been, and make it be itself while doing it.
 
     ``ruby --version`` alone would pass on an archive that is unusable in three separate ways: the
     runner has a Ruby of its own that would answer identically, an interpreter that found the
     *runner's* standard library answers it too, and a Ruby that cannot verify a certificate answers
-    it right up to the first ``gem install``. So five things are proven.
-
-    *It is this Ruby*, and *it found its own library after moving*: ``RbConfig.ruby``,
-    ``rubylibdir``, ``archdir`` and ``Gem.dir`` all have to be inside the relocated tree. Those four
-    are the whole of what ``--enable-load-relative`` claims, and they are the reason this cell can be
-    borrowed at all.
-
-    *Its compiled extensions load, and two are called rather than reported*: OpenSSL hashes a string
-    and zlib states its own version, where ``OpenSSL::OPENSSL_VERSION`` alone is a string constant a
-    broken build recites just as confidently.
-
-    *It carries its own trust store.* ``OpenSSL::X509::DEFAULT_CERT_FILE`` has to exist **and be
-    inside the tree**. A Ruby whose CA bundle points at the packaging machine works perfectly on the
-    packaging machine, and this is the check that would have caught it.
-
-    *Its bundled commands are its own.* Each of ``gem``, ``bundle``, ``rake`` and ``irb`` reports the
-    version whose gemspec is in this archive, and ``gem`` additionally has to name a gem home inside
-    the tree.
+    it right up to the first ``gem install``. What is proven instead is in :mod:`ruby_smoke`, and it
+    is proven there rather than here because the recipe that compiles macOS and Linux has to make
+    exactly the same claim about exactly the same runtime.
     """
     elsewhere = borrow.moved(tree)
-    ruby = elsewhere / manifest["provides"]["ruby"]
-    path = borrow.clean_path(ruby.parent)
-    # A runner with a Ruby set up has usually exported at least one of these, and every one of them
-    # would make this test pass for a reason that will not exist on a user's machine.
-    drop = ("RUBY", "GEM_", "BUNDLE_")
-
-    # `ruby 3.4.10 (2026-07-01 …)`, but `ruby 2.7.8p225 (…)` in the 2.x lines — the patchlevel used
-    # to be part of the version word and is not any more, so the number is matched rather than the
-    # word taken.
-    banner = borrow.run(ruby, "--version", path=path, drop=drop)
-    stated = re.match(r"ruby (\d+\.\d+\.\d+)", banner)
-    if not stated or stated.group(1) != version:
-        raise SystemExit(f"ruby reports {banner!r}, expected {version}")
-
-    for module in MODULES:
-        borrow.run(ruby, "-e", f"require {module!r}", path=path, drop=drop)
-
-    report = json.loads(borrow.run(ruby, "-e", PROBE, path=path, drop=drop))
-    if report["version"] != version:
-        raise SystemExit(f"RUBY_VERSION is {report['version']}, expected {version}")
-    for field in ("ruby", "rubylibdir", "archdir", "gem_dir"):
-        where = Path(report[field])
-        if not where.resolve().is_relative_to(elsewhere.resolve()):
-            raise SystemExit(
-                f"{field} is {where}, which is not inside the tree this Ruby was copied to — "
-                f"--enable-load-relative did not survive the move, or another Ruby answered"
-            )
-    if len(report["sha256"]) != 64:
-        raise SystemExit(f"the bundled OpenSSL answered {report['sha256']!r}")
-    if not report["cert_file_exists"]:
-        raise SystemExit(
-            f"OpenSSL::X509::DEFAULT_CERT_FILE is {report['cert_file']}, which does not exist — "
-            "every HTTPS request this Ruby makes would fail verification, `gem install` included"
-        )
-    if not Path(report["cert_file"]).resolve().is_relative_to(elsewhere.resolve()):
-        raise SystemExit(
-            f"this Ruby's CA bundle is {report['cert_file']}, outside its own tree: it would stop "
-            "verifying certificates the moment the archive is installed somewhere else"
-        )
-
-    print(f"ruby {report['version']} {report['platform']}, {report['openssl']}, "
-          f"zlib {report['zlib']}, CA bundle inside the tree")
-    ran = ["ruby --version", "require " + ", ".join(MODULES), "ruby -e (RbConfig, Gem, OpenSSL)"]
-
-    packaged = gem_versions(elsewhere)
-    for name in sorted(set(manifest["provides"]) - {"ruby"}):
-        reported = borrow.run(
-            elsewhere / manifest["provides"][name], "--version", path=path, drop=drop
-        )
-        expected = packaged.get(name)
-        if expected and expected not in reported.replace(",", " ").split():
-            raise SystemExit(
-                f"{name} reports {reported!r}, but the {name} inside this archive is {expected} — "
-                f"something else on this machine answered"
-            )
-        print(f"{manifest['provides'][name]}: {reported}")
-        ran.append(f"{manifest['provides'][name]} --version")
-
-    # `gem` is the one command with no gemspec of its own — RubyGems is part of Ruby — so the check
-    # above has nothing to compare it against. This is what replaces it, and it is stronger.
-    home = borrow.run(elsewhere / manifest["provides"]["gem"], "env", "gemdir",
-                      path=path, drop=drop)
-    if not Path(home).resolve().is_relative_to(elsewhere.resolve()):
-        raise SystemExit(f"gem would install into {home}, which is outside this artifact")
-    ran.append(f"{manifest['provides']['gem']} env gemdir")
-
+    report = ruby_smoke.interpreter(elsewhere, version, manifest["provides"])
+    ran = ruby_smoke.commands(elsewhere, manifest["provides"])
     borrow.discard(elsewhere)
     return {"relocated": True, "ran": ran, "openssl": report["openssl"]}
 

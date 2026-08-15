@@ -65,11 +65,20 @@ SYSTEM_PREFIXES = ("/usr/lib/", "/System/")
 BINARY_DIRECTORIES = ("bin", "sbin", "ext", "lib", "libexec", "modules")
 
 ELF_MAGIC = b"\x7fELF"
-MACHO_MAGICS = {
-    b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe",  # 64- and 32-bit, little endian
-    b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce",  # big endian
-    b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",  # universal
-}
+MACHO_LITTLE = {b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe"}    # 64- and 32-bit, little endian
+MACHO_BIG = {b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce"}
+MACHO_FAT = {b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}       # universal
+MACHO_MAGICS = MACHO_LITTLE | MACHO_BIG | MACHO_FAT
+
+# What the loader will actually be asked to load. A file can carry the right magic number and never
+# be loaded by anything, and both shapes of that turned up in one Ruby tree: a relocatable object
+# left behind in a gem's build directory (`debug.o`), and the debug companion inside a `.dSYM`
+# bundle. Neither has a search path worth rewriting, and both *refuse* the tool that would rewrite
+# one — `ldd` answers "not a dynamic executable" and `install_name_tool` answers "string table not
+# at the end of the file". Reading the type out of the header is the difference between a rule and
+# a list of exceptions; the magic number alone was never the question being asked.
+ELF_TYPES = {2, 3}              # ET_EXEC, ET_DYN
+MACHO_TYPES = {2, 6, 8}         # MH_EXECUTE, MH_DYLIB, MH_BUNDLE
 
 
 class Unbundleable(SystemExit):
@@ -101,8 +110,31 @@ def kind(path: Path) -> str | None:
     return None
 
 
+def loadable(path: Path) -> bool:
+    """Whether this file is one the loader loads, read off its header rather than its magic.
+
+    See ELF_TYPES and MACHO_TYPES for what that excludes and why. A universal binary is taken as
+    loadable without looking further: its header is a table of architectures rather than a Mach-O
+    header, and nothing in this table ships one.
+    """
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(20)
+    except OSError:
+        return False
+    if len(header) < 18:
+        return False
+    if header[:4] == ELF_MAGIC:
+        order = "little" if header[5] == 1 else "big"
+        return int.from_bytes(header[16:18], order) in ELF_TYPES
+    if header[:4] in MACHO_FAT:
+        return True
+    order = "little" if header[:4] in MACHO_LITTLE else "big"
+    return int.from_bytes(header[12:16], order) in MACHO_TYPES
+
+
 def machine_files(tree: Path) -> list[Path]:
-    """Every ELF or Mach-O in the tree, in a stable order, symlinks skipped."""
+    """Every ELF or Mach-O in the tree the loader will load, in a stable order, symlinks skipped."""
     found = []
     for directory in BINARY_DIRECTORIES:
         root = tree / directory
@@ -111,7 +143,7 @@ def machine_files(tree: Path) -> list[Path]:
         for path in sorted(root.rglob("*")):
             if path.is_symlink() or not path.is_file():
                 continue
-            if kind(path):
+            if kind(path) and loadable(path):
                 found.append(path)
     return found
 
@@ -140,6 +172,12 @@ def elf_dependencies(path: Path, search: Sequence[Path] = ()) -> list[tuple[str,
         line = line.strip()
         if not line:
             continue
+        # `ldd` answers in prose when the file is not something it can resolve for — a statically
+        # linked executable, or anything `machine_files` should already have filtered out. Reading
+        # that as a library name produces "X needs not a dynamic executable", which is a sentence
+        # this repository printed once and should not be able to print again.
+        if line in ("not a dynamic executable", "statically linked"):
+            return []
         if "=>" in line:
             soname, _, target = line.partition("=>")
             soname = soname.strip()
@@ -337,13 +375,20 @@ def inside(path: Path, tree: Path) -> bool:
         return False
 
 
-def bundle(tree: Path, libdir: str = "lib") -> dict[str, Path]:
+def bundle(tree: Path, libdir: str = "lib", search: Sequence[Path] = ()) -> dict[str, Path]:
     """Copy every non-system dependency into ``tree/libdir`` and rewrite the tree to use it.
 
     Returns ``{name: where it came from}`` — the origin matters to the caller, which has to collect
     each bundled library's licence and cannot ask the copy where it was packaged from. Raises rather
     than continuing when two different libraries want the same file name, because one would silently
     overwrite the other and the result would load whichever won.
+
+    *search* is where the build put the libraries it compiled itself, and it is needed for the same
+    reason `loader_search` exists one step later: **a library does not have to carry a search path,
+    and the one asking for it usually does.** A Ruby linked with ``-Wl,-rpath,<deps>/lib`` resolves
+    ``libssl.so.3`` perfectly, and ``libssl.so.3`` then names ``libcrypto.so.3`` with no path of its
+    own — so asking *it* what it needs answers "not on this machine" about a library sitting beside
+    it. Left out, the bundling stops on a dependency that was never missing.
     """
     library_directory = tree / libdir
     executable_dir = tree / "bin"
@@ -356,7 +401,7 @@ def bundle(tree: Path, libdir: str = "lib") -> dict[str, Path]:
         if current in seen:
             continue
         seen.add(current)
-        for spelling, resolved in dependencies(current, executable_dir):
+        for spelling, resolved in dependencies(current, executable_dir, search):
             if is_system(spelling, resolved):
                 continue
             if resolved is None:
@@ -407,7 +452,12 @@ def rewrite(tree: Path, libdir: str, bundled: set[str], executable_dir: Path) ->
         relative = os.path.relpath(library_directory, path.parent).replace(os.sep, "/")
         if sys.platform == "darwin":
             anchor = "@loader_path" if relative == "." else f"@loader_path/{relative}"
-            if inside(path, library_directory):
+            # An install name is a property of a *dylib*, and not every Mach-O under a library
+            # directory is one: Ruby's compiled extensions live in `lib/ruby/<version>/<arch>/` and
+            # are MH_BUNDLE, which has no `LC_ID_DYLIB` to set. `macho_id` answering None is how
+            # they are told apart — asking `install_name_tool -id` anyway makes it refuse the file,
+            # which would fail the whole relocation over something that was never wanted.
+            if inside(path, library_directory) and macho_id(path):
                 run("install_name_tool", "-id", f"@rpath/{path.name}", str(path))
             for spelling, resolved in macho_dependencies(path, executable_dir):
                 # A reference into /usr/lib is never redirected, even when a bundled library happens

@@ -1,9 +1,15 @@
-# Building from source: what the PHP 7 pipeline cost to learn
+# Building from source: what the PHP 7 and Ruby pipelines cost to learn
 
-`relocate.py` and `php_legacy_unix.py` explain *why they are shaped the way they are*. This file is
-for the other half — the failures that shaped them. It is written for whoever opens the next "we
-build" cell in [MixEngine's runtime table][table] (nginx, Ruby, PostgreSQL, Redis), because most of
-what follows is not about PHP at all.
+`relocate.py`, `php_legacy_unix.py` and `ruby_unix.py` explain *why they are shaped the way they
+are*. This file is for the other half — the failures that shaped them. It is written for whoever
+opens the next "we build" cell in [MixEngine's runtime table][table] (nginx, PostgreSQL, Redis),
+because most of what follows is not about PHP or Ruby at all.
+
+The Ruby half of this file is [further down](#ruby-took-four-rounds-and-none-of-it-was-ruby), and
+its headline is worth putting at the top: **four rounds to green, and not one of them was the
+language** — plus two more spent making the four artifacts of one version the same artifact. Every
+failure was in the shared packing code or in this repository's own idea of what a check should ask,
+which is what a second "we build" cell is for.
 
 The PHP 7.0–8.0 pipeline took ten rounds of CI to go green on four targets. Almost none of that was
 spent on code that failed to compile. It was spent on **builds that exited zero and produced
@@ -218,6 +224,107 @@ Two configure-flag habits worth keeping, both learned by shipping past a warning
   nowhere to point belongs omitted, not passed bare. Likewise `--with-iconv=/usr` sends PHP looking
   for a libiconv that glibc does not have, because iconv is in the C library there.
 
+## Ruby took four rounds, and none of it was Ruby
+
+The PHP range above cost ten rounds and most of them were the language: an ICU that would not
+compile, a `configure` probe that answered wrongly, an extension that built and would not load. Ruby
+compiled on all four targets the first time it was asked, with `--enable-load-relative` doing
+everything RubyInstaller's Windows archive proves it does. What failed, four times, was **the
+packing code and the checks** — which is the argument for opening a second "we build" cell at all.
+
+**A file can carry the right magic number and never be loaded by anything.** `machine_files` found
+every ELF and Mach-O in the tree by its first four bytes, which is correct for PHP, where the only
+machine code is binaries and extensions. A Ruby tree also holds `debug.o`, left in a bundled gem's
+build directory, and a `.dSYM` bundle beside every extension macOS compiles. Neither is ever loaded,
+and each *refuses the tool that would have rewritten it*: `ldd` answers "not a dynamic executable",
+which was then read as the name of a missing library, and `install_name_tool` answers "string table
+not at the end of the file". Read `e_type` and `filetype` out of the header — ET_EXEC/ET_DYN,
+MH_EXECUTE/MH_DYLIB/MH_BUNDLE — rather than the magic. And an install name belongs to a *dylib*:
+Ruby's extensions are MH_BUNDLE and have no `LC_ID_DYLIB` to set.
+
+**A library does not have to carry a search path, and whoever asks for it usually does.** The build
+links Ruby with `-Wl,-rpath,<deps>/lib`, so `ruby` resolves `libssl.so.3` perfectly. `libssl.so.3`
+then names `libcrypto.so.3` with no search path of its own, so asking *it* answers "not on this
+machine" about a library sitting in the same directory. This is the same asymmetry `loader_search`
+already corrected *inside* a finished tree, one step earlier and with a different-looking symptom.
+`bundle()` takes the build's own prefix now, for the same reason `verify()` takes the tree's.
+
+**Two checks, two different PATHs, and mixing them up looks like a broken toolchain.** Every check
+that asks the *artifact* a question strips the runner's PATH, so the runner's own Ruby cannot answer
+for it. The check that compiles a native gem must do the opposite: the compiler is supposed to come
+from the machine, because on a user's machine it will. Inheriting the strict PATH produced mkmf's
+"you have to install development tools first" on an image whose compiler was simply somewhere else
+(`/opt/rh/gcc-toolset-14`). *Strip the environment for questions about the archive; keep it for
+questions about the machine the archive will land on.*
+
+**The proof directory has a space in it on purpose, and one step cannot have one.** macOS `mkmf`
+points an extension at the interpreter with `-bundle_loader <bindir>/ruby` and does not quote the
+path, so `ld` reads `…/moved here/tree/bin/ruby` as a library name and cannot find it. That is
+upstream's escaping, it says nothing about relocation — and it is worth knowing on its own, because
+**a macOS user whose home directory contains a space cannot build native gems against a Ruby
+installed under it.** The recipe compiles its gem from a second moved copy without the space, and
+this paragraph is the rest of the answer.
+
+**`rbconfig.rb` is not a log.** It is the configuration every native gem is compiled with, years
+later, on somebody else's machine: the compiler, the flags, the header directory. Which makes two
+things build-machine leaks rather than noise — `-I/tmp/mixengine-ruby-a1b2c3/deps/include`, a
+directory that will never exist again, and `CC=/opt/rh/gcc-toolset-14/root/usr/bin/gcc`, a compiler
+that will not either. Hand the build a **bare** `CC`, so `PATH` answers at gem-build time, and take
+this build's temporary directories back out of what it wrote down. Then compile a gem from the moved
+tree, which is the difference between believing that and having asked.
+
+**Ship the runtime, not the build of it.** `make install` compiles each bundled gem's extension in
+place and leaves the Makefile, the `mkmf.log` and the objects behind — every one naming a directory
+that stopped existing when the build finished. The `.dSYM` bundles are a third of a macOS archive on
+their own.
+
+**Two artifacts of one version should differ only in their target**, and measured, they did not.
+Three times, none of them a failure and all of them invisible from outside the archive:
+
+- The Intel runner had GMP installed as another formula's dependency and the arm64 runner did not,
+  so one Ruby used it for Integer arithmetic and its sibling did not.
+- Installing GMP explicitly fixed half of it. **Homebrew's prefix is a compiler search path on
+  Intel and not on Apple Silicon** — `/usr/local/include` is looked in anyway, `/opt/homebrew/include`
+  is not — so `brew install gmp` produced `checking for gmp.h... yes` on one runner and `no` on the
+  other, with no error on either. Ask `brew --prefix <formula>` and pass it; it is the only spelling
+  that is true on both.
+- The manylinux image has no `zstd`, so `tar` silently produced gzip on Linux and zstd on macOS.
+
+**A fallback that succeeds is the hardest kind of difference to notice**, which is an argument for
+printing what was actually used rather than what was asked for — and for reading the four logs of
+one version side by side before believing they built the same thing.
+
+**One thing generalised from PHP and did not need to be discovered again**: build inside the era —
+here only for the floor. Nothing in Ruby 3.2+ wants an old toolchain, so AlmaLinux 8 buys glibc 2.28
+instead of the runner's 2.39 and costs nothing, because everything Ruby *is* version-sensitive about
+(OpenSSL, libyaml, libffi) is compiled by the recipe on every target alike.
+
+### The trust store, which is a claim about the build machine
+
+Worth its own heading because it is invisible, it is not Ruby-specific, and every remaining "we
+build" cell that speaks TLS will meet it.
+
+`OPENSSLDIR` is fixed when OpenSSL is compiled, and everything downstream is a statement about the
+machine that compiled it: `X509_get_default_cert_file` answers `/etc/pki/tls/cert.pem` on the Red
+Hat family and `/etc/ssl/cert.pem` on the Debian one. Ruby republishes whichever it got as
+`OpenSSL::X509::DEFAULT_CERT_FILE`. So an artifact built on AlmaLinux verifies certificates
+perfectly on the runner and fails **every** handshake on a Debian user's machine, with an error that
+names neither the file nor the reason — and `gem install` is the first thing that user will run.
+
+Three answers were considered and only one is complete. Setting `SSL_CERT_FILE` from the runtime
+covers the programs that read the environment and leaves the constant lying. Shipping a bundle and
+documenting it is not an answer at all. What `ruby_unix.py` does is compile OpenSSL with its four
+default-path functions taught to resolve against **the loaded `libcrypto`'s own location** —
+`dladdr` on a symbol in the library, two directories up, `ssl/cert.pem` — falling back to the
+compiled-in path when that file is not there. It is `--enable-load-relative` applied one library
+down, it is what RubyInstaller gets from MSYS2 on Windows, and it makes the constant true.
+
+Then prove it twice, because neither half implies the other: the path has to be **inside the moved
+tree** (a bundle pointing at the packaging machine works perfectly on the packaging machine), and a
+real chain has to **verify over the network** from there (a path that exists proves nothing about
+what is in the file). The Python row learned the second half separately, by asserting a certificate
+*count* that reads 0 on a perfectly working Linux.
+
 ## Before opening the next one
 
 - Build inside the era the source was written for. It costs a `container:` line; the alternative
@@ -229,3 +336,10 @@ Two configure-flag habits worth keeping, both learned by shipping past a warning
   daemon can state, unlike a binary that fails in the loader.
 - Put the proof in the manifest. `smoke.relocated`, `smoke.ran`, `smoke.loaded_extensions` and
   `requires` are what a reader has instead of the log, which expires.
+- Ask what a *runtime* has to be able to do after it moves, not only what it has to be able to
+  start. For Ruby that was three things nothing in the PHP range had asked for: verify a
+  certificate, install into its own gem home, and compile a native extension against its own
+  headers. Each of them found something.
+- Where the same runtime is produced by two recipes, share the *claim* and not the mechanics.
+  `ruby_smoke.py` is what the borrowed Windows archive and the compiled Unix one both have to
+  satisfy, because a daemon installing one of them cannot tell which recipe produced it.
