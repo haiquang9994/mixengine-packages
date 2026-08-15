@@ -62,9 +62,11 @@ jobs:
         # the traceback that explains it.
         shell: bash
         run: |
-          set -uo pipefail
-          python -u tools/node.py --version "${{ inputs.version }}" --out dist
-          code=$?
+          # `|| code=$?` rather than reading `$?` on the next line: GitHub runs `shell: bash` with
+          # `-e`, so a non-zero exit ends the step before anything can look at the code — which is
+          # exactly how the first version of this managed to fail on the leg it was written to skip.
+          code=0
+          python -u tools/node.py --version "${{ inputs.version }}" --out dist || code=$?
           if [ "$code" -eq 75 ]; then
             echo "::notice::no upstream Node ${{ inputs.version }} for ${{ matrix.os }}/${{ matrix.arch }}; nothing to pack"
             echo "skipped=true" >> "$GITHUB_OUTPUT"
