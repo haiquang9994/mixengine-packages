@@ -70,6 +70,10 @@ SUITE = "jammy"
 #   mariadb-common        the character sets. A server whose `charsets/Index.xml` is missing starts
 #                         and then refuses every connection that asks for a collation.
 #   libmariadb3           what the client programs link against; the server does not use it
+#   mariadb-backup        upstream packages it separately, and the other five cells have it — see
+#                         the parity rule in the README. Leaving it out produced a Linux ARM64
+#                         artifact missing a tool every other artifact of the same version had,
+#                         which is exactly the difference that rule exists to prevent.
 PACKAGES = (
     "mariadb-server-core",
     "mariadb-server",
@@ -77,6 +81,7 @@ PACKAGES = (
     "mariadb-client",
     "mariadb-common",
     "libmariadb3",
+    "mariadb-backup",
 )
 
 # `usr/…` in the unpacked package -> where it goes in the artifact. The destination side is upstream's
