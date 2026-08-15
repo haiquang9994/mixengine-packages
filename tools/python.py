@@ -326,8 +326,17 @@ def describe(
 
 
 PROBE = """
-import json, sys, sysconfig
-import ssl, hashlib, sqlite3
+import json, os, sys, sysconfig
+import ssl, hashlib, sqlite3, urllib.request
+
+paths = ssl.get_default_verify_paths()
+
+# The handshake is the claim; the counts below are only the diagnosis when it fails. See `smoke`.
+try:
+    with urllib.request.urlopen("https://github.com/", timeout=30) as answer:
+        handshake = answer.status
+except Exception as error:
+    handshake = f"{type(error).__name__}: {error}"
 
 report = {
     "version": ".".join(str(part) for part in sys.version_info[:3]),
@@ -337,10 +346,26 @@ report = {
     "sha256": hashlib.sha256(b"mixengine").hexdigest(),
     "sqlite": sqlite3.connect(":memory:").execute("select sqlite_version()").fetchone()[0],
     "trusted": ssl.create_default_context().cert_store_stats()["x509_ca"],
+    "handshake": handshake,
+    "trusts": {
+        "cafile": paths.openssl_cafile,
+        "capath": paths.openssl_capath,
+        "cafile_exists": bool(paths.openssl_cafile) and os.path.exists(paths.openssl_cafile),
+        "capath_exists": bool(paths.openssl_capath) and os.path.isdir(paths.openssl_capath),
+    },
     "site": sysconfig.get_paths()["purelib"],
 }
 print(json.dumps(report))
 """
+
+
+def trust(trusts: dict) -> str:
+    """Where the authorities came from, in a few words, for the line the recipe prints."""
+    if trusts["cafile_exists"]:
+        return trusts["cafile"]
+    if trusts["capath_exists"]:
+        return f"{trusts['capath']}/ (a hash directory, read one certificate at a time)"
+    return "this operating system's own store"
 
 
 def smoke(tree: Path, version: str, manifest: dict) -> dict:
@@ -361,9 +386,16 @@ def smoke(tree: Path, version: str, manifest: dict) -> dict:
     string and SQLite answers a query, where reading ``ssl.OPENSSL_VERSION`` alone exercises a
     string constant that a broken build states just as confidently.
 
-    *It can verify a certificate.* A Python whose default context loads no CA at all starts,
-    imports ``ssl``, and then fails every ``pip install`` with a handshake error — the failure
-    furthest from its cause in this whole table.
+    *It can verify a certificate* — and this is proven by **verifying one**, over a real connection
+    to a real host, rather than by counting what the default context has loaded. Counting answers a
+    different question, and answers it wrongly on exactly the platform where the trust store is a
+    directory: a Unix ``capath`` is a hash directory that OpenSSL reads one certificate at a time,
+    at verification, so ``cert_store_stats()["x509_ca"]`` is **0** on a perfectly working Linux and
+    26 on Windows, which loads its store eagerly. The first version of this check asserted the count
+    and refused two archives that verify fine. What is at stake is worth a network call: a Python
+    that starts, imports ``ssl`` and then fails every ``pip install`` with a handshake error is the
+    failure furthest from its cause in this whole table. The host is the one this run has already
+    downloaded from, so an unreachable network has failed the recipe long before here.
 
     *It is this pip.* The version ``pip`` reports has to match the ``pip-*.dist-info`` in the
     ``site-packages`` that came in the same archive, which is a fact no other Python on the machine
@@ -402,15 +434,18 @@ def smoke(tree: Path, version: str, manifest: dict) -> dict:
             )
     if len(report["sha256"]) != 64:
         raise SystemExit(f"the bundled OpenSSL answered {report['sha256']!r}")
-    if not report["trusted"]:
+    if report["handshake"] != 200:
         raise SystemExit(
-            "ssl.create_default_context() loaded no certificate authorities, so every HTTPS "
-            "request this Python makes would fail verification and `pip install` with it"
+            f"this Python could not verify a real certificate chain: {report['handshake']}. "
+            f"Its default trust store is {report['trusts']}, and every `pip install` made with it "
+            f"would fail the same way"
         )
 
     print(f"python {report['version']}, {report['openssl']}, sqlite {report['sqlite']}, "
-          f"{report['trusted']} trusted CAs")
-    ran = ["python --version", "import " + ", ".join(MODULES), "python -c (execPath, ssl, sqlite3)"]
+          f"verified a live chain against {trust(report['trusts'])} "
+          f"({report['trusted']} authorities loaded eagerly)")
+    ran = ["python --version", "import " + ", ".join(MODULES),
+           "python -c (execPath, ssl, sqlite3, verified https://github.com)"]
 
     packages = site_packages(elsewhere)
     for name in sorted(set(manifest["provides"]) - {"python"}):
