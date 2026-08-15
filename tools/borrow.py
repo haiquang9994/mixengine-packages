@@ -35,11 +35,14 @@ from pathlib import Path
 # a failed leg would stop the release of the targets that did produce something.
 UNAVAILABLE = 75
 
-# bsdtar rather than whatever ``tar`` resolves to. It ships with Windows itself, reads 7-Zip archives
-# — which is how the Ruby recipe unpacks RubyInstaller without depending on 7-Zip being installed —
-# and it is reached by absolute path because a runner with Git in its ``PATH`` may well answer `tar`
-# with a GNU tar, which cannot read a 7z at all and says so only after the download.
+# bsdtar rather than whatever ``tar`` resolves to. It ships with Windows itself and is reached by
+# absolute path because a runner with Git in its ``PATH`` may well answer `tar` with a GNU tar, which
+# cannot read a 7z at all and says so only after the download.
 WINDOWS_TAR = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "tar.exe"
+
+# Where 7-Zip is when it is installed at all. GitHub's Windows runners carry it; a developer's
+# machine may not, which is why it is tried rather than required — see `unpack`.
+SEVEN_ZIP = Path(r"C:\Program Files\7-Zip\7z.exe")
 
 
 def fetch(url: str, timeout: int = 120) -> bytes:
@@ -87,6 +90,38 @@ def unavailable(reason: str) -> None:
     raise SystemExit(UNAVAILABLE)
 
 
+def seven_zip(archive: Path, into: Path) -> None:
+    """Extract a 7-Zip archive with whichever of two readers on this machine can actually do it.
+
+    Reading the container is not the hard part; decoding it is. bsdtar has understood the 7-Zip
+    format for years, but only decompresses LZMA when libarchive was built with liblzma — and the
+    `tar.exe` in Windows Server 2022 was not, while the one in Windows 11 was. So a recipe that
+    called bsdtar and nothing else worked on this machine, worked on the `windows-11-arm` runner,
+    and failed on `windows-2022` with a bare exit code after a 20 MB download.
+
+    Both are therefore tried, 7-Zip first because it is the format's own reader, and what is raised
+    when neither works quotes *both* refusals. Neither is required to be present: GitHub's runners
+    have 7-Zip and a developer's machine usually does not, and each falls back to the other.
+    """
+    attempts: list[tuple[list[str], str]] = []
+    installed = str(SEVEN_ZIP) if SEVEN_ZIP.exists() else shutil.which("7z")
+    if installed:
+        attempts.append(([installed, "x", "-y", f"-o{into}", str(archive)], "7-Zip"))
+    if WINDOWS_TAR.exists():
+        attempts.append(([str(WINDOWS_TAR), "-xf", str(archive), "-C", str(into)], "bsdtar"))
+
+    refusals = []
+    for command, name in attempts:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=1800)
+        if result.returncode == 0:
+            return
+        said = (result.stderr or result.stdout).strip().splitlines()
+        refusals.append(f"  {name} exited {result.returncode}: {said[-1] if said else 'no output'}")
+    raise SystemExit(
+        "nothing on this machine could extract a 7-Zip archive.\n" + "\n".join(refusals)
+    )
+
+
 def unpack(archive: Path, into: Path, suffix: str) -> Path:
     """Extract, and answer with the directory the payload is actually in.
 
@@ -101,12 +136,7 @@ def unpack(archive: Path, into: Path, suffix: str) -> Path:
         with zipfile.ZipFile(archive) as zipped:
             zipped.extractall(into)
     elif suffix == "7z":
-        # Only bsdtar can read this, and only on Windows is it the tar that answers — which is fine,
-        # because the only 7z in this table is a Windows-only publisher's.
-        subprocess.run(
-            [str(WINDOWS_TAR), "-xf", str(archive), "-C", str(into)],
-            check=True, capture_output=True, text=True, timeout=1800,
-        )
+        seven_zip(archive, into)
     else:
         with tarfile.open(archive) as tarred:
             # Symlinks are the point on Unix — `bin/python3` is one — so nothing here flattens them,
