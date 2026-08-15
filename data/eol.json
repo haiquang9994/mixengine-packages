@@ -65,6 +65,27 @@
     "branching it; the ones that do branch — MariaDB and PostgreSQL both publish dated release",
     "series — get entries when they are packed."
   ],
+  "_mariadb_comment": [
+    "The promise above, kept. MariaDB branches into long-term series and states the end of each one",
+    "through its own REST API — `release_eol_date` on /rest-api/mariadb/ — so unlike every other",
+    "entry in this file these dates were read from the publisher rather than from a schedule page.",
+    "Keyed by major.minor because that is what a MariaDB series is.",
+    "They are still written down here, and the reason is worth stating: the index has to be",
+    "rebuildable from the release assets alone, years after a series was packed and after upstream",
+    "has stopped listing it at all. An index generator that called the API would produce a different",
+    "index depending on the day it ran. `tools/mariadb.py` prints the date it saw on every run, so a",
+    "series whose schedule upstream moves is caught the next time it is packed rather than never.",
+    "10.6 is here and is past — 6 July 2026 — for the same reason PHP 7.0 is offered: someone",
+    "maintaining an application against it is exactly the person who reaches for a local development",
+    "environment. A warning is the honest answer; refusing to install is not."
+  ],
+  "mariadb": {
+    "10.6": "2026-07-06",
+    "10.11": "2028-02-16",
+    "11.4": "2029-05-29",
+    "11.8": "2030-02-13",
+    "12.3": "2029-06-12"
+  },
   "php": {
     "7.0": "2019-01-10",
     "7.1": "2019-12-01",

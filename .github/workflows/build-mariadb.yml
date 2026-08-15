@@ -1,0 +1,151 @@
+name: build mariadb
+
+# Asked for, never automatic — the same rule every other workflow here keeps.
+#
+# **Unlike every other workflow here, one run covers many versions.** MariaDB maintains four
+# supported series at once whose end-of-life dates are years apart, and a blueprint pinning 10.11 is
+# as ordinary as one pinning 11.8. A workflow that took a single version would have to be invoked
+# once per series and would miss one; `tools/mariadb.py --plan` expands `all` into the catalogue and
+# the matrix below is the cross product of that with the six targets.
+#
+# **And unlike every other workflow here, the six targets do not share a recipe.** Upstream publishes
+# a binary for two of them, `.deb` packages for a third, and nothing at all for the rest — the
+# evaluation is in MixEngine's runtime-packaging.md. Which recipe a cell uses is written down once,
+# in the matrix, rather than decided in an `if:`.
+on:
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: "'all' for every supported series, 'latest', or a comma-separated list of series/versions (11.8, 10.11)."
+        required: true
+        default: 'all'
+        type: string
+      release:
+        description: 'Publish as a GitHub release. Off means build and keep the artifacts for inspection only.'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    # Which series exist is upstream's answer rather than a list kept here, for the reason
+    # `data/eol.json` gives no MariaDB entry: the REST API states the catalogue and its dates, and a
+    # copy in this repository would go stale the day a series is added.
+    runs-on: ubuntu-24.04
+    outputs:
+      series: ${{ steps.expand.outputs.series }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - id: expand
+        run: |
+          set -euo pipefail
+          series=$(python -u tools/mariadb.py --version "${{ inputs.versions }}" --plan)
+          echo "series=$series" >> "$GITHUB_OUTPUT"
+          echo "::notice::building $series"
+
+  pack:
+    needs: plan
+    # Every leg runs on the operating system and architecture it packs for, because no recipe here
+    # merely unpacks what it downloaded: each one bootstraps a data directory, starts the server,
+    # pings it, writes a row through InnoDB and shuts it down through `mariadb-admin`. None of that
+    # can be cross-packed, and it is the half worth having — an artifact that answers
+    # `mariadbd --version` and cannot create a data directory is one T33 would find out about
+    # against a user's database.
+    #
+    # Linux on 22.04 rather than the newest image, for the reason the PHP matrix states at length: a
+    # glibc build only runs on a glibc at least as new as the one that produced it, so the runner
+    # choice *is* the compatibility floor. 24.04 measures out at 2.38 and excludes Debian 12; 22.04
+    # puts it at 2.35 and costs nothing. The ARM64 leg additionally *needs* 22.04, because
+    # `mariadb_deb.py` takes upstream's `jammy` packages and the libraries bundled beside them come
+    # from the runner.
+    strategy:
+      fail-fast: false
+      matrix:
+        series: ${{ fromJSON(needs.plan.outputs.series) }}
+        target:
+          # Borrowed: upstream publishes a zip and a bintar for these two cells and nothing else.
+          - { runner: windows-2022,     os: windows, arch: x86_64,  recipe: mariadb.py }
+          - { runner: ubuntu-22.04,     os: linux,   arch: x86_64,  recipe: mariadb.py }
+          # Borrowed, rearranged: upstream's own arm64 `.deb` packages, laid out as its bintar is.
+          - { runner: ubuntu-22.04-arm, os: linux,   arch: aarch64, recipe: mariadb_deb.py }
+          # Built: upstream has never published a macOS build, on either architecture, and its
+          # Windows zip is x86_64 only.
+          - { runner: macos-14,         os: macos,   arch: aarch64, recipe: mariadb_build.py }
+          - { runner: macos-15-intel,   os: macos,   arch: x86_64,  recipe: mariadb_build.py }
+          - { runner: windows-11-arm,   os: windows, arch: aarch64, recipe: mariadb_build.py }
+    runs-on: ${{ matrix.target.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: pack ${{ matrix.series }}
+        id: pack
+        # bash on every leg, Windows included, so the exit code is read the same way everywhere
+        # rather than in two dialects that could disagree.
+        #
+        # 75 is "upstream publishes nothing for this cell at this version" — a series whose `jammy`
+        # packages were never built, say — which is an empty cell of the table and not a failure.
+        # Every other non-zero code is real and is passed on. `|| code=$?` rather than reading `$?`
+        # on the next line, because `shell: bash` runs with `-e` and a non-zero exit would end the
+        # step before anything could look at the code.
+        shell: bash
+        run: |
+          code=0
+          python -u "tools/${{ matrix.target.recipe }}" --version "${{ matrix.series }}" --out dist || code=$?
+          if [ "$code" -eq 75 ]; then
+            echo "::notice::no MariaDB ${{ matrix.series }} for ${{ matrix.target.os }}/${{ matrix.target.arch }}; nothing to pack"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit "$code"
+        # Three hours: the borrowed legs finish in minutes and the compiled ones are a full MariaDB
+        # server from source, on a runner, with no ccache to fall back on.
+        timeout-minutes: 180
+      - uses: actions/upload-artifact@v4
+        if: steps.pack.outputs.skipped != 'true'
+        with:
+          # The series is in the name because one run now produces several versions, and two legs
+          # uploading `mariadb-linux-x86_64` would be one artifact overwriting another.
+          name: mariadb-${{ matrix.series }}-${{ matrix.target.os }}-${{ matrix.target.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    # One release per exact version, holding every artifact of it — the version read back out of each
+    # manifest rather than taken from the input, because the input may be a series or `all` and each
+    # leg resolves it against upstream independently.
+    needs: pack
+    if: ${{ inputs.release && !failure() && !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: incoming, merge-multiple: true }
+      - name: publish one release per version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          versions=$(jq -r '.version' incoming/*.json | sort -u)
+          for version in $versions; do
+            tag="mariadb-$version"
+            assets=()
+            for manifest in incoming/*.json; do
+              [ "$(jq -r '.version' "$manifest")" = "$version" ] || continue
+              # Both halves: the manifest is what the index generator reads, so a release holding
+              # only the archive is one the index cannot be rebuilt from.
+              assets+=("${manifest%.json}" "$manifest")
+            done
+            echo "== $tag: ${#assets[@]} artifact(s)"
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              gh release create "$tag" \
+                --title "MariaDB $version" \
+                --notes "Relocatable MariaDB $version for MixEngine. Windows x86_64 and Linux x86_64 are repacked from downloads.mariadb.org; Linux aarch64 is assembled from upstream's own arm64 .deb packages into the same layout; macOS and Windows on ARM64 are compiled from upstream's source release, because MariaDB publishes no binary for either. Every artifact was run as a database from a directory it had been moved to before being published — a data directory bootstrapped with mariadb-install-db, the server started against a rendered my.cnf, mariadb-admin ping answered, a row written and read back through InnoDB, and the server shut down through mariadb-admin — see mixengine-artifact.json inside each one for what was proven."
+            fi
+            gh release upload "$tag" "${assets[@]}" --clobber
+          done

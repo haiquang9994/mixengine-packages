@@ -1,0 +1,339 @@
+#!/usr/bin/env python3
+"""Borrow a MariaDB build from downloads.mariadb.org and repack it as a MixEngine artifact.
+
+**The cell this repository expected to be cheap, and it is cheap in exactly two places.** MixEngine's
+runtime table said "official zip / official tarball / official tarball" for all three systems. Asked
+rather than assumed — which is what "borrow costs one evaluation" is for — the catalogue answers
+something else, and the evaluation is written up in `MixEngine's runtime-packaging.md`_:
+
+* **Windows x86_64** publishes ``mariadb-<version>-winx64.zip``. Borrowed here.
+* **Linux x86_64** publishes ``mariadb-<version>-linux-systemd-x86_64.tar.gz``. Borrowed here.
+* **Linux aarch64** publishes no tarball at all — only ``.deb`` packages, which ``mariadb_deb.py``
+  takes apart.
+* **macOS** publishes nothing, on either architecture, and never has: every release from 10.2 to 13.1
+  offers Linux and Windows and nothing else. ``mariadb_build.py`` compiles those.
+* **Windows aarch64** likewise publishes nothing. Same recipe, built natively on an ARM runner.
+
+So this file is two of six cells, and the reason it is not simply :mod:`caddy` with a different table
+is the second half of that sentence: **a borrowed MariaDB is not self-contained.** Caddy is one static
+Go binary; a MariaDB bintar is a hundred programs and a plugin directory linked against whatever the
+build machine had — OpenSSL, libaio, libnuma, libsystemd, PCRE2 — by soname, with no search path of
+its own. Installed on a user's machine those are a different version or absent, and the failure is a
+server that will not start with an error naming a file nobody installed. ``relocate.bundle`` therefore
+runs over a *borrowed* tree here, which no other borrow recipe in this repository needs, and
+``upstream.added`` records every library it put in.
+
+Three further decisions:
+
+*The REST API is the catalogue, and it is also the checksum.* ``downloads.mariadb.org/rest-api``
+states, per release, every file with all four digests beside it. So what exists and what it should
+hash to come out of one document from the publisher, which is the same trade the Node.js and Caddy
+recipes make. Upstream also publishes a PGP signature per file, and it is deliberately not checked:
+that would mean ``gpg`` and a key distribution on a runner with nothing installed, which is the same
+dependency the Caddy recipe refused ``cosign`` for.
+
+*Its download URLs are ``http://`` and are rewritten to ``https://``.* Not a preference. The digest
+is fetched over the same channel as the file, so a plain-text download would let anything on the path
+substitute both.
+
+*The test suite is not shipped.* ``mysql-test/`` and ``sql-bench/`` are more than half the unpacked
+tree, are a developer's tool for testing the server rather than for running one, and nothing in
+MixEngine reaches for them. They are named in ``upstream.removed`` rather than quietly dropped.
+
+Python 3 stdlib only, by policy: this runs on a GitHub runner with nothing installed.
+
+.. _MixEngine's runtime-packaging.md: https://github.com/haiquang9994/MixEngine/blob/master/.claude/operations/runtime-packaging.md
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import borrow  # noqa: E402  — siblings, and this directory is not importable as a package
+import mariadb_smoke  # noqa: E402
+import relocate  # noqa: E402
+
+API = "https://downloads.mariadb.org/rest-api/mariadb"
+
+# What this recipe can borrow, and what upstream calls it. The value is `(os, cpu, package_type)` as
+# the REST API spells each — its own vocabulary, not this repository's — plus the substring that
+# picks one file out of a release that offers several for the same target.
+#
+# `linux-systemd` is the only Linux bintar still published from 10.6 onwards; the plain `linux-` and
+# `linux-glibc_214-` variants stopped there. It is named explicitly rather than matched loosely so
+# that a release which brings the others back does not change which artifact this publishes.
+BORROWABLE = {
+    ("windows", "x86_64"): ("Windows", "x86_64", "ZIP file", "-winx64.zip"),
+    ("linux", "x86_64"): ("Linux", "x86_64", "gzipped tar file", "-linux-systemd-x86_64.tar.gz"),
+}
+
+# Anything below this is not in the REST API at all: the catalogue starts at 10.6, older lines having
+# been retired from it. archive.mariadb.org still has them, and MixEngine does not offer them — this
+# is a project whose oldest supported line is younger than the PHP floor by a decade.
+FLOOR = (10, 6)
+
+# Half the unpacked tree, and none of it is a database server. See the module docstring.
+PRUNE = ("mysql-test", "sql-bench", "share/man", "share/doc", "man", "docs")
+
+
+def get(url: str, timeout: int = 120) -> dict:
+    return json.loads(borrow.fetch(url, timeout=timeout))
+
+
+def secure(url: str) -> str:
+    """The publisher's own URL over TLS. See the module docstring — this is not cosmetic."""
+    return url.replace("http://", "https://", 1) if url.startswith("http://") else url
+
+
+def lines() -> dict[tuple[int, ...], dict]:
+    """Every MariaDB release series the publisher currently lists, keyed for comparison.
+
+    Preview and RC series are dropped rather than ranked, the same rule the Ruby recipe applies to
+    previews: 13.1 is listed beside 11.8 and a channel nobody asked for should not be what ``latest``
+    means.
+    """
+    found: dict[tuple[int, ...], dict] = {}
+    for series in get(f"{API}/")["major_releases"]:
+        if series.get("release_status") != "Stable":
+            continue
+        key = borrow.parts(series["release_id"])
+        if key >= FLOOR:
+            found[key] = series
+    if not found:
+        raise SystemExit(f"{API}/ listed no stable release series at all; its format has changed")
+    return found
+
+
+def resolve(spec: str, target: tuple[str, str]) -> tuple[str, str, str, str | None]:
+    """Turn ``11.8``, ``11.8.8`` or ``latest`` into one published file.
+
+    Answers ``(version, url, sha256, end of life)``. The end-of-life date comes back from the same
+    document, which is why MariaDB has no hand-written entry in ``data/eol.json``: upstream states a
+    dated schedule per series through the API, and copying it into a file here would be a second
+    source that goes stale silently.
+
+    A series with no build for this target is an **empty cell and not a failure**, as in the Caddy
+    recipe — though for MariaDB the empty cells are whole architectures rather than early versions.
+    """
+    stated = lines()
+    if spec == "latest":
+        wanted = [max(stated)]
+    else:
+        prefix = borrow.parts(spec)
+        if len(prefix) < 2:
+            raise SystemExit(
+                f"{spec} is not a MariaDB series: they are numbered major.minor (10.11, 11.4, 11.8) "
+                f"and a bare {spec} would name several"
+            )
+        wanted = [key for key in stated if key[:2] == prefix[:2]]
+        if not wanted:
+            raise SystemExit(
+                f"downloads.mariadb.org lists no stable {spec}. It offers "
+                f"{', '.join(stated[key]['release_id'] for key in sorted(stated))}."
+            )
+
+    series = stated[wanted[0]]
+    catalogue = get(f"{API}/{series['release_id']}/")["releases"]
+    system, cpu, package, tail = BORROWABLE[target]
+
+    offered: dict[tuple[int, ...], tuple[str, str, str]] = {}
+    for version, release in catalogue.items():
+        if spec not in ("latest",) and len(borrow.parts(spec)) == 3 and version != spec:
+            continue
+        for entry in release.get("files", ()):
+            name = entry.get("file_name", "")
+            if entry.get("os") != system or entry.get("cpu") != cpu:
+                continue
+            if entry.get("package_type") != package or not name.endswith(tail):
+                continue
+            # Upstream publishes the symbols beside the build under the same package type, and an
+            # artifact of those would install a gigabyte of nothing.
+            if "debugsymbols" in name:
+                continue
+            digest = (entry.get("checksum") or {}).get("sha256sum")
+            if not digest:
+                raise SystemExit(f"{name} is listed with no sha256sum; the API's shape has changed")
+            offered[borrow.parts(version)] = (version, secure(entry["file_download_url"]), digest)
+
+    if not offered:
+        borrow.unavailable(
+            f"downloads.mariadb.org publishes no {package} for {system}/{cpu} in "
+            f"{series['release_id']}"
+        )
+    chosen = offered[max(offered)]
+    return (*chosen, series.get("release_eol_date"))
+
+
+def plan(spec: str) -> list[str]:
+    """Expand what a workflow was asked to build into the list of series to run.
+
+    ``all`` is the reason this exists. MariaDB maintains four supported series at once, each with its
+    own end-of-life years apart, and a user pinning 10.11 in a blueprint is as ordinary as one
+    pinning 11.8 — so the workflow that publishes them has to be able to cover the whole catalogue in
+    a run rather than being invoked four times and missing one.
+
+    Only *series* are resolved here, never exact versions: each leg asks upstream for the newest
+    patch of its series independently, which is the same rule the Caddy workflow follows and the
+    reason a leg whose target has no build can end as an empty cell rather than as a failure.
+    """
+    stated = lines()
+    if spec.strip() == "all":
+        return [stated[key]["release_id"] for key in sorted(stated)]
+    if spec.strip() == "latest":
+        return [stated[max(stated)]["release_id"]]
+
+    wanted = []
+    for piece in spec.split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        prefix = borrow.parts(piece)[:2]
+        if not [key for key in stated if key[:2] == prefix]:
+            raise SystemExit(
+                f"downloads.mariadb.org lists no stable {piece}. It offers "
+                f"{', '.join(stated[key]['release_id'] for key in sorted(stated))}."
+            )
+        # The piece as written, so an exact version stays exact and a series stays a series.
+        wanted.append(piece)
+    if not wanted:
+        raise SystemExit("nothing to build: the version list is empty")
+    return wanted
+
+
+def prune(tree: Path) -> list[str]:
+    """Take out what a database server does not need, and say what went."""
+    removed = []
+    for relative in PRUNE:
+        path = tree / relative
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+            removed.append(relative)
+        elif path.is_file():
+            path.unlink()
+            removed.append(relative)
+    return removed
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--version", required=True,
+        help="a series (11.8), an exact version (11.8.8), or 'latest'",
+    )
+    parser.add_argument("--out", default=Path("dist"), type=Path)
+    parser.add_argument(
+        "--plan", action="store_true",
+        help="print the series --version expands to, as JSON, and pack nothing. Used by the "
+             "workflow to fan one run out over every supported series; accepts 'all'.",
+    )
+    arguments = parser.parse_args()
+
+    if arguments.plan:
+        print(json.dumps(plan(arguments.version)))
+        return
+
+    target = borrow.host("MariaDB")
+    if target not in BORROWABLE:
+        borrow.unavailable(
+            f"downloads.mariadb.org publishes nothing for {target[0]}/{target[1]}: the catalogue "
+            f"has only ever offered Linux and Windows on x86_64. macOS and both ARM64 cells are "
+            f"built by mariadb_build.py, and Linux ARM64 is unpacked from .deb by mariadb_deb.py."
+        )
+
+    version, url, expected, eol = resolve(arguments.version, target)
+    if version != arguments.version:
+        print(f"{arguments.version} resolved to {version}")
+    if eol:
+        print(f"upstream supports this series until {eol}")
+
+    work = Path(tempfile.mkdtemp(prefix="mixengine-mariadb-"))
+    name = url.rsplit("/", 1)[-1]
+    downloaded = work / name
+    print(f"borrowing {url}")
+    try:
+        downloaded.write_bytes(borrow.fetch(url, timeout=900))
+    except urllib.error.HTTPError as error:
+        raise SystemExit(f"{url} answered {error.code}") from error
+
+    actual = borrow.sha256(downloaded)
+    if actual != expected:
+        raise SystemExit(
+            f"{name} hashes to {actual}, and the REST API states {expected}. Either the download is "
+            "damaged or it is not the file MariaDB published."
+        )
+    print(f"sha256 {actual} (verified against downloads.mariadb.org's REST API)")
+
+    windows = target[0] == "windows"
+    suffix = "zip" if windows else "tar.gz"
+    tree = borrow.unpack(downloaded, work / "unpacked", suffix)
+
+    removed = prune(tree)
+    if removed:
+        print(f"removed {', '.join(removed)}: a test suite is not part of a database server")
+
+    provides = mariadb_smoke.describe(tree, windows)
+
+    added: dict[str, Path] = {}
+    if not windows:
+        # The half of this recipe Caddy does not have. A borrowed bintar names its libraries by
+        # soname with no search path of its own, so on a machine whose OpenSSL is a different
+        # version — or which has no libaio at all — mariadbd does not start. Bundling makes the
+        # archive answer for itself, and `smoke` proves it from a directory the tree has never seen.
+        added = relocate.bundle(tree, search=[tree / "lib"])
+        if added:
+            print(f"bundled {len(added)} librar{'y' if len(added) == 1 else 'ies'}: "
+                  f"{', '.join(sorted(added))}")
+
+    manifest = {
+        "schema": 1,
+        "kind": "mariadb",
+        "version": version,
+        "os": target[0],
+        "arch": target[1],
+        "source": "borrowed",
+        "upstream": {
+            "project": "MariaDB/server",
+            "release": version,
+            "url": url,
+            "sha256": actual,
+            "verified_against": "downloads.mariadb.org/rest-api (sha256) over HTTPS to the publisher",
+        },
+        "provides": provides,
+    }
+    if added:
+        manifest["upstream"]["added"] = sorted(f"lib/{library}" for library in added)
+    if removed:
+        manifest["upstream"]["removed"] = sorted(removed)
+
+    measured = relocate.floor(tree) if not windows else None
+    if measured:
+        manifest["requires"] = {measured[0]: measured[1]}
+        print(f"needs {measured[0]} {measured[1]} or newer")
+
+    elsewhere = borrow.moved(tree)
+    if not windows:
+        problems = relocate.verify(elsewhere)
+        for problem in problems:
+            print(f"error: {problem}", file=sys.stderr)
+        if problems:
+            raise SystemExit("the relocated tree reaches outside itself")
+    manifest["smoke"] = {
+        "relocated": True,
+        "ran": mariadb_smoke.server(elsewhere, version, provides, windows),
+    }
+    borrow.discard(elsewhere)
+
+    borrow.publish(tree, manifest, arguments.out, suffix)
+    shutil.rmtree(work, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    main()
