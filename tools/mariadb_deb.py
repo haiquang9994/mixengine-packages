@@ -372,6 +372,17 @@ def rearrange(root: Path, work: Path) -> tuple[Path, list[str]]:
                 destination.unlink()
             shutil.copy2(path, destination)
 
+    # **The licence text, before `PRUNE` takes `share/doc` and the whole of `usr/`.** Debian states
+    # each package's licensing in `usr/share/doc/<package>/copyright`, and this recipe was throwing
+    # all of them away with the manual pages — publishing GPL binaries with no licence beside them,
+    # which the other five cells do not do: the bintar carries `COPYING` and `THIRDPARTY` at its root
+    # and `mariadb_build.collect_licences` writes a `licenses/` directory. `licenses/` is the
+    # spelling the compiled cells use, so this uses it too.
+    licences = tree / "licenses"
+    for copyright_file in sorted(root.glob("usr/share/doc/*/copyright")):
+        licences.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(copyright_file, licences / f"{copyright_file.parent.name}-copyright")
+
     for relative in PRUNE:
         pruned = tree / relative
         if pruned.is_dir():
