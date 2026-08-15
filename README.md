@@ -87,6 +87,14 @@ so `pip` is importable and not runnable. `tools/python.py` writes a two-line `Sc
 calls the interpreter beside it, because the alternative — letting `ensurepip` generate `pip.exe` —
 bakes an absolute interpreter path into a tree whose whole purpose is to be movable.
 
+One thing is removed, and only on Linux before 3.13: `_crypt` links against a libxcrypt no archive
+here carries, which Debian and Ubuntu install as a base package and Fedora does not — so keeping it
+would mean publishing an artifact that works on some glibc distributions and not others. CPython
+deprecated `crypt` in 3.11 and removed it in 3.13; this makes the three lines before that behave the
+same way. Both the addition and the removal are named in each archive's `mixengine-artifact.json`,
+under `upstream.added` and `upstream.removed`, so a reader comparing against upstream finds the
+difference stated rather than deducing it.
+
 For Ruby, one of the three columns turned out to be borrowable and two did not:
 
 | OS / arch | Range | How |
