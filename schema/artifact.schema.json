@@ -44,6 +44,11 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Paths this repository wrote into an otherwise borrowed archive, so that a reader comparing it against upstream finds the difference stated rather than deducing it. There is one at the time of writing: Windows CPython archives get a `Scripts/pip.cmd`, because upstream ships the pip package with no entry point and a generated `pip.exe` would carry an absolute interpreter path into a tree that is going to move."
+        },
+        "removed": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Paths taken *out* of an otherwise borrowed archive, for the same reason `added` states the ones put in. Removal is reserved for a file that would make the archive work on some machines and not others: Linux CPython before 3.13 ships a `_crypt` module linked against a libxcrypt no archive here carries, which is present on Debian and Ubuntu and absent on a default Fedora. Deleting it is what lets `smoke.relocated` keep meaning that nothing in the tree reaches outside it."
         }
       }
     },

@@ -246,9 +246,44 @@ def ensure_pip(tree: Path, operating_system: str) -> list[str]:
     return ["Scripts/pip.cmd"]
 
 
+def strip_unportable(tree: Path, operating_system: str) -> list[str]:
+    """Delete the one compiled module that reaches out of the tree, and say which.
+
+    On Linux, `_crypt` links `libcrypt.so.1` and upstream ships no copy of it. That library is not
+    the C runtime: it is libxcrypt, which Debian and Ubuntu install as a base package and Fedora and
+    RHEL offer as `libxcrypt-compat` and do not install by default. So the module makes the archive
+    work on some glibc distributions and not others — the one property `relocate.verify` exists to
+    keep an artifact from having, and the reason it is checked from a directory the build has never
+    seen rather than trusted from a build log.
+
+    The alternative to deleting it is an allowance in `verify`, and that is worse than it looks: the
+    rule "an artifact does not reach outside itself" is either absolute or it is a habit, and the
+    first exception is what teaches the second one to be written. Deleting one file keeps the rule.
+
+    The file is also the cheapest thing in the whole standard library to lose. `crypt` is a wrapper
+    around a Unix password hash nobody should be computing in a web project; it has been deprecated
+    since 3.11 and CPython **removed it outright in 3.13**, so this makes 3.10, 3.11 and 3.12 behave
+    on this one point like the versions after them, and does nothing at all from 3.13 on because
+    there is no such file to delete. What a caller sees is `ModuleNotFoundError: No module named
+    '_crypt'` on every machine, instead of a working import on Ubuntu and that same error on Fedora.
+
+    Nothing in the standard library imports it on the way to anything else — `crypt.py`, which does,
+    is left in place so the failure names the module that is gone rather than a missing attribute.
+    """
+    if operating_system != "linux":
+        return []
+    removed = []
+    for module in sorted((tree / "lib").glob("python3.*/lib-dynload/_crypt.*.so")):
+        removed.append(module.relative_to(tree).as_posix())
+        module.unlink()
+    for path in removed:
+        print(f"removed {path} (needs a libxcrypt this archive does not carry)")
+    return removed
+
+
 def describe(
     tree: Path, version: str, target: tuple[str, str], url: str, digest: str, tag: str,
-    added: list[str],
+    added: list[str], removed: list[str],
 ) -> dict:
     """What is in the archive, as the daemon will read it."""
     operating_system, arch = target
@@ -285,6 +320,8 @@ def describe(
         # somebody comparing hashes a year from now should find the difference written down here
         # instead of deducing it.
         manifest["upstream"]["added"] = added
+    if removed:
+        manifest["upstream"]["removed"] = removed
     return manifest
 
 
@@ -443,7 +480,8 @@ def main() -> None:
     tree = borrow.unpack(downloaded, work / "unpacked", "tar.gz")
 
     added = ensure_pip(tree, target[0])
-    manifest = describe(tree, version, target, url, actual, tag, added)
+    removed = strip_unportable(tree, target[0])
+    manifest = describe(tree, version, target, url, actual, tag, added, removed)
     manifest["smoke"] = smoke(tree, version, manifest)
 
     # Measured off the archive rather than assumed from the runner. Upstream chose these floors when

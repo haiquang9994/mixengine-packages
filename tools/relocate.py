@@ -45,6 +45,7 @@ import shutil
 import subprocess
 import sys
 from collections import deque
+from collections.abc import Sequence
 from pathlib import Path
 
 # Left alone on Linux, by soname. The C runtime and the loader for the reason in the module
@@ -75,8 +76,8 @@ class Unbundleable(SystemExit):
     """Raised where continuing would publish an archive that cannot work on another machine."""
 
 
-def run(*command: str, check: bool = True) -> str:
-    result = subprocess.run(command, text=True, capture_output=True, timeout=600)
+def run(*command: str, check: bool = True, environment: dict[str, str] | None = None) -> str:
+    result = subprocess.run(command, text=True, capture_output=True, timeout=600, env=environment)
     if check and result.returncode != 0:
         raise Unbundleable(f"{' '.join(command)} exited {result.returncode}\n{result.stderr}")
     return result.stdout
@@ -118,13 +119,22 @@ def machine_files(tree: Path) -> list[Path]:
 # --------------------------------------------------------------------------------------- ELF ---
 
 
-def elf_dependencies(path: Path) -> list[tuple[str, Path | None]]:
+def elf_dependencies(path: Path, search: Sequence[Path] = ()) -> list[tuple[str, Path | None]]:
     """``(soname, resolved path)`` for each library *path* needs, unresolved ones as ``None``.
 
     ``ldd`` is used rather than ``objdump -p`` because the resolution is the point: after the rewrite
     the same call, run from the moved tree, is what proves the rewrite worked.
+
+    *search* is what the process will have on its library path that this file does not carry itself
+    — see `loader_search`. It is passed as ``LD_LIBRARY_PATH``, which is not quite where the loader
+    would find those directories, but the only thing that changes is *which* in-tree copy answers a
+    name that is in the tree twice, and there is no such name.
     """
-    output = run("ldd", str(path), check=False)
+    environment = None
+    if search:
+        environment = dict(os.environ)
+        environment["LD_LIBRARY_PATH"] = os.pathsep.join(str(directory) for directory in search)
+    output = run("ldd", str(path), check=False, environment=environment)
     dependencies = []
     for line in output.splitlines():
         line = line.strip()
@@ -149,6 +159,58 @@ def elf_dependencies(path: Path) -> list[tuple[str, Path | None]]:
 
 def elf_set_rpath(path: Path, rpath: str) -> None:
     run("patchelf", "--set-rpath", rpath, str(path))
+
+
+def elf_rpaths(path: Path) -> list[str]:
+    """The ``DT_RPATH`` and ``DT_RUNPATH`` entries written in *path*, as spelled.
+
+    ``objdump -p`` rather than ``patchelf --print-rpath``, which prints one of the two and says
+    nothing about which. Both matter here, and the difference between them is the whole point of
+    `loader_search`.
+    """
+    output = run("objdump", "-p", str(path), check=False)
+    entries = []
+    for line in output.splitlines():
+        words = line.split()
+        if len(words) == 2 and words[0] in ("RPATH", "RUNPATH"):
+            entries.append(words[1])
+    return entries
+
+
+def loader_search(tree: Path) -> list[Path]:
+    """The in-tree directories the loader will search for **everything** this tree loads.
+
+    A plugin does not have to carry a search path of its own, and CPython's compiled modules do not:
+    `_tkinter.cpython-312-x86_64-linux-gnu.so` needs `libtcl9.0.so`, has neither ``DT_RPATH`` nor
+    ``DT_RUNPATH``, and the library sits in the tree's own `lib/` where nothing in that file points.
+    It still loads, because the *interpreter* that `dlopen`s it carries ``DT_RPATH
+    $ORIGIN/../lib``, and glibc searches the ``DT_RPATH`` of the whole chain that led to a load —
+    the main executable included — not only the object being resolved.
+
+    So `ldd` on such a module alone asks a question the loader never asks, and answers "not found"
+    about a library that is right there. Reading the executables' own ``DT_RPATH`` is how that gets
+    corrected without assuming a layout: a tree that arranges itself some other way says so in its
+    binaries, and one that arranges itself the way `bundle` does names `$ORIGIN` and is unaffected.
+
+    ``DT_RUNPATH`` is deliberately read here as well even though the loader does *not* inherit it,
+    because the only thing this list is used for is `verify`, and a `verify` that resolved *less*
+    than the loader would reject archives that work.
+    """
+    binaries = tree / "bin"
+    if sys.platform == "darwin" or not binaries.is_dir():
+        return []
+    found: list[Path] = []
+    for path in sorted(binaries.iterdir()):
+        if path.is_symlink() or not path.is_file() or kind(path) != "elf":
+            continue
+        for entry in elf_rpaths(path):
+            for element in entry.split(":"):
+                expanded = Path(os.path.normpath(
+                    element.replace("${ORIGIN}", str(path.parent)).replace("$ORIGIN", str(path.parent))
+                ))
+                if expanded.is_dir() and inside(expanded, tree) and expanded not in found:
+                    found.append(expanded)
+    return found
 
 
 # ------------------------------------------------------------------------------------ Mach-O ---
@@ -330,10 +392,12 @@ def bundle(tree: Path, libdir: str = "lib") -> dict[str, Path]:
     return dict(sorted(bundled.items()))
 
 
-def dependencies(path: Path, executable_dir: Path) -> list[tuple[str, Path | None]]:
+def dependencies(
+    path: Path, executable_dir: Path, search: Sequence[Path] = ()
+) -> list[tuple[str, Path | None]]:
     if sys.platform == "darwin":
         return macho_dependencies(path, executable_dir)
-    return elf_dependencies(path)
+    return elf_dependencies(path, search)
 
 
 def rewrite(tree: Path, libdir: str, bundled: set[str], executable_dir: Path) -> None:
@@ -380,11 +444,16 @@ def verify(tree: Path) -> list[str]:
     tree was built proves nothing: the original build directory is still there, so a reference that
     escaped the rewrite still resolves and the check passes for a reason that will not exist on a
     user's machine.
+
+    Each file is resolved the way the loader will resolve it — including through the search path the
+    tree's own executables carry, which is how a plugin with no ``DT_RPATH`` of its own finds a
+    library that is nonetheless in the tree. See `loader_search`.
     """
     problems = []
     executable_dir = tree / "bin"
+    search = loader_search(tree)
     for path in machine_files(tree):
-        for spelling, resolved in dependencies(path, executable_dir):
+        for spelling, resolved in dependencies(path, executable_dir, search):
             if is_system(spelling, resolved):
                 continue
             if resolved is None:
