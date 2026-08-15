@@ -26,6 +26,34 @@
     "25": "2026-06-01",
     "26": "2029-04-30"
   },
+  "_python_comment": [
+    "python.org's own release schedule: five years from a line's first release, ending in October.",
+    "Keyed by major.minor because that is what a Python release line is. 3.9 is here and is not",
+    "offered — python-build-standalone's current releases stop at 3.10 — so the entry exists only to",
+    "keep an older artifact of it dated rather than silently undated if one is ever republished."
+  ],
+  "python": {
+    "3.9": "2025-10-31",
+    "3.10": "2026-10-31",
+    "3.11": "2027-10-31",
+    "3.12": "2028-10-31",
+    "3.13": "2029-10-31",
+    "3.14": "2030-10-31",
+    "3.15": "2031-10-31"
+  },
+  "_ruby_comment": [
+    "ruby-lang.org's branch page: normal maintenance for about two years, security maintenance for",
+    "about a year and a half after that, and every line ends on 31 March. 3.1 is past even the",
+    "one-year grace this project allows and is not offered; it is dated here because RubyInstaller",
+    "still publishes it and an artifact that exists should not be undated."
+  ],
+  "ruby": {
+    "3.1": "2025-03-26",
+    "3.2": "2026-03-31",
+    "3.3": "2027-03-31",
+    "3.4": "2028-03-31",
+    "4.0": "2029-03-31"
+  },
   "php": {
     "7.0": "2019-01-10",
     "7.1": "2019-12-01",

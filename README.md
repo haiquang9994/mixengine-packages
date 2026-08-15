@@ -72,6 +72,37 @@ offering emulation under the name of a version. Where a line has no build for a 
 `tools/node.py` says so and exits 75 — an empty cell of the table, which the workflow skips rather
 than fails, so that one absent build does not stop the release of the five that exist.
 
+For Python the evaluation was as short, and the row had been *assumed* borrowable since before there
+was a pipeline. It is:
+
+| OS / arch | Range | How |
+| --- | --- | --- |
+| Windows x86_64 | **3.10 – newest** | **borrowed** — [`python-build-standalone`](https://github.com/astral-sh/python-build-standalone), repacked |
+| Windows aarch64 | **3.11 – newest** | ditto; the 3.10 line has no ARM64 build |
+| macOS aarch64, x86_64 | **3.10 – newest** | ditto |
+| Linux x86_64, aarch64 | **3.10 – newest** | ditto, the `gnu` builds and never `musl` |
+
+One thing had to be added rather than repacked, and only on Windows: upstream ships `Scripts/` empty,
+so `pip` is importable and not runnable. `tools/python.py` writes a two-line `Scripts/pip.cmd` that
+calls the interpreter beside it, because the alternative — letting `ensurepip` generate `pip.exe` —
+bakes an absolute interpreter path into a tree whose whole purpose is to be movable.
+
+For Ruby, one of the three columns turned out to be borrowable and two did not:
+
+| OS / arch | Range | How |
+| --- | --- | --- |
+| Windows x86_64 | **3.2 – newest** | **borrowed** — [RubyInstaller](https://github.com/oneclick/rubyinstaller2) `.7z`, repacked |
+| Windows aarch64 | **3.4 – newest** | ditto; upstream's first ARM64 archive is in the 3.4 line |
+| macOS aarch64, x86_64 | — | **built**, and not yet: MixEngine's T27b |
+| Linux x86_64, aarch64 | — | ditto |
+
+RubyInstaller configures Ruby with `--enable-load-relative`, so the standard library, the gem home
+and the CA bundle are all computed from the executable's own location — `tools/ruby.py` checks all
+four from a directory the archive has been moved to. The macOS and Linux cells have no such
+publisher: Homebrew's `portable-ruby` is relocatable and publishes exactly one version,
+`ruby/ruby-builder`'s artifacts "embed the install path when built and cannot be moved around" in
+its own README's words, and RVM's binaries are prefix-bound and years stale.
+
 ## Repack, do not rearrange
 
 A borrowed artifact keeps the directory layout its publisher shipped. It is tempting to normalise
@@ -111,14 +142,27 @@ python3 tools/php_legacy_unix.py --branch 7.4 --out dist/
 # Node.js: one recipe for every target, run on the target it packs for
 python tools/node.py --version 22 --out dist/
 
+# Python: likewise, from python-build-standalone's newest release unless one is pinned
+python tools/python.py --version 3.12 --out dist/
+
+# Ruby: Windows only — macOS and Linux are compiled, and that is T27b
+python tools/ruby.py --version 3.4 --out dist/
+
 # Then regenerate and sign the index from what the releases actually contain
 python tools/mkindex.py --base-url … --out dist/index.json
 minisign -Sm dist/index.json -s minisign.key
 ```
 
 In practice none of that is run by hand: `.github/workflows/build-php.yml` takes a version, picks the
-recipe from it and produces every target, `build-node.yml` does the same with one recipe and six, and
-`publish-index.yml` regenerates and signs the index from every release that exists.
+recipe from it and produces every target; `build-node.yml` and `build-python.yml` do the same with
+one recipe and six; `build-ruby.yml` runs two legs, both Windows; and `publish-index.yml` regenerates
+and signs the index from every release that exists.
+
+The four borrowed recipes share `tools/borrow.py` — downloading, hashing, unwrapping the publisher's
+wrapper directory, packing, and running a program with a `PATH` the runner cannot answer. What none
+of them share is the smoke test, deliberately: the mechanics are the same for every publisher and the
+*claim* is not, and this repository has already been bitten once by two producers writing the same
+manifest field to mean two different strengths of proof.
 
 ## The signing key
 
