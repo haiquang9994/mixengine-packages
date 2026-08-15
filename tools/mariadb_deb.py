@@ -95,12 +95,22 @@ PACKAGES = (
 # Optional in the sense the rest of `PACKAGES` is not: compression providers arrived in 10.7, so the
 # 10.6 line has no such package and never will. A missing one is reported and skipped rather than
 # turning the whole cell into an empty one — which is what `wanted` does with anything required.
+#
+# **The compat packages are here for the same reason and are not about size at all.** Upstream's
+# bintar offers every tool under its old `mysql*` name as a symlink beside the new one — `mysqldump`
+# beside `mariadb-dump` — and so does the Windows zip, and so does a source build. Debian splits
+# those twenty-three symlinks into `mariadb-client-compat` and `mariadb-server-compat`, so leaving
+# them out gave one cell in six where `mysqldump` is not a command. They are relative links to files
+# already in `bin/` and cost nothing; whichever of them names something this artifact does not carry
+# is swept by `mariadb.prune` along with anything else that dangles.
 OPTIONAL = (
     "mariadb-plugin-provider-bzip2",
     "mariadb-plugin-provider-lz4",
     "mariadb-plugin-provider-lzma",
     "mariadb-plugin-provider-lzo",
     "mariadb-plugin-provider-snappy",
+    "mariadb-client-compat",
+    "mariadb-server-compat",
 )
 
 # `usr/…` in the unpacked package -> where it goes in the artifact. The destination side is upstream's
@@ -123,6 +133,17 @@ MOVES = (
 # Copied as a whole directory rather than moved into the layout: the client libraries, which live
 # under a triplet directory whose name differs per architecture.
 LIBRARY_GLOBS = ("usr/lib/*/libmariadb.so*", "usr/lib/*/libmariadb3/*")
+
+# **The client plugins, which arrive as symlinks pointing out of the tree.** `mariadb-server` installs
+# `dialog.so`, `client_ed25519.so`, `caching_sha2_password.so`, `mysql_clear_password.so` and
+# `sha256_password.so` into `/usr/lib/mysql/plugin` as relative links to
+# `../../<triplet>/libmariadb3/plugin/`, which is where `libmariadb3` really keeps them. Moved into
+# this layout the links still say `../../<triplet>/…` and there is no such directory, so every Linux
+# ARM64 artifact so far has shipped five plugins that resolve to nothing — invisible because a
+# dangling link answers False to `exists()`, which is the same blind spot that kept `mysql_ldb` alive
+# in `mariadb.prune`. Copying the real files over them is the whole fix, and it also brings across
+# `parsec.so`, which the links did not name and the x86_64 bintar has.
+PLUGIN_GLOBS = ("usr/lib/*/libmariadb3/plugin/*",)
 
 # **Only what is wrong with the *shape*.** What a MariaDB artifact does not contain is decided in
 # `mariadb.PRUNE` and the pattern lists beside it, and `rearrange` runs those too; this list is the
@@ -221,8 +242,8 @@ def wanted(stanzas: list[dict[str, str]], version: str) -> dict[str, dict[str, s
         )
     absent = [name for name in OPTIONAL if name not in found]
     if absent:
-        print(f"this series publishes no {', '.join(absent)}; the compression algorithms they "
-              f"provide will not be available in this artifact")
+        print(f"this series publishes no {', '.join(absent)}; whatever each provides will be "
+              f"missing from this artifact and present in the other five")
     return found
 
 
@@ -339,6 +360,17 @@ def rearrange(root: Path, work: Path) -> tuple[Path, list[str]]:
         for path in sorted(root.glob(pattern)):
             if path.is_file() or path.is_symlink():
                 shutil.copy2(path, libraries / path.name, follow_symlinks=False)
+
+    # After the move, so that the real file lands on top of the link that named it. See PLUGIN_GLOBS.
+    for pattern in PLUGIN_GLOBS:
+        for path in sorted(root.glob(pattern)):
+            if not path.is_file() or path.is_symlink():
+                continue
+            (libraries / "plugin").mkdir(parents=True, exist_ok=True)
+            destination = libraries / "plugin" / path.name
+            if destination.is_symlink() or destination.exists():
+                destination.unlink()
+            shutil.copy2(path, destination)
 
     for relative in PRUNE:
         pruned = tree / relative

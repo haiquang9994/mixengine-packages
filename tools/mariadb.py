@@ -155,6 +155,11 @@ NOT_SHIPPED = (
     # The rest of the SDK `PRUNE` starts on: static libraries to link a client against, and the
     # scripts that print the flags for doing so. Without `include/` there is nothing to compile.
     "*.a", "mariadb_config*", "mysql_config*", "*.pl",
+    # What a distribution adds and a tarball does not. `innotop` is a curses monitor, `mariadb-report`
+    # a Perl status summary, `debian-start.inc.sh` a hook the init script sources, `mini-benchmark` a
+    # benchmark; each arrives with the `.deb` packages and exists in no other cell. Small enough that
+    # size is not the argument — the argument is that they exist on one operating system only.
+    "innotop*", "mariadb-report*", "debian-start*", "echo_stderr", "mini-benchmark",
 )
 
 # **`mariabackup` is deliberately not in that list, and it was in it once.** Everything above is a
