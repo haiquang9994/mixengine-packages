@@ -87,6 +87,12 @@ MOVES = (
     ("usr/sbin", "bin"),
     ("usr/bin", "bin"),
     ("usr/lib/mysql/plugin", "lib/plugin"),
+    # **Both spellings of the data directory, and the first one is the one that exists.** MariaDB's
+    # own packages install their bootstrap SQL — `mariadb_system_tables.sql` and the rest, which
+    # `mariadb-install-db` reads from `$basedir/share` — into `usr/share/mariadb`, not the
+    # `usr/share/mysql` a bintar suggests. The compatibility spelling is kept for whichever series
+    # still uses it; a missing source directory is skipped rather than being an error.
+    ("usr/share/mariadb", "share"),
     ("usr/share/mysql", "share"),
 )
 

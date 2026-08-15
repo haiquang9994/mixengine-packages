@@ -50,6 +50,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -189,10 +190,33 @@ def install_db(tree: Path, work: Path, provides: dict[str, str], path: str, wind
 
     if not windows:
         data.mkdir(parents=True, exist_ok=True)
+        # **Upstream's script cannot be given a basedir containing a space, and this is a limitation
+        # rather than a workaround.** `mariadb-install-db` resolves its own helpers with
+        # `find_in_dirs my_print_defaults $basedir/bin $basedir/extra` — `$basedir` unquoted — so a
+        # path with a space is split into two arguments and the script exits with "FATAL ERROR:
+        # Could not find my_print_defaults", naming a file that is exactly where it was told to look.
+        #
+        # It is upstream's escaping, it has nothing to do with relocation, and it will fail the same
+        # way for a user whose installation path has a space in it — which T33 needs to know, because
+        # the daemon either keeps its data directories out of such paths or bootstraps them without
+        # this script. The same shape as the `mkmf -bundle_loader` finding in `ruby_unix.py`.
+        #
+        # So the *bootstrap* is given a space-free view of the same tree, and everything after it —
+        # the server, the client, the shutdown — still runs from the path with the space, which is
+        # the part that has to keep working. A symlink rather than a copy: this tree is most of a
+        # gigabyte and nothing here writes into it.
+        basedir = tree
+        if " " in str(tree):
+            link = Path(tempfile.mkdtemp(prefix="mixengine-basedir-")) / "tree"
+            link.symlink_to(tree, target_is_directory=True)
+            basedir = link
+            program = link / provides["mariadb-install-db"]
+            print(f"mariadb-install-db: run against {link}, because upstream's script does not "
+                  f"quote $basedir and this tree's path contains a space")
         arguments = [
             # The script resolves everything else — the bootstrap server, the error messages, the
             # plugin directory — relative to this, and it is why a bintar can be unpacked anywhere.
-            f"--basedir={tree}",
+            f"--basedir={basedir}",
             f"--datadir={data}",
             "--auth-root-authentication-method=normal",
             "--skip-test-db",
@@ -214,7 +238,10 @@ def install_db(tree: Path, work: Path, provides: dict[str, str], path: str, wind
         raise SystemExit(
             f"{program.name} exited zero and left no mysql schema in {data}\n{output[-4000:]}"
         )
-    return f"{provides['mariadb-install-db']} --datadir (a data directory bootstrapped from scratch)"
+    ran = f"{provides['mariadb-install-db']} --datadir (a data directory bootstrapped from scratch)"
+    if not windows and " " in str(tree):
+        ran += "; run through a space-free path, which upstream's script requires"
+    return ran
 
 
 def said(logs: list[Path], tail: int = 8000) -> str:

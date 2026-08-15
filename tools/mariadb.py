@@ -89,13 +89,18 @@ FLOOR = (10, 6)
 # that is missing from the machine. And the right answer is not to find that Boost, because MixEngine
 # supervises a single server and has no cluster for an arbitrator to arbitrate. So the whole of
 # Galera goes, and `upstream.removed` says it went.
-PRUNE = ("mysql-test", "sql-bench", "share/man", "share/doc", "man", "docs")
+#
+# `mariadb-test` rather than `mysql-test`: upstream renamed the directory along with the binaries,
+# and the old spelling silently matched nothing — leaving the whole suite in the archive and, worse,
+# leaving it for the Galera globs below to walk through and list file by file.
+PRUNE = ("mariadb-test", "mysql-test", "sql-bench", "share/man", "share/doc", "man", "docs")
 
-# Galera, wherever the bintar happens to put it. A path list was not enough: removing `bin/garbd`
-# and `lib/galera` left `lib/libgalera_smm.so`, which needs `libssl.so.1.0.0` — an OpenSSL retired
-# in 2019 — and bundling stopped on that instead, one CI round later. The provider, the arbitrator
-# and the state-transfer scripts are one feature and they go as one.
-GALERA = "*galera*"
+# Galera, wherever the bintar happens to put it, and under both of the names it uses. A path list
+# was not enough — removing `bin/garbd` and `lib/galera` left `lib/libgalera_smm.so`, which needs
+# the OpenSSL retired in 2019 — and a `*galera*` glob was not enough either, because the arbitrator
+# is called `garbd` and matches neither. The provider, the arbitrator and the state-transfer scripts
+# are one feature; MixEngine supervises a single server and has no cluster for any of it.
+GALERA = ("*galera*", "*garbd*")
 
 
 def get(url: str, timeout: int = 120) -> dict:
@@ -234,12 +239,17 @@ def prune(tree: Path) -> list[str]:
             path.unlink()
             removed.append(relative)
 
-    for path in sorted(tree.rglob(GALERA)):
-        if path.is_dir():
-            shutil.rmtree(path, ignore_errors=True)
-        elif path.exists():
-            path.unlink()
-        removed.append(str(path.relative_to(tree)).replace("\\", "/"))
+    for pattern in GALERA:
+        for path in sorted(tree.rglob(pattern)):
+            # Only what is still there: a directory removed a moment ago takes its contents with it,
+            # and listing each of those would turn `upstream.removed` into a file manifest.
+            if not path.exists():
+                continue
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink()
+            removed.append(str(path.relative_to(tree)).replace("\\", "/"))
     return removed
 
 
