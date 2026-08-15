@@ -288,11 +288,14 @@ Three times, none of them a failure and all of them invisible from outside the a
   is not — so `brew install gmp` produced `checking for gmp.h... yes` on one runner and `no` on the
   other, with no error on either. Ask `brew --prefix <formula>` and pass it; it is the only spelling
   that is true on both.
-- The manylinux image has no `zstd`, so `tar` silently produced gzip on Linux and zstd on macOS.
+- `tar --zstd` is refused on the manylinux image, so one version was published as `.tar.zst` on
+  macOS and `.tar.gz` on Linux. Installing the `zstd` compressor did not change it — the refusal is
+  tar's own — and nothing had printed either fact, because the fallback *worked*.
 
 **A fallback that succeeds is the hardest kind of difference to notice**, which is an argument for
-printing what was actually used rather than what was asked for — and for reading the four logs of
-one version side by side before believing they built the same thing.
+printing what was actually used rather than what was asked for — `pack` says which format it packed
+and quotes the refusal now — and for reading the four logs of one version side by side before
+believing they built the same thing.
 
 **One thing generalised from PHP and did not need to be discovered again**: build inside the era —
 here only for the floor. Nothing in Ruby 3.2+ wants an old toolchain, so AlmaLinux 8 buys glibc 2.28

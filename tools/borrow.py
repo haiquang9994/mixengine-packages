@@ -261,7 +261,15 @@ def pack(tree: Path, out: Path, name: str, suffix: str) -> Path:
             ["tar", "--zstd", "-cf", str(packed), "-C", str(tree), "."],
             check=True, capture_output=True, text=True, timeout=1800,
         )
-    except (subprocess.CalledProcessError, OSError):
+    except (subprocess.CalledProcessError, OSError) as refusal:
+        # **A fallback that succeeds is the hardest kind of difference to notice.** This one was
+        # noticed by reading four release logs side by side and finding one version published as
+        # `.tar.zst` on macOS and `.tar.gz` on Linux, for a reason nothing had printed — so it
+        # prints it now. Both suffixes are named in the index and either installs; what is not
+        # acceptable is a build machine quietly deciding which.
+        said = getattr(refusal, "stderr", "") or str(refusal)
+        print(f"tar --zstd refused ({said.strip().splitlines()[-1] if said.strip() else refusal}); "
+              f"packing {name} with gzip instead", file=sys.stderr)
         # A tar that died half way leaves a truncated archive behind, and `dist/` is uploaded
         # wholesale — so it is removed rather than left for something downstream to find.
         packed.unlink(missing_ok=True)

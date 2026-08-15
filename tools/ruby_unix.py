@@ -127,8 +127,12 @@ DNF_PACKAGES = [
     "gcc", "gcc-c++", "make", "patch", "perl", "perl-IPC-Cmd", "pkgconfig", "patchelf", "binutils",
     "zlib-devel", "libedit-devel", "ncurses-devel",
     # Not for the build: `borrow.pack` asks tar for zstd and falls back to gzip where the machine
-    # cannot, and this image cannot. The four artifacts of one version should be the same kind of
-    # file, and zstd is 5% smaller here on top of that.
+    # cannot, and this image cannot. Installing the compressor did **not** change that — the
+    # artifacts still came out `.tar.gz` here and `.tar.zst` on macOS — so the refusal is tar's own
+    # rather than a missing program, and `borrow.pack` prints it now instead of choosing in silence.
+    # The package stays because it costs nothing and the day the image's tar learns the option, the
+    # four artifacts of a version become the same kind of file. Both suffixes are named in the index
+    # and either installs.
     "zstd",
     # Only so that the Linux artifacts are the Ruby the macOS ones are. A Homebrew runner has GMP
     # installed as somebody else's dependency, Ruby finds it and uses it for Integer arithmetic, and
