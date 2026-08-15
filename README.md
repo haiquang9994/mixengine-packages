@@ -19,7 +19,8 @@ tools/        the recipes themselves, plus index generation and verification —
               only for anything that runs on a build machine; `verify.py` alone pulls in
               `jsonschema`
 .github/      the workflows that run the recipes on GitHub runners
-docs/         what building the "built" rows taught us, for whoever adds the next one
+docs/         what building the "built" rows taught us, for whoever adds the next one, and
+              `roadmap.md` — the ordered list of what is left
 ```
 
 Nothing here is built on a developer's machine on purpose. There is no macOS or Linux in this
