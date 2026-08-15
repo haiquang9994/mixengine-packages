@@ -1,0 +1,128 @@
+name: build python
+
+# Asked for, never automatic — the same rule the PHP and Node.js workflows keep, for the same
+# reason: upstream releases on its own schedule and a human decides which version is wanted.
+#
+# **One job for six targets, and no `plan` step.** Python is borrowed everywhere, so there is one
+# recipe rather than three and nothing to decide before the matrix starts. The whole per-target
+# difference is a Rust target triple, which `tools/python.py` reads off the machine it is running on.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Python line (3.12), exact version (3.12.14), or 'latest'. 3.10 upwards; Windows on ARM from 3.11."
+        required: true
+        type: string
+      pbs_release:
+        description: "python-build-standalone release to take it from, a date like 20260814. Blank means the newest."
+        required: false
+        default: ''
+        type: string
+      release:
+        description: 'Publish as a GitHub release. Off means build and keep the artifacts for inspection only.'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  pack:
+    # Every leg runs on the operating system and architecture it packs for, because the recipe
+    # smoke-tests what it packed — it moves the tree to a directory it has never seen and makes the
+    # interpreter find its own standard library from there. Cross-packing would be a download and a
+    # rename, and would prove nothing.
+    #
+    # **Linux is on the newest image and not the oldest, unlike the PHP matrix.** There the runner
+    # decided the glibc floor, because the runner compiled the binary. Here the binary is upstream's
+    # and carries a floor of its own, which `relocate.glibc_floor` reads off the symbols it imports
+    # — so the runner cannot influence the answer and there is nothing to buy by being old.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-2022,     os: windows, arch: x86_64 }
+          - { runner: windows-11-arm,   os: windows, arch: aarch64 }
+          - { runner: macos-14,         os: macos,   arch: aarch64 }
+          - { runner: macos-15-intel,   os: macos,   arch: x86_64 }
+          - { runner: ubuntu-24.04,     os: linux,   arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, os: linux,   arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: borrow and repack
+        id: pack
+        # bash on every leg, Windows included, so the exit code is read the same way everywhere
+        # rather than in two dialects that could disagree.
+        #
+        # 75 is "upstream builds nothing for this target", which is an empty cell of the table and
+        # not a failure: python-build-standalone publishes no aarch64-pc-windows-msvc build of the
+        # 3.10 line. Failing here would stop the release of the five targets that did produce
+        # something, so the leg says so and skips its upload. Every other non-zero code is a real
+        # failure and is passed on.
+        #
+        # `|| code=$?` rather than reading `$?` on the next line: GitHub runs `shell: bash` with
+        # `-e`, so a non-zero exit ends the step before anything can look at the code — which is
+        # exactly how the Node.js workflow first managed to fail on the leg it was written to skip.
+        #
+        # -u because a failure is diagnosed from the log, and block-buffered stdout arrives after
+        # the traceback that explains it.
+        shell: bash
+        run: |
+          code=0
+          python -u tools/python.py --version "${{ inputs.version }}" \
+            ${{ inputs.pbs_release && format('--release {0}', inputs.pbs_release) || '' }} \
+            --out dist || code=$?
+          if [ "$code" -eq 75 ]; then
+            echo "::notice::no upstream Python ${{ inputs.version }} for ${{ matrix.os }}/${{ matrix.arch }}; nothing to pack"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit "$code"
+        timeout-minutes: 30
+      - uses: actions/upload-artifact@v4
+        if: steps.pack.outputs.skipped != 'true'
+        with:
+          name: python-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    # One release per exact version, holding every artifact of it. The version is read back out of
+    # each manifest rather than taken from the input, because the input may be a line or `latest`
+    # and each leg resolves it against upstream's release independently. If two legs disagree they
+    # land in different releases, which is the honest outcome rather than a mislabelled asset.
+    needs: pack
+    if: ${{ inputs.release && !failure() && !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: incoming, merge-multiple: true }
+      - name: publish one release per version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          versions=$(jq -r '.version' incoming/*.json | sort -u)
+          for version in $versions; do
+            tag="python-$version"
+            assets=()
+            for manifest in incoming/*.json; do
+              [ "$(jq -r '.version' "$manifest")" = "$version" ] || continue
+              # Both halves. The manifest is what the index generator reads, so a release holding
+              # only the archive is a release the index cannot be rebuilt from — and it is the
+              # release, not this run's scratch directory, that has to still be readable in a year.
+              assets+=("${manifest%.json}" "$manifest")
+            done
+            echo "== $tag: ${#assets[@]} artifact(s)"
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              gh release create "$tag" \
+                --title "Python $version" \
+                --notes "Relocatable CPython $version for MixEngine, repacked from astral-sh/python-build-standalone. Every artifact was run from a directory it had been moved to before being published — the interpreter finding its own standard library there, its compiled modules loading, OpenSSL and SQLite answering, and pip reporting the version packed beside it — see mixengine-artifact.json inside each one for what was proven."
+            fi
+            gh release upload "$tag" "${assets[@]}" --clobber
+          done

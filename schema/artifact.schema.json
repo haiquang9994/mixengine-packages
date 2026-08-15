@@ -27,6 +27,23 @@
         "verified_against": {
           "type": "string",
           "description": "What the hash was checked against — for PHP on Windows, windows.php.net's own releases.json rather than a hash we computed and then trusted."
+        },
+        "project": {
+          "type": "string",
+          "description": "Who published the payload, where that is not simply the runtime's own project: \"astral-sh/python-build-standalone\", \"oneclick/rubyinstaller2\"."
+        },
+        "release": {
+          "type": "string",
+          "description": "The publisher's own identifier for the release this came out of, when it is not the runtime version. python-build-standalone tags by date and RubyInstaller tags by version *and packaging revision*, so two archives of one CPython or one Ruby are told apart here rather than in the index, which is keyed on the runtime version alone."
+        },
+        "variant": {
+          "type": "string",
+          "description": "Which asset of that release was taken, where the publisher offers several of the same target — python-build-standalone's `install_only_stripped` against its `install_only`."
+        },
+        "added": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Paths this repository wrote into an otherwise borrowed archive, so that a reader comparing it against upstream finds the difference stated rather than deducing it. There is one at the time of writing: Windows CPython archives get a `Scripts/pip.cmd`, because upstream ships the pip package with no entry point and a generated `pip.exe` would carry an absolute interpreter path into a tree that is going to move."
         }
       }
     },
@@ -60,6 +77,10 @@
           "description": "The archive was extracted, moved to an unrelated directory, and exercised from there — never from where it was produced."
         },
         "ran": { "type": "array", "items": { "type": "string" } },
+        "openssl": {
+          "type": "string",
+          "description": "The TLS library the archive was proven to *call*, as it names itself. Recorded because it is the one thing about a bundled runtime a user cannot see from outside, and because every runtime here carries its own: a Python, a Ruby and a Node.js installed on one machine are three different OpenSSLs."
+        },
         "loaded_extension": {
           "type": "string",
           "description": "A shared extension that was loaded from extension_dir after relocation. Absent when the build has none to load."
