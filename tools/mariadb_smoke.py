@@ -199,7 +199,11 @@ def install_db(tree: Path, work: Path, provides: dict[str, str], path: str, wind
         ]
         # `--user` is refused unless the caller is root, and on a runner it is not. Leaving it out
         # means "whoever is running this", which is also what MixEngine will do.
-        output = borrow.run("/bin/sh", str(program), *arguments, path=path, timeout=900)
+        #
+        # `Path("/bin/sh")` rather than the string: `borrow.run` names the program in its failure
+        # message, and a `str` there turns a diagnosable script failure into an AttributeError from
+        # the error handler itself — which is what the .deb leg reported instead of what went wrong.
+        output = borrow.run(Path("/bin/sh"), str(program), *arguments, path=path, timeout=900)
     else:
         # Not created first: the Windows program writes the directory itself and refuses one that is
         # already there. Its parent is what has to exist.

@@ -89,8 +89,13 @@ FLOOR = (10, 6)
 # that is missing from the machine. And the right answer is not to find that Boost, because MixEngine
 # supervises a single server and has no cluster for an arbitrator to arbitrate. So the whole of
 # Galera goes, and `upstream.removed` says it went.
-PRUNE = ("mysql-test", "sql-bench", "share/man", "share/doc", "man", "docs",
-         "bin/garbd", "lib/galera", "share/galera")
+PRUNE = ("mysql-test", "sql-bench", "share/man", "share/doc", "man", "docs")
+
+# Galera, wherever the bintar happens to put it. A path list was not enough: removing `bin/garbd`
+# and `lib/galera` left `lib/libgalera_smm.so`, which needs `libssl.so.1.0.0` — an OpenSSL retired
+# in 2019 — and bundling stopped on that instead, one CI round later. The provider, the arbitrator
+# and the state-transfer scripts are one feature and they go as one.
+GALERA = "*galera*"
 
 
 def get(url: str, timeout: int = 120) -> dict:
@@ -228,6 +233,13 @@ def prune(tree: Path) -> list[str]:
         elif path.is_file():
             path.unlink()
             removed.append(relative)
+
+    for path in sorted(tree.rglob(GALERA)):
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        elif path.exists():
+            path.unlink()
+        removed.append(str(path.relative_to(tree)).replace("\\", "/"))
     return removed
 
 

@@ -190,6 +190,17 @@ def toolchain() -> dict[str, str]:
     clang, clangxx = ask("xcrun", "-f", "clang"), ask("xcrun", "-f", "clang++")
     if not (sdk and clang and clangxx):
         raise SystemExit("xcrun could not name an SDK and a compiler; this machine has no toolchain")
+
+    # **Passing the SDK to CMake is not enough, which took a second CI round to establish.** With the
+    # compiler and `CMAKE_OSX_SYSROOT` both pinned to Xcode's SDK, `find_package(ZLIB)` still answered
+    # with the *Command Line Tools* SDK — `MacOSX14.sdk/usr/lib/libz.tbd` — because a `find_` call
+    # searches the environment's `SDKROOT` rather than the sysroot the compile will use. CMake then
+    # adds that SDK's `usr/include` as an include directory, C headers land ahead of libc++, and the
+    # build dies in `gen_lex_hash.cc` on a message about header search paths.
+    #
+    # Setting it in the environment is what makes every *later* lookup agree with the compile, and
+    # it is exported rather than passed because `xcrun` and CMake read it from different places.
+    os.environ["SDKROOT"] = sdk
     print(f"toolchain: {clang} against {sdk}")
     return {"sdk": sdk, "cc": clang, "cxx": clangxx}
 
@@ -239,6 +250,11 @@ def configure(source_tree: Path, build: Path, prefix: Path, found: dict[str, Pat
         "-DINSTALL_MYSQLTESTDIR=",
         "-DINSTALL_SQLBENCHDIR=",
         "-DPLUGIN_AUTH_PAM=NO",
+        # The bundled zlib rather than the machine's, and it is the *machine's* that caused trouble:
+        # finding it is what dragged a second SDK's include directory into the compile on macOS (see
+        # `toolchain`). It is also one fewer library to bundle and one fewer version to differ
+        # between the six artifacts of a release.
+        "-DWITH_ZLIB=bundled",
     ]
     arguments += [f"-DPLUGIN_{name}=NO" for name in DISABLED_PLUGINS]
 
