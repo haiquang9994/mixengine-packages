@@ -83,11 +83,12 @@ CHOCO_PACKAGES = ("winflexbison3",)
 # the other.
 DISABLED_PLUGINS = ("ROCKSDB", "COLUMNSTORE", "MROONGA", "S3", "SPIDER", "CONNECT", "OQGRAPH")
 
-PRUNE = ("mariadb-test", "mysql-test", "sql-bench", "share/man", "share/doc", "man", "docs",
-         "include",
-         # Where the Windows install layout puts the `.pdb` files: debug information for binaries
-         # nobody is going to debug from an artifact, and a directory left empty once they are gone.
-         "support-files", "symbols")
+# What this recipe prunes is `mariadb.PRUNE` and the pattern lists beside it — not a list of its
+# own, which is what it had and what let a Windows ARM64 artifact ship 21 MB of test binaries, a
+# 14 MB import library and eighteen demonstration plugins that the borrowed Windows x86_64 artifact
+# of the same version did not have. Turning them off at configure time is not the alternative: the
+# `-DINSTALL_MYSQLTESTDIR=` attempt in `configure` is why installing and then pruning is the rule
+# here.
 
 
 def run(*command: str, cwd: Path | None = None, env: dict | None = None,
@@ -315,18 +316,16 @@ def compile_and_install(build: Path) -> None:
 def assemble(prefix: Path, work: Path) -> Path:
     tree = work / "tree"
     shutil.copytree(prefix, tree, symlinks=True)
-    for relative in PRUNE:
-        path = tree / relative
-        if path.is_dir():
-            shutil.rmtree(path, ignore_errors=True)
-        elif path.is_file():
-            path.unlink()
+
     # macOS writes a `.dSYM` bundle beside everything it compiles — the debug information, lifted
-    # into a Mach-O of its own. Nothing loads them and they are a large share of the archive.
+    # into a Mach-O of its own. Nothing loads them and they are a large share of the archive. Done
+    # before the shared prune so that a `.dSYM` whose binary is about to go does not outlive it.
     for symbols in sorted(tree.rglob("*.dSYM")):
         shutil.rmtree(symbols, ignore_errors=True)
-    for symbols in sorted(tree.rglob("*.pdb")):
-        symbols.unlink()
+
+    removed = mariadb.prune(tree)
+    if removed:
+        print(f"not shipping {len(removed)} paths: {', '.join(removed)}")
     return tree
 
 

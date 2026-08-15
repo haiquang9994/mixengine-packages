@@ -10,10 +10,10 @@ system that installs it into ``/usr`` and MixEngine installs an artifact into a 
 That makes this a borrow with a rearrangement rather than a build, and it is worth being precise
 about which parts are which:
 
-*Borrowed*: every binary, plugin, error-message file and character set — taken out of upstream's own
-``mariadb-server``, ``mariadb-server-core``, ``mariadb-client``, ``mariadb-client-core``,
-``mariadb-common`` and ``libmariadb3`` packages, each verified against the SHA256 in the repository's
-own ``Packages`` index.
+*Borrowed*: every binary, plugin, error-message file and character set — taken out of the packages
+named in ``PACKAGES`` and ``OPTIONAL`` below, each verified against the SHA256 in the repository's own
+``Packages`` index. Which packages those are is itself a decision the parity rule drives: a bintar is
+one file containing everything, and matching it means naming each piece upstream split out.
 
 *This repository's*: the layout — ``usr/sbin/mariadbd`` and ``usr/bin/*`` become ``bin/``,
 ``usr/lib/mysql/plugin`` becomes ``lib/plugin``, ``usr/share/mysql`` becomes ``share`` — which is
@@ -84,6 +84,25 @@ PACKAGES = (
     "mariadb-backup",
 )
 
+# **The five compression providers, which are optional here and are not optional to a user.** InnoDB
+# reads `innodb_compression_algorithm` at startup and loads a provider plugin for whatever it names;
+# a bintar has all five compiled in beside the server, and a `.deb` installation gets them by
+# installing five more packages. Left out, the same `my.cnf` with `innodb_compression_algorithm=lz4`
+# starts a server on five cells and fails on the sixth — a difference nobody chose, in the one
+# direction the parity rule is easy to miss, because the ARM64 artifact was *smaller* and looked
+# better for it.
+#
+# Optional in the sense the rest of `PACKAGES` is not: compression providers arrived in 10.7, so the
+# 10.6 line has no such package and never will. A missing one is reported and skipped rather than
+# turning the whole cell into an empty one — which is what `wanted` does with anything required.
+OPTIONAL = (
+    "mariadb-plugin-provider-bzip2",
+    "mariadb-plugin-provider-lz4",
+    "mariadb-plugin-provider-lzma",
+    "mariadb-plugin-provider-lzo",
+    "mariadb-plugin-provider-snappy",
+)
+
 # `usr/…` in the unpacked package -> where it goes in the artifact. The destination side is upstream's
 # own bintar layout rather than an invention: `mariadb_smoke.LAYOUT` looks in `bin/`, mariadbd derives
 # its plugin directory and its error messages from `basedir`, and an artifact that arranged itself
@@ -105,9 +124,12 @@ MOVES = (
 # under a triplet directory whose name differs per architecture.
 LIBRARY_GLOBS = ("usr/lib/*/libmariadb.so*", "usr/lib/*/libmariadb3/*")
 
-# Taken out for the same reason `mariadb.py` drops the test suite, plus the two a `.deb` carries that
-# a relocatable tree cannot use: init scripts and systemd units name absolute paths and register a
-# system service, which is precisely what MixEngine supervises instead.
+# **Only what is wrong with the *shape*.** What a MariaDB artifact does not contain is decided in
+# `mariadb.PRUNE` and the pattern lists beside it, and `rearrange` runs those too; this list is the
+# part that is true of a `.deb` and of nothing else — the `usr/` and `etc/` trees left behind once
+# their contents have been moved, a systemd unit that registers the system service MixEngine
+# supervises instead, and the packaging metadata Debian requires and a relocatable tree has no reader
+# for.
 PRUNE = ("usr", "etc", "lib/systemd", "share/man", "share/doc", "share/lintian", "share/bug")
 
 
@@ -173,7 +195,9 @@ def wanted(stanzas: list[dict[str, str]], version: str) -> dict[str, dict[str, s
     # by running this against 10.6, where the unsuffixed lookup reported two packages missing from a
     # repository that has both.
     series = ".".join(version.split(".")[:2])
-    aliases = {alias: name for name in PACKAGES for alias in (name, f"{name}-{series}")}
+    aliases = {alias: name
+               for name in PACKAGES + OPTIONAL
+               for alias in (name, f"{name}-{series}")}
 
     found: dict[str, dict[str, str]] = {}
     for stanza in stanzas:
@@ -195,6 +219,10 @@ def wanted(stanzas: list[dict[str, str]], version: str) -> dict[str, dict[str, s
             f"MariaDB's {SUITE} repository has no {', '.join(missing)} at {version}. Not every "
             f"series is published for every Ubuntu suite."
         )
+    absent = [name for name in OPTIONAL if name not in found]
+    if absent:
+        print(f"this series publishes no {', '.join(absent)}; the compression algorithms they "
+              f"provide will not be available in this artifact")
     return found
 
 
@@ -242,7 +270,7 @@ def unpack(version: str, stanzas: dict[str, dict[str, str]], work: Path) -> Path
     base = REPO.format(version=version)
     root = work / "deb"
     root.mkdir(parents=True, exist_ok=True)
-    for name in PACKAGES:
+    for name in [name for name in PACKAGES + OPTIONAL if name in stanzas]:
         stanza = stanzas[name]
         url = f"{base}/{stanza['Filename']}"
         archive = work / Path(stanza["Filename"]).name
@@ -254,14 +282,21 @@ def unpack(version: str, stanzas: dict[str, dict[str, str]], work: Path) -> Path
                 f"{archive.name} hashes to {actual}, and the {SUITE} Packages index states "
                 f"{stanza['SHA256']}"
             )
-        # Into one root on purpose: these six packages are designed to overlay each other on a real
+        # Into one root on purpose: these packages are designed to overlay each other on a real
         # system, and nothing in them collides.
         run("dpkg-deb", "-x", str(archive), str(root))
     return root
 
 
-def rearrange(root: Path, work: Path) -> Path:
-    """Turn an installed-into-``/usr`` layout into the one upstream's own bintar publishes."""
+def rearrange(root: Path, work: Path) -> tuple[Path, list[str]]:
+    """Turn an installed-into-``/usr`` layout into the one upstream's own bintar publishes.
+
+    Answers the tree and what was taken out of it — the second half being ``mariadb.prune``'s, which
+    is the same list of things MixEngine does not ship that the bintar goes through. This recipe used
+    to run only ``PRUNE`` below, and the difference was visible in the artifact: PAM plugins that
+    cannot work without a setuid helper, and Galera scripts with no provider to talk to, in the one
+    cell whose payload comes from packaging rather than from a tarball.
+    """
     tree = work / "tree"
     for source, destination in MOVES:
         origin = root / source
@@ -321,7 +356,14 @@ def rearrange(root: Path, work: Path) -> Path:
             path.unlink()
             if target.exists():
                 shutil.copy2(target, path)
-    return tree
+
+    # Last, so that it runs over the finished layout rather than over `usr/`: the paths and patterns
+    # in `mariadb.PRUNE`, `NOT_SHIPPED`, `GALERA` and `DEBRIS` are all written against the bintar
+    # shape this function has just produced.
+    removed = mariadb.prune(tree)
+    if removed:
+        print(f"not shipping {len(removed)} paths: {', '.join(removed)}")
+    return tree, removed
 
 
 def main() -> None:
@@ -370,12 +412,12 @@ def main() -> None:
     work = Path(tempfile.mkdtemp(prefix="mixengine-mariadb-"))
     stanzas = wanted(packages_index(version, "arm64" if arch == "aarch64" else "amd64"), version)
     install(system_libraries(stanzas))
-    tree = rearrange(unpack(version, stanzas, work), work)
+    tree, dropped = rearrange(unpack(version, stanzas, work), work)
 
     provides = mariadb_smoke.describe(tree, windows=False)
     # Shared with the bintar recipe rather than reimplemented: a plugin needing a library nobody has
     # is the same fact whichever route the payload took here. See `mariadb.unshippable_plugins`.
-    dropped = mariadb.unshippable_plugins(tree)
+    dropped += mariadb.unshippable_plugins(tree)
     # Expected to find nothing and run anyway: Debian strips its binaries and ships the symbols in a
     # separate `-dbg` package, which is the whole reason this route produces an archive an order of
     # magnitude smaller than the bintar one. Calling it keeps that a measurement rather than a
@@ -402,9 +444,10 @@ def main() -> None:
             "verified_against": (
                 f"the {SUITE} Packages index (SHA256 per .deb) over HTTPS to archive.mariadb.org"
             ),
-            "variant": f"{', '.join(PACKAGES)} rearranged into upstream's own bintar layout",
+            "variant": f"{', '.join(name for name in PACKAGES + OPTIONAL if name in stanzas)} "
+                       f"rearranged into upstream's own bintar layout",
             "added": sorted(f"lib/{library}" for library in added),
-            **({"removed": dropped} if dropped else {}),
+            **({"removed": sorted(set(dropped))} if dropped else {}),
             **({"stripped": stripped} if stripped else {}),
         },
         "provides": provides,

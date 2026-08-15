@@ -64,6 +64,26 @@ Whatever is taken out or put in is **recorded in `mixengine-artifact.json`** —
 `upstream.added`, `upstream.stripped` — so that "borrowed" keeps meaning something a reader can
 check against what the publisher shipped.
 
+**Both rules are checked by comparing finished artifacts, because intent is not evidence.** The first
+audit of a green MariaDB run — six cells, all six proven against a running server — found the two
+Linux artifacts three times apart in size and each of the four asymmetries below, none of which any
+recipe knew it had:
+
+* the same feature list applied by three recipes, and only one of them running it: the `.deb` cell
+  kept PAM plugins and Galera scripts, the compiled cells kept 21 MB of test binaries, a 14 MB import
+  library and eighteen demonstration plugins;
+* a feature present on five cells and missing on the sixth *because that cell was smaller* — the
+  compression providers InnoDB loads for `innodb_compression_algorithm`, which upstream splits into
+  five more `.deb` packages;
+* a pattern that had excluded `mysql_ldb` since the first round and never once removed it, because
+  deleting its target first made the symlink invisible to `Path.exists`;
+* and one difference that is not ours to fix and is written down instead: upstream's own bintar ships
+  the client half of the PARSEC authentication plugin without the server half, which its `.deb`
+  packages have.
+
+Most of that is invisible in a passing build. A smoke test proves an artifact *runs*; only a diff
+proves six of them are the same thing.
+
 For PHP:
 
 | OS / arch | Range | How |

@@ -98,7 +98,14 @@ PRUNE = ("mariadb-test", "mysql-test", "sql-bench", "share/man", "share/doc", "m
          # Headers and import libraries, for compiling a C client against this server. MixEngine
          # installs a database rather than an SDK, and the compiled cells do not ship them either —
          # six artifacts of one version differing in what they contain is the thing worth avoiding.
-         "include")
+         # `lib/pkgconfig` and `share/aclocal` are the rest of that SDK: a `.pc` file and an autoconf
+         # macro describe how to link against headers this archive no longer carries.
+         "include", "lib/pkgconfig", "share/aclocal",
+         # Init scripts, systemd units, apparmor and SELinux policy, and a logrotate rule. Every one
+         # of them names an absolute path and registers a system service — which is the thing
+         # MixEngine supervises *instead of*, not something it installs. `symbols` is where the
+         # Windows install layout collects `.pdb` files, and is empty once `DEBRIS` has run.
+         "support-files", "symbols")
 
 # **What MixEngine does not ship, stated once so that six artifacts of one version contain the same
 # MariaDB.** A bintar is built with everything its maintainers can compile; a source build here is
@@ -117,10 +124,37 @@ PRUNE = ("mariadb-test", "mysql-test", "sql-bench", "share/man", "share/doc", "m
 # to a packer and to a compiler.
 NOT_SHIPPED = (
     "*rocksdb*", "mariadb-ldb*", "mysql_ldb*", "sst_dump*",     # RocksDB, and its own tooling
-    "*mroonga*", "*spider*", "*oqgraph*", "*columnstore*",
+    "myrocks*",                                                 # …and its backup script
+    "*mroonga*", "*groonga*",                                   # Mroonga, and the normaliser under it
+    "*spider*", "*oqgraph*", "*columnstore*",
     "ha_connect*", "*.jar",                                     # CONNECT, and the JDBC bridge it uses
-    "ha_s3*",
-    "*auth_pam*",                                               # PAM: a system authentication stack
+    "ha_s3*", "aria_s3_copy*",                                  # the S3 engine, and its own tooling
+    "*auth_pam*", "pam_user_map*", "user_map.conf",             # PAM: a system authentication stack
+    # Kerberos and HashiCorp Vault. Both are the authentication and key custody of an organisation
+    # with a directory server, which is not a machine running a local development environment — and
+    # `.deb` ships each as its own `mariadb-plugin-*`, so four of the six cells never had them. What
+    # made these worth naming rather than tolerating is what they drag in behind them: bundling
+    # followed `auth_gssapi` into krb5, LDAP, SASL, GnuTLS and Nettle, and `hashicorp` into libcurl,
+    # nghttp2, brotli, libssh, RTMP and PSL — eighteen libraries, ten megabytes, for two features.
+    "*gssapi*", "*hashicorp*",
+    # **The test suite's binaries, which are not in the test suite's directory.** `mariadb-test` and
+    # `mysql-test` above take the suite itself; these four executables live in `bin/` beside the
+    # server and are useless without it — 18 MB on a Linux bintar, 21 MB in a Windows build, and
+    # nothing in MixEngine has ever run them. `echo.exe` is a helper the suite installs on Windows
+    # because `cmd` has no `echo` that behaves; shipping a database server should not mean shipping
+    # an `echo`.
+    "mariadb-test*", "mysqltest*", "mariadb-client-test*", "mysql_client_test*", "echo.exe",
+    # The demonstration and QA plugins upstream builds beside the real ones. Each is an example for
+    # somebody writing a plugin — `ha_example` is a storage engine that stores nothing,
+    # `example_key_management` encrypts with a key derived from the key id — and a server that loads
+    # one is a server somebody is developing MariaDB on rather than running.
+    "adt_null*", "auth_0x0100*", "auth_test_plugin*", "qa_auth_*", "mypluglib*",
+    "*daemon_example*", "ha_example*", "dialog_examples*", "func_test*", "type_test*",
+    "debug_key_management*", "example_key_management*", "ha_test_sql_discovery*",
+    "test_sql_service*", "test_versioning*", "test_pam_modules",
+    # The rest of the SDK `PRUNE` starts on: static libraries to link a client against, and the
+    # scripts that print the flags for doing so. Without `include/` there is nothing to compile.
+    "*.a", "mariadb_config*", "mysql_config*", "*.pl",
 )
 
 # **`mariabackup` is deliberately not in that list, and it was in it once.** Everything above is a
@@ -139,12 +173,20 @@ NOT_SHIPPED = (
 # loads.
 DEBRIS = ("*.pdb", "*.lib")
 
-# Galera, wherever the bintar happens to put it, and under both of the names it uses. A path list
-# was not enough — removing `bin/garbd` and `lib/galera` left `lib/libgalera_smm.so`, which needs
-# the OpenSSL retired in 2019 — and a `*galera*` glob was not enough either, because the arbitrator
-# is called `garbd` and matches neither. The provider, the arbitrator and the state-transfer scripts
-# are one feature; MixEngine supervises a single server and has no cluster for any of it.
-GALERA = ("*galera*", "*garbd*")
+# The same thing on the other side of the build: `bin/server.lib` is 14 MB of import library in a
+# Windows ARM64 build and nothing links against it, which is how that cell came to be 12 MB larger
+# than the x86_64 one it should have matched. It is `DEBRIS` that already said so — the compiled
+# recipe simply was not running this list.
+
+# Galera, wherever the bintar happens to put it, and under every name it uses. A path list was not
+# enough — removing `bin/garbd` and `lib/galera` left `lib/libgalera_smm.so`, which needs the OpenSSL
+# retired in 2019 — and a `*galera*` glob was not enough either, because the arbitrator is called
+# `garbd` and matches neither. `wsrep` is the third spelling: the replication API Galera plugs into,
+# which is what `wsrep_info.so`, `wsrep_sst_*` and `wsrep.cnf` are named after and which is inert
+# without a provider to plug in. `garb*` rather than `*garbd*` because the systemd wrapper beside it
+# is `garb-systemd`. The provider, the arbitrator, the API and the state-transfer scripts are one
+# feature; MixEngine supervises a single server and has no cluster for any of it.
+GALERA = ("*galera*", "garb*", "*wsrep*")
 
 
 def get(url: str, timeout: int = 120) -> dict:
@@ -345,7 +387,17 @@ def plan(spec: str) -> list[str]:
 
 
 def prune(tree: Path) -> list[str]:
-    """Take out what a database server does not need, and say what went."""
+    """Take out what a database server does not need, and say what went.
+
+    **Called by all three recipes, which it was not at first, and the artifacts showed it.** A
+    borrowed bintar went through here; a `.deb` rearrangement and a source build each had a prune of
+    their own that knew about layout and not about features. So Linux ARM64 kept the PAM plugins and
+    the Galera scripts this list has excluded since the first round, and Windows ARM64 kept 21 MB of
+    test binaries, 18 demonstration plugins and a 14 MB import library — one version meaning three
+    different things depending on which cell a user installed from, which is precisely what the
+    parity rule in the README exists to prevent. The layout-specific pruning stays with each recipe;
+    what is *not shipped* is decided once, here.
+    """
     removed = []
     for relative in PRUNE:
         path = tree / relative
@@ -360,12 +412,28 @@ def prune(tree: Path) -> list[str]:
         for path in sorted(tree.rglob(pattern)):
             # Only what is still there: a directory removed a moment ago takes its contents with it,
             # and listing each of those would turn `upstream.removed` into a file manifest.
-            if not path.exists():
+            #
+            # **`is_symlink` first, and it is not a refinement.** `exists()` follows the link, so a
+            # symlink whose target an earlier pattern removed answers False and was skipped — which
+            # is how `bin/mysql_ldb` shipped in every Linux artifact so far despite `mysql_ldb*`
+            # having been on this list since the first round: `mariadb-ldb*` deleted its target one
+            # pattern earlier and turned it invisible to its own rule.
+            if not path.is_symlink() and not path.exists():
                 continue
-            if path.is_dir():
+            if path.is_dir() and not path.is_symlink():
                 shutil.rmtree(path, ignore_errors=True)
             else:
                 path.unlink()
+            removed.append(str(path.relative_to(tree)).replace("\\", "/"))
+
+    # **What is left pointing at what just went.** A Linux bintar offers every tool under its old
+    # `mysql*` name as a symlink beside the new one, so removing `bin/mariadb-test` leaves
+    # `bin/mysqltest` aimed at nothing. Both spellings are named above, but a dangling link is the
+    # kind of thing a pattern added later will produce again, and a file that resolves to nowhere is
+    # a worse artifact than a missing one — it is a command that exists until a user runs it.
+    for path in sorted(tree.rglob("*")):
+        if path.is_symlink() and not path.exists():
+            path.unlink()
             removed.append(str(path.relative_to(tree)).replace("\\", "/"))
     return removed
 
@@ -425,7 +493,7 @@ def main() -> None:
 
     removed = prune(tree)
     if removed:
-        print(f"removed {', '.join(removed)}: a test suite is not part of a database server")
+        print(f"not shipping {len(removed)} paths: {', '.join(removed)}")
     if not windows:
         removed += unshippable_plugins(tree)
     stripped = strip_debug(tree)
