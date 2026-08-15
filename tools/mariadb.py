@@ -191,6 +191,40 @@ def resolve(spec: str, target: tuple[str, str]) -> tuple[str, str, str, str | No
     return (*chosen, series.get("release_eol_date"))
 
 
+def strip_debug(tree: Path) -> str | None:
+    """Take the debug symbols out of a borrowed bintar, and answer with what that saved.
+
+    **Measured because the artifacts did not agree with each other.** MariaDB 11.8.8 packs to 27 MB
+    from upstream's own ``arm64`` ``.deb`` packages and to 371 MB from its ``x86_64`` bintar — the
+    same server, the same compression. Debian strips its binaries and ships the symbols in a
+    separate ``-dbg`` package; the bintar carries them inside every executable and every plugin.
+    Nothing in MixEngine reads them, and a user would download them once per version per machine.
+
+    ``--strip-debug`` rather than ``--strip-all``: the dynamic symbol table is what makes a shared
+    object loadable and a stack trace nameable, and removing it saves nothing here because it is
+    small. What goes is ``.debug_*``, which is nearly all of the difference above.
+
+    The saving is returned rather than assumed, and it goes in the manifest — an archive that says
+    it was stripped and is the same size as one that was not is a claim worth being able to check.
+    """
+    if sys.platform != "linux" or not shutil.which("strip"):
+        return None
+
+    files = relocate.machine_files(tree)
+    before = sum(path.stat().st_size for path in files)
+    for path in files:
+        # A file this cannot strip is left alone rather than failing the build: `strip` refuses
+        # anything it does not recognise, and the point here is size rather than uniformity.
+        subprocess.run(["strip", "--strip-debug", str(path)], capture_output=True, timeout=300)
+    after = sum(path.stat().st_size for path in files)
+    if after >= before:
+        return None
+    print(f"stripped debug symbols from {len(files)} files: "
+          f"{before / 1e6:,.0f} MB of machine code became {after / 1e6:,.0f} MB")
+    return (f"debug symbols stripped from {len(files)} files "
+            f"({before / 1e6:,.0f} MB -> {after / 1e6:,.0f} MB)")
+
+
 def unshippable_plugins(tree: Path) -> list[str]:
     """Drop the plugins that need a library this machine does not have, and name each one.
 
@@ -350,6 +384,7 @@ def main() -> None:
         print(f"removed {', '.join(removed)}: a test suite is not part of a database server")
     if not windows:
         removed += unshippable_plugins(tree)
+    stripped = strip_debug(tree)
 
     provides = mariadb_smoke.describe(tree, windows)
 
@@ -384,6 +419,8 @@ def main() -> None:
         manifest["upstream"]["added"] = sorted(f"lib/{library}" for library in added)
     if removed:
         manifest["upstream"]["removed"] = sorted(removed)
+    if stripped:
+        manifest["upstream"]["stripped"] = stripped
 
     measured = relocate.floor(tree) if not windows else None
     if measured:

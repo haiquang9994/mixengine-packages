@@ -371,6 +371,11 @@ def main() -> None:
     # Shared with the bintar recipe rather than reimplemented: a plugin needing a library nobody has
     # is the same fact whichever route the payload took here. See `mariadb.unshippable_plugins`.
     dropped = mariadb.unshippable_plugins(tree)
+    # Expected to find nothing and run anyway: Debian strips its binaries and ships the symbols in a
+    # separate `-dbg` package, which is the whole reason this route produces an archive an order of
+    # magnitude smaller than the bintar one. Calling it keeps that a measurement rather than a
+    # belief about somebody else's packaging policy.
+    stripped = mariadb.strip_debug(tree)
     added = relocate.bundle(tree, search=[tree / "lib"])
     if added:
         print(f"bundled {len(added)} librar{'y' if len(added) == 1 else 'ies'}: "
@@ -395,6 +400,7 @@ def main() -> None:
             "variant": f"{', '.join(PACKAGES)} rearranged into upstream's own bintar layout",
             "added": sorted(f"lib/{library}" for library in added),
             **({"removed": dropped} if dropped else {}),
+            **({"stripped": stripped} if stripped else {}),
         },
         "provides": provides,
     }

@@ -45,6 +45,10 @@
           "items": { "type": "string" },
           "description": "Paths this repository wrote into an otherwise borrowed archive, so that a reader comparing it against upstream finds the difference stated rather than deducing it. There is one at the time of writing: Windows CPython archives get a `Scripts/pip.cmd`, because upstream ships the pip package with no entry point and a generated `pip.exe` would carry an absolute interpreter path into a tree that is going to move."
         },
+        "stripped": {
+          "type": "string",
+          "description": "Set where an otherwise borrowed payload had its debug symbols removed, with what that saved — because an archive claiming to be stripped and weighing what an unstripped one weighs is a claim worth being able to check. MariaDB is why this exists: upstream's Linux bintar carries its symbols inside every binary, so the same server packed to 371 MB from the bintar and 27 MB from upstream's own .deb packages, which Debian strips."
+        },
         "removed": {
           "type": "array",
           "items": { "type": "string" },
