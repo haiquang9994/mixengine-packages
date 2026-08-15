@@ -102,6 +102,13 @@ LAYOUT = {
 # about that release rather than a broken pack.
 REQUIRED = ("node", "npm")
 
+# What this exits with when the answer is "upstream builds nothing here", as opposed to "something
+# went wrong". A matrix leg asking for Node 18 on Windows-on-ARM is not a failed run: it is an empty
+# cell of the table, and upstream decided it years ago. The workflow reads this code and skips the
+# upload rather than failing the job — which matters because a failed leg would stop the release of
+# the five targets that did produce something.
+UNAVAILABLE = 75
+
 
 def fetch(url: str) -> bytes:
     with urllib.request.urlopen(url, timeout=120) as response:
@@ -176,7 +183,8 @@ def resolve(spec: str, target: tuple[str, str]) -> str:
         )
         if target in FIRST:
             said += f"; {target[0]}/{target[1]} starts at {'.'.join(str(p) for p in FIRST[target])}"
-        raise SystemExit(said)
+        print(said, file=sys.stderr)
+        raise SystemExit(UNAVAILABLE)
 
     # Newest first in the document, and sorted here anyway: the order is upstream's promise rather
     # than upstream's guarantee, and "newest patch" is the one claim this function makes.
@@ -184,10 +192,12 @@ def resolve(spec: str, target: tuple[str, str]) -> str:
 
     floor = FIRST.get(target)
     if floor and parts(version) < floor:
-        raise SystemExit(
+        print(
             f"node {version} predates the first native build for {target[0]}/{target[1]} "
-            f"({'.'.join(str(p) for p in floor)}). An emulated build is not offered."
+            f"({'.'.join(str(p) for p in floor)}). An emulated build is not offered.",
+            file=sys.stderr,
         )
+        raise SystemExit(UNAVAILABLE)
     return version
 
 

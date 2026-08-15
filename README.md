@@ -69,7 +69,8 @@ For Node.js there is nothing to evaluate and one recipe for every cell:
 The floor is 16 because that is where a *native* build exists for every architecture MixEngine runs
 on — before it, the only macOS Node is x86_64, and handing that to an Apple Silicon machine would be
 offering emulation under the name of a version. Where a line has no build for a target,
-`tools/node.py` refuses with that sentence rather than with a 404 from the middle of a download.
+`tools/node.py` says so and exits 75 — an empty cell of the table, which the workflow skips rather
+than fails, so that one absent build does not stop the release of the five that exist.
 
 ## Repack, do not rearrange
 

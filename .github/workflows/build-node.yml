@@ -49,11 +49,31 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - name: borrow and repack
-        # -u because a failure here is diagnosed from the log, and block-buffered stdout arrives
-        # after the traceback that explains it.
-        run: python -u tools/node.py --version "${{ inputs.version }}" --out dist
+        id: pack
+        # bash on every leg, Windows included, so the exit code is read the same way everywhere
+        # rather than in two dialects that could disagree.
+        #
+        # 75 is "upstream builds nothing for this target", which is an empty cell of the table and
+        # not a failure: Node 18 has no Windows-on-ARM build and never will. Failing here would
+        # stop the release of the five targets that did produce something, so the leg says so and
+        # skips its upload. Every other non-zero code is a real failure and is passed on.
+        #
+        # -u because a failure is diagnosed from the log, and block-buffered stdout arrives after
+        # the traceback that explains it.
+        shell: bash
+        run: |
+          set -uo pipefail
+          python -u tools/node.py --version "${{ inputs.version }}" --out dist
+          code=$?
+          if [ "$code" -eq 75 ]; then
+            echo "::notice::no upstream Node ${{ inputs.version }} for ${{ matrix.os }}/${{ matrix.arch }}; nothing to pack"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit "$code"
         timeout-minutes: 30
       - uses: actions/upload-artifact@v4
+        if: steps.pack.outputs.skipped != 'true'
         with:
           name: node-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/*
