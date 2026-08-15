@@ -217,6 +217,17 @@ def install_db(tree: Path, work: Path, provides: dict[str, str], path: str, wind
             print(f"mariadb-install-db: run against {link}, because upstream's script does not "
                   f"quote $basedir and this tree's path contains a space")
         arguments = [
+            # **First, and it is the difference between bootstrapping this artifact and bootstrapping
+            # whatever the machine already has.** Without it the script and the bootstrap server it
+            # starts read `/etc/mysql/my.cnf` — which exists on a GitHub Linux runner, because those
+            # images ship a MySQL — and the system tables installation fails with a message that
+            # blames the data directory. The script itself suggests this: "The problem could be
+            # conflicting information in an external my.cnf files."
+            #
+            # T33 wants it for a stronger reason than CI does: a user with a MariaDB of their own
+            # installed has a my.cnf naming a datadir, a socket and a port, and a MixEngine instance
+            # that silently inherited any of them would be writing into somebody else's database.
+            "--no-defaults",
             # The script resolves everything else — the bootstrap server, the error messages, the
             # plugin directory — relative to this, and it is why a bintar can be unpacked anywhere.
             f"--basedir={basedir}",
@@ -230,11 +241,28 @@ def install_db(tree: Path, work: Path, provides: dict[str, str], path: str, wind
             # installed them and has no such account either, so this is the answer there as well.
             f"--user={getpass.getuser()}",
         ]
-        #
+        # **`/usr/sbin` and `/sbin` on the path, which every other check in this repository is right
+        # to leave off.** The cut-down PATH exists so a runner's own interpreter cannot answer for
+        # the archive — but this is a *shell script* calling the system's own tools rather than the
+        # artifact answering a question. `chown` is in `/usr/sbin` on macOS and `/usr/bin` on Linux,
+        # so the cut-down path produced `chown: command not found` on one platform and not the other.
+        # The same distinction `ruby_unix.py` draws for compiling a gem.
+        installing = os.pathsep.join([path, "/usr/sbin", "/sbin"])
+
         # `Path("/bin/sh")` rather than the string: `borrow.run` names the program in its failure
         # message, and a `str` there turns a diagnosable script failure into an AttributeError from
         # the error handler itself — which is what the .deb leg reported instead of what went wrong.
-        output = borrow.run(Path("/bin/sh"), str(program), *arguments, path=path, timeout=900)
+        try:
+            output = borrow.run(Path("/bin/sh"), str(program), *arguments, path=installing,
+                                timeout=900)
+        except SystemExit:
+            # The script's advice is "examine the logs in <datadir>", and then the runner is thrown
+            # away. So they are quoted here: the bootstrap server writes the actual SQL error there,
+            # and the script's own summary never contains it.
+            for log in sorted(data.glob("*.err")) + sorted(data.glob("*.log")):
+                print(f"--- {log.name}", file=sys.stderr)
+                print(log.read_text(encoding="utf-8", errors="replace")[-4000:], file=sys.stderr)
+            raise
     else:
         # Not created first: the Windows program writes the directory itself and refuses one that is
         # already there. Its parent is what has to exist.
