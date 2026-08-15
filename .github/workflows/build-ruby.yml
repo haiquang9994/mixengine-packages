@@ -1,0 +1,106 @@
+name: build ruby
+
+# **Two legs, and both of them are Windows.** That is not this workflow being unfinished; it is where
+# the Ruby row of MixEngine's runtime table actually stands. RubyInstaller publishes relocatable
+# archives for Windows on both architectures and nothing for anyone else, and the three relocatable
+# Ruby distributions that exist for macOS and Linux were each checked and each refused — see
+# `.claude/operations/runtime-packaging.md` in the mixengine repository. Those two targets are
+# compiled rather than borrowed, which is a build pipeline and therefore a task of its own (T27b);
+# when it lands it will be a workflow of its own too, the way the PHP recipes are split.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Ruby line (3.4), exact version (3.4.10), or 'latest'. 3.2 upwards; ARM64 from 3.4."
+        required: true
+        type: string
+      release:
+        description: 'Publish as a GitHub release. Off means build and keep the artifacts for inspection only.'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  pack:
+    # Each leg runs on the architecture it packs for, because the recipe smoke-tests what it packed:
+    # it moves the tree somewhere it has never been and makes Ruby find its own library, its own gem
+    # home and its own CA bundle from there. An ARM64 archive unpacked on an x64 runner could not run
+    # a single one of those checks.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-2022,   arch: x86_64 }
+          - { runner: windows-11-arm, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: borrow and repack
+        id: pack
+        env:
+          # The only recipe here that needs one. RubyInstaller states its catalogue nowhere but its
+          # own tags, so resolving a line means listing releases through the GitHub API — and
+          # unauthenticated listing is limited per IP address, which runners share.
+          GITHUB_TOKEN: ${{ github.token }}
+        # 75 is "upstream publishes nothing for this target", which is an empty cell of the table
+        # and not a failure: the first ARM64 archive is in the 3.4 line, so asking for Ruby 3.2 on
+        # Windows-on-ARM is a question upstream answered years ago. The leg says so and skips its
+        # upload rather than taking the x86_64 release down with it.
+        #
+        # `|| code=$?` rather than reading `$?` on the next line: GitHub runs `shell: bash` with
+        # `-e`, so a non-zero exit would end the step before anything could look at the code.
+        shell: bash
+        run: |
+          code=0
+          python -u tools/ruby.py --version "${{ inputs.version }}" --out dist || code=$?
+          if [ "$code" -eq 75 ]; then
+            echo "::notice::no RubyInstaller ${{ inputs.version }} for windows/${{ matrix.arch }}; nothing to pack"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit "$code"
+        timeout-minutes: 30
+      - uses: actions/upload-artifact@v4
+        if: steps.pack.outputs.skipped != 'true'
+        with:
+          name: ruby-windows-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    # One release per exact Ruby version, holding every artifact of it. The version is read back out
+    # of each manifest rather than taken from the input, because the input may be a line or `latest`
+    # and each leg resolves it against upstream's tags independently.
+    needs: pack
+    if: ${{ inputs.release && !failure() && !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: incoming, merge-multiple: true }
+      - name: publish one release per version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          versions=$(jq -r '.version' incoming/*.json | sort -u)
+          for version in $versions; do
+            tag="ruby-$version"
+            assets=()
+            for manifest in incoming/*.json; do
+              [ "$(jq -r '.version' "$manifest")" = "$version" ] || continue
+              assets+=("${manifest%.json}" "$manifest")
+            done
+            echo "== $tag: ${#assets[@]} artifact(s)"
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              gh release create "$tag" \
+                --title "Ruby $version" \
+                --notes "Relocatable Ruby $version for MixEngine, repacked from oneclick/rubyinstaller2. Windows only — Ruby for macOS and Linux is compiled rather than borrowed. Every artifact was run from a directory it had been moved to before being published: Ruby's library path, gem home and CA bundle all resolving inside the moved tree, and gem, bundle, rake and irb each reporting the version packed beside them. See mixengine-artifact.json inside each one."
+            fi
+            gh release upload "$tag" "${assets[@]}" --clobber
+          done
