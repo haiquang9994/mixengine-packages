@@ -77,6 +77,10 @@ CHOCO_PACKAGES = ("winflexbison3",)
 # `PERFSCHEMA` is deliberately *not* here although it is the largest thing left: it is what
 # `SHOW ENGINE PERFORMANCE_SCHEMA` and every profiling tool a developer might point at MixEngine
 # reads, and an artifact missing it differs from the borrowed ones in a way a user would notice.
+#
+# This list and `mariadb.NOT_SHIPPED` are the same decision said twice — to a compiler here, to a
+# packer there — so that all six cells of a version contain the same MariaDB. Change one and change
+# the other.
 DISABLED_PLUGINS = ("ROCKSDB", "COLUMNSTORE", "MROONGA", "S3", "SPIDER", "CONNECT", "OQGRAPH")
 
 PRUNE = ("mariadb-test", "mysql-test", "sql-bench", "share/man", "share/doc", "man", "docs",

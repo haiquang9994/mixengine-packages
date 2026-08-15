@@ -94,7 +94,43 @@ FLOOR = (10, 6)
 # `mariadb-test` rather than `mysql-test`: upstream renamed the directory along with the binaries,
 # and the old spelling silently matched nothing — leaving the whole suite in the archive and, worse,
 # leaving it for the Galera globs below to walk through and list file by file.
-PRUNE = ("mariadb-test", "mysql-test", "sql-bench", "share/man", "share/doc", "man", "docs")
+PRUNE = ("mariadb-test", "mysql-test", "sql-bench", "share/man", "share/doc", "man", "docs",
+         # Headers and import libraries, for compiling a C client against this server. MixEngine
+         # installs a database rather than an SDK, and the compiled cells do not ship them either —
+         # six artifacts of one version differing in what they contain is the thing worth avoiding.
+         "include")
+
+# **What MixEngine does not ship, stated once so that six artifacts of one version contain the same
+# MariaDB.** A bintar is built with everything its maintainers can compile; a source build here is
+# configured with `mariadb_build.DISABLED_PLUGINS`; and the `.deb` route takes six packages and
+# therefore never had these at all, because upstream ships each as its own `mariadb-plugin-*`. Left
+# alone, the same version would mean three different feature sets depending on which cell a user
+# installed from — which is exactly the difference nobody chose that this repository keeps trying to
+# eliminate.
+#
+# Each entry is also a thing a *local development environment* does not do: cluster storage engines,
+# a federated engine, an ODBC/JDBC bridge, an S3 archive engine, a full-text engine for Japanese, a
+# graph engine. `mariabackup` goes with them — it is upstream's physical-backup tool, MixEngine
+# takes logical dumps with `mariadb-dump`, and the bintar ships it twice under two names.
+#
+# Keep this in step with `mariadb_build.DISABLED_PLUGINS`; the two are the same decision expressed
+# to a packer and to a compiler.
+NOT_SHIPPED = (
+    "*rocksdb*", "mariadb-ldb*", "mysql_ldb*", "sst_dump*",     # RocksDB, and its own tooling
+    "*mroonga*", "*spider*", "*oqgraph*", "*columnstore*",
+    "ha_connect*", "*.jar",                                     # CONNECT, and the JDBC bridge it uses
+    "ha_s3*", "*mariabackup*", "*mariadb-backup*",
+    "*auth_pam*",                                               # PAM: a system authentication stack
+)
+
+# Debug information, by extension, wherever it sits. `bin/server.pdb` alone is 74 MB unpacked and
+# 29 MB of the Windows zip — the same waste `strip_debug` takes out of a Linux bintar, in the form
+# Windows uses. Upstream publishes the symbols as a separate `-debugsymbols.zip` for whoever wants
+# them, which is exactly the arrangement Debian makes with its `-dbg` packages.
+#
+# `.lib` goes with `include` above: an import library is a linker input, not something a server
+# loads.
+DEBRIS = ("*.pdb", "*.lib")
 
 # Galera, wherever the bintar happens to put it, and under both of the names it uses. A path list
 # was not enough — removing `bin/garbd` and `lib/galera` left `lib/libgalera_smm.so`, which needs
@@ -313,7 +349,7 @@ def prune(tree: Path) -> list[str]:
             path.unlink()
             removed.append(relative)
 
-    for pattern in GALERA:
+    for pattern in GALERA + DEBRIS + NOT_SHIPPED:
         for path in sorted(tree.rglob(pattern)):
             # Only what is still there: a directory removed a moment ago takes its contents with it,
             # and listing each of those would turn `upstream.removed` into a file manifest.
