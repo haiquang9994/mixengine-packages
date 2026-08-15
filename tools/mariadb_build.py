@@ -79,7 +79,10 @@ CHOCO_PACKAGES = ("winflexbison3",)
 # reads, and an artifact missing it differs from the borrowed ones in a way a user would notice.
 DISABLED_PLUGINS = ("ROCKSDB", "COLUMNSTORE", "MROONGA", "S3", "SPIDER", "CONNECT", "OQGRAPH")
 
-PRUNE = ("mysql-test", "sql-bench", "share/man", "share/doc", "man", "docs", "include", "support-files")
+PRUNE = ("mysql-test", "sql-bench", "share/man", "share/doc", "man", "docs", "include",
+         # Where the Windows install layout puts the `.pdb` files: debug information for binaries
+         # nobody is going to debug from an artifact, and a directory left empty once they are gone.
+         "support-files", "symbols")
 
 
 def run(*command: str, cwd: Path | None = None, env: dict | None = None,
@@ -164,6 +167,33 @@ def source(spec: str, work: Path) -> tuple[str, Path, str, str | None]:
     return version, unpacked, actual, series.get("release_eol_date")
 
 
+def toolchain() -> dict[str, str]:
+    """One SDK and the compiler that belongs to it, asked of ``xcrun`` rather than left to CMake.
+
+    **A GitHub macOS runner has two toolchains installed**, and nothing makes them agree: Xcode's,
+    under ``/Applications/Xcode_<version>.app``, and the Command Line Tools' under
+    ``/Library/Developer/CommandLineTools``. Each ships its own SDK, and the first build here mixed
+    them — C headers resolved from the CLT's ``MacOSX14.sdk`` while ``<new>`` came from Xcode's
+    ``c++/v1`` — which clang reports as ``<cstddef> tried including <stddef.h> but didn't find
+    libc++'s <stddef.h>``, a message about header search paths that says nothing about the two SDKs
+    behind it. It failed twenty seconds into compiling, on `gen_lex_hash.cc`, having configured
+    perfectly.
+
+    ``xcrun`` answers for whichever developer directory is *selected*, so asking it for the SDK and
+    for the compilers in one breath is what makes them the same toolchain. Passing them explicitly
+    also pins the answer into the build, rather than leaving each CMake version free to re-derive it.
+    """
+    def ask(*command: str) -> str:
+        return subprocess.run(command, capture_output=True, text=True, timeout=300).stdout.strip()
+
+    sdk = ask("xcrun", "--show-sdk-path")
+    clang, clangxx = ask("xcrun", "-f", "clang"), ask("xcrun", "-f", "clang++")
+    if not (sdk and clang and clangxx):
+        raise SystemExit("xcrun could not name an SDK and a compiler; this machine has no toolchain")
+    print(f"toolchain: {clang} against {sdk}")
+    return {"sdk": sdk, "cc": clang, "cxx": clangxx}
+
+
 def brew_prefix(formula: str) -> Path | None:
     result = subprocess.run(["brew", "--prefix", formula], capture_output=True, text=True,
                             timeout=300)
@@ -213,7 +243,13 @@ def configure(source_tree: Path, build: Path, prefix: Path, found: dict[str, Pat
     arguments += [f"-DPLUGIN_{name}=NO" for name in DISABLED_PLUGINS]
 
     if sys.platform == "darwin":
+        picked = toolchain()
         arguments += [
+            # One toolchain, stated. See `toolchain` — the alternative is a runner with two of them
+            # and a build that mixes their headers.
+            f"-DCMAKE_OSX_SYSROOT={picked['sdk']}",
+            f"-DCMAKE_C_COMPILER={picked['cc']}",
+            f"-DCMAKE_CXX_COMPILER={picked['cxx']}",
             f"-DWITH_SSL={found['openssl@3']}",
             f"-DBISON_EXECUTABLE={found['bison'] / 'bin' / 'bison'}",
             # Only the linker can leave room for a longer install name, and every Mach-O here is

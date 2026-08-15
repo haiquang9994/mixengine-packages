@@ -127,7 +127,7 @@ def packages_index(version: str, arch: str) -> list[dict[str, str]]:
         if line[0] in " \t":
             continue
         field, _, value = line.partition(":")
-        if field in ("Package", "Version", "Filename", "SHA256"):
+        if field in ("Package", "Version", "Filename", "SHA256", "Depends"):
             current[field] = value.strip()
     if current:
         stanzas.append(current)
@@ -185,6 +185,45 @@ def wanted(stanzas: list[dict[str, str]], version: str) -> dict[str, dict[str, s
             f"series is published for every Ubuntu suite."
         )
     return found
+
+
+def system_libraries(stanzas: dict[str, dict[str, str]]) -> list[str]:
+    """The libraries these packages depend on, read out of their own ``Depends`` fields.
+
+    Bundling copies a library **from this machine**, so every library the packages name has to be
+    installed here first — and which ones those are is stated by the packages rather than guessable.
+    A hand-written list would have been wrong on the first run: `mariadbd` needs `liburing.so.2`,
+    which no GitHub runner carries and which nothing about MariaDB suggests, and CI stopped on it
+    exactly as it should have.
+
+    Only the `lib*` names are taken. The rest of a server package's dependencies — `adduser`,
+    `lsb-base`, `procps` — are a system's packaging conventions rather than anything a relocatable
+    tree loads, and installing them would be asking a runner to become a machine running MariaDB.
+    """
+    names: set[str] = set()
+    for stanza in stanzas.values():
+        for clause in stanza.get("Depends", "").split(","):
+            # `a | b` is Debian's "either of these"; the first is the packaging's own preference and
+            # is what apt would pick unasked.
+            first = clause.split("|")[0].strip()
+            if not first:
+                continue
+            name = first.split()[0]
+            # Not `libmariadb*`: those are in this archive already, and installing the distribution's
+            # copy would put a second one on the machine for bundling to choose between.
+            if name.startswith("lib") and not name.startswith("libmariadb"):
+                names.add(name)
+    return sorted(names)
+
+
+def install(names: list[str]) -> None:
+    """Put those libraries on the machine, so that there is something to bundle."""
+    if not names:
+        return
+    print(f"installing {len(names)} librar{'y' if len(names) == 1 else 'ies'} these packages name: "
+          f"{', '.join(names)}")
+    run("sudo", "apt-get", "update", "-qq", timeout=900)
+    run("sudo", "apt-get", "install", "-y", "--no-install-recommends", *names, timeout=1800)
 
 
 def unpack(version: str, stanzas: dict[str, dict[str, str]], work: Path) -> Path:
@@ -298,6 +337,7 @@ def main() -> None:
 
     work = Path(tempfile.mkdtemp(prefix="mixengine-mariadb-"))
     stanzas = wanted(packages_index(version, "arm64" if arch == "aarch64" else "amd64"), version)
+    install(system_libraries(stanzas))
     tree = rearrange(unpack(version, stanzas, work), work)
 
     provides = mariadb_smoke.describe(tree, windows=False)

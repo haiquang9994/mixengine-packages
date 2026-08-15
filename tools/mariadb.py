@@ -81,7 +81,16 @@ BORROWABLE = {
 FLOOR = (10, 6)
 
 # Half the unpacked tree, and none of it is a database server. See the module docstring.
-PRUNE = ("mysql-test", "sql-bench", "share/man", "share/doc", "man", "docs")
+#
+# **`bin/garbd` is here for a harder reason than size, and it was found by CI rather than by
+# reading.** The bintar ships Galera's arbitrator daemon, which links `libboost_program_options.so
+# .1.52.0` — a Boost from 2013 that exists on MariaDB's build machine and on no runner, no user
+# machine and no current distribution. Bundling stops on it, correctly: it cannot invent a library
+# that is missing from the machine. And the right answer is not to find that Boost, because MixEngine
+# supervises a single server and has no cluster for an arbitrator to arbitrate. So the whole of
+# Galera goes, and `upstream.removed` says it went.
+PRUNE = ("mysql-test", "sql-bench", "share/man", "share/doc", "man", "docs",
+         "bin/garbd", "lib/galera", "share/galera")
 
 
 def get(url: str, timeout: int = 120) -> dict:
