@@ -78,6 +78,14 @@ def invariants(index: dict, previous: dict | None) -> list[str]:
                     problems.append(
                         f"php {key[1]} {where[0]} provides no php-fpm; a site could not be served"
                     )
+            # A service is named in a generated `ServiceSpec` by the command the recipe expects, so
+            # an artifact whose `provides` is missing it fails at supervision time rather than at
+            # install time. Stated per kind, as php-fpm is, because what a service must offer is a
+            # fact about that service.
+            if package["kind"] == "caddy" and "caddy" not in artifact["provides"]:
+                problems.append(
+                    f"caddy {key[1]} {where[0]}/{where[1]} provides no caddy; nothing could run it"
+                )
 
     if previous:
         lost = {(p["kind"], p["version"]) for p in previous["packages"]} - seen

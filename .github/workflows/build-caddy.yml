@@ -1,0 +1,118 @@
+name: build caddy
+
+# Asked for, never automatic — the same rule every other workflow here keeps, for the same reason:
+# upstream releases on its own schedule and a human decides which version is wanted.
+#
+# **One job for six targets, and no `plan` step**, as with Node.js: Caddy is borrowed everywhere and
+# the whole per-target difference is a file name, which `tools/caddy.py` reads off the machine it is
+# running on.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Caddy line (2), exact version (2.11.4), or 'latest'. 2.x only; ARM64 from 2.4.0 on macOS and 2.4.5 on Windows."
+        required: true
+        type: string
+      release:
+        description: 'Publish as a GitHub release. Off means build and keep the artifacts for inspection only.'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  pack:
+    # Every leg runs on the operating system and architecture it packs for, because the recipe does
+    # not merely unpack what it downloaded — it runs the web server, asks its admin endpoint for the
+    # configuration back, and makes it serve a request. None of that can be cross-packed, and it is
+    # the half of this recipe worth having: an artifact that answers `caddy version` and cannot be
+    # health-checked is one T31 would find out about against a user's site.
+    #
+    # Linux on the newest image, for the reason the Node.js matrix states: the binary is upstream's
+    # and carries whatever floor it carries, which `relocate.floor` measures rather than the runner
+    # deciding. For Caddy the measured answer is *no floor at all* — it is built with CGO off.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-2022,     os: windows, arch: x86_64 }
+          - { runner: windows-11-arm,   os: windows, arch: aarch64 }
+          - { runner: macos-14,         os: macos,   arch: aarch64 }
+          - { runner: macos-15-intel,   os: macos,   arch: x86_64 }
+          - { runner: ubuntu-24.04,     os: linux,   arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, os: linux,   arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: borrow and repack
+        id: pack
+        # bash on every leg, Windows included, so the exit code is read the same way everywhere
+        # rather than in two dialects that could disagree.
+        #
+        # 75 is "upstream builds nothing for this target" — Caddy 2.0 has no Apple Silicon archive —
+        # which is an empty cell of the table and not a failure. Every other non-zero code is real
+        # and is passed on. `|| code=$?` rather than reading `$?` on the next line, because
+        # `shell: bash` runs with `-e` and a non-zero exit would end the step before anything could
+        # look at the code.
+        #
+        # GH_TOKEN because the recipe resolves a version against the GitHub releases API, and
+        # unauthenticated requests are limited to sixty an hour *per IP address* — which runners
+        # share.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          code=0
+          python -u tools/caddy.py --version "${{ inputs.version }}" --out dist || code=$?
+          if [ "$code" -eq 75 ]; then
+            echo "::notice::no upstream Caddy ${{ inputs.version }} for ${{ matrix.os }}/${{ matrix.arch }}; nothing to pack"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit "$code"
+        timeout-minutes: 20
+      - uses: actions/upload-artifact@v4
+        if: steps.pack.outputs.skipped != 'true'
+        with:
+          name: caddy-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    # One release per exact version, holding every artifact of it — the version read back out of
+    # each manifest rather than taken from the input, because the input may be a line or `latest`
+    # and each leg resolves it against upstream independently.
+    needs: pack
+    if: ${{ inputs.release && !failure() && !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: incoming, merge-multiple: true }
+      - name: publish one release per version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          versions=$(jq -r '.version' incoming/*.json | sort -u)
+          for version in $versions; do
+            tag="caddy-$version"
+            assets=()
+            for manifest in incoming/*.json; do
+              [ "$(jq -r '.version' "$manifest")" = "$version" ] || continue
+              # Both halves: the manifest is what the index generator reads, so a release holding
+              # only the archive is one the index cannot be rebuilt from.
+              assets+=("${manifest%.json}" "$manifest")
+            done
+            echo "== $tag: ${#assets[@]} artifact(s)"
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              gh release create "$tag" \
+                --title "Caddy $version" \
+                --notes "Relocatable Caddy $version for MixEngine, repacked from caddyserver/caddy. Every artifact was run as a web server from a directory it had been moved to before being published — a rendered Caddyfile validated, the server started, its admin endpoint asked for the configuration back, a request served and the server stopped through the admin API — see mixengine-artifact.json inside each one for what was proven."
+            fi
+            gh release upload "$tag" "${assets[@]}" --clobber
+          done

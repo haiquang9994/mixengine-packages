@@ -74,12 +74,27 @@ def fetch(url: str, timeout: int = 120, attempts: int = 3) -> bytes:
     raise AssertionError("unreachable")
 
 
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
+def _digest(path: Path, algorithm: str) -> str:
+    digest = hashlib.new(algorithm)
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(1 << 20), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def sha256(path: Path) -> str:
+    return _digest(path, "sha256")
+
+
+def sha512(path: Path) -> str:
+    """What a publisher states, where the publisher states that one — Caddy's checksums file does.
+
+    The manifest still carries a SHA-256 of the same bytes, because that is the field every artifact
+    here has and the one the index is built on. Which algorithm a download was *checked* with is the
+    publisher's choice and is recorded in ``upstream.verified_against`` rather than being smoothed
+    over into a hash nobody published.
+    """
+    return _digest(path, "sha512")
 
 
 def parts(version: str) -> tuple[int, ...]:
@@ -146,14 +161,21 @@ def seven_zip(archive: Path, into: Path) -> None:
     )
 
 
-def unpack(archive: Path, into: Path, suffix: str) -> Path:
+def unpack(archive: Path, into: Path, suffix: str, wrapped: bool = True) -> Path:
     """Extract, and answer with the directory the payload is actually in.
 
-    **Every publisher in this table wraps its release in one directory** — ``node-v22.23.2-linux-x64``,
-    ``python``, ``rubyinstaller-3.4.10-1-x64`` — and every one of them has to go. MixEngine unpacks an
-    archive straight into ``runtimes/<kind>/<version>/`` and every path in ``provides`` is relative to
-    that, so a preserved wrapper would install a runtime one directory below where the index says it
-    is. It is stripped here rather than by the daemon, which stays ignorant of who packed what.
+    **Every publisher of a *runtime* here wraps its release in one directory** —
+    ``node-v22.23.2-linux-x64``, ``python``, ``rubyinstaller-3.4.10-1-x64`` — and every one of them
+    has to go. MixEngine unpacks an archive straight into ``runtimes/<kind>/<version>/`` and every
+    path in ``provides`` is relative to that, so a preserved wrapper would install a runtime one
+    directory below where the index says it is. It is stripped here rather than by the daemon, which
+    stays ignorant of who packed what.
+
+    *wrapped* is that assumption, made an argument rather than a fact, because the first service
+    this repository packs does not hold it: Caddy's release is a single Go binary and its archive
+    puts ``caddy``, ``LICENSE`` and ``README.md`` at the root. The default stays the strict check —
+    an unwrapped payload arriving where a wrapper was expected means the publisher changed the shape
+    of its release, and that is worth failing over rather than packing whatever was found.
     """
     into.mkdir(parents=True, exist_ok=True)
     if suffix == "zip":
@@ -166,6 +188,18 @@ def unpack(archive: Path, into: Path, suffix: str) -> Path:
             # Symlinks are the point on Unix — `bin/python3` is one — so nothing here flattens them,
             # and `data` filters the members that are neither file, directory nor link.
             tarred.extractall(into, filter="data")
+
+    if not wrapped:
+        # Still a check rather than a shrug: an archive that turns out to wrap its payload after all
+        # would otherwise be packed as a tree whose only entry is a directory, and every path in
+        # `provides` would be wrong by one level in a way nothing before installation would notice.
+        directories = [path.name for path in into.iterdir() if path.is_dir()]
+        if len(list(into.iterdir())) == 1 and directories:
+            raise SystemExit(
+                f"this archive was expected to hold its payload at the root and instead wraps it "
+                f"in {directories[0]}/"
+            )
+        return into
 
     entries = [path for path in into.iterdir() if path.is_dir()]
     if len(entries) != 1:

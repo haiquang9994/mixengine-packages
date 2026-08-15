@@ -54,6 +54,17 @@
     "3.4": "2028-03-31",
     "4.0": "2029-03-31"
   },
+  "_caddy_comment": [
+    "Caddy has no entry, and the absence is deliberate rather than pending. The project publishes",
+    "no end-of-life schedule: there is one supported line, 2.x, and support means the newest patch",
+    "of it. A date invented here would be worse than none — the GUI would warn about a version that",
+    "is perfectly current, or stay silent about one that is not, and either way it would be this",
+    "file's opinion rather than upstream's. `mkindex.py` leaves a package undated when its kind is",
+    "absent, which is the honest answer.",
+    "The same will be true of every service whose publisher rolls support forward instead of",
+    "branching it; the ones that do branch — MariaDB and PostgreSQL both publish dated release",
+    "series — get entries when they are packed."
+  ],
   "php": {
     "7.0": "2019-01-10",
     "7.1": "2019-12-01",

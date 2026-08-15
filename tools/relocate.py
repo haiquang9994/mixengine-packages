@@ -133,17 +133,24 @@ def loadable(path: Path) -> bool:
     return int.from_bytes(header[12:16], order) in MACHO_TYPES
 
 
-def machine_files(tree: Path) -> list[Path]:
-    """Every ELF or Mach-O in the tree the loader will load, in a stable order, symlinks skipped."""
+def machine_files(tree: Path, directories: Sequence[str] = BINARY_DIRECTORIES) -> list[Path]:
+    """Every ELF or Mach-O in the tree the loader will load, in a stable order, symlinks skipped.
+
+    *directories* is where to look, and a tree whose payload sits at its own root has to say so —
+    ``machine_files(tree, ("",))``. The default finds nothing in such a tree, which would make
+    `verify` return no problems and `floor` return no floor, both of them for the reason that
+    neither looked: a check that passes by asking nothing is the failure this argument exists to
+    prevent. Caddy is the first archive here shaped that way and the reason it is an argument.
+    """
     found = []
-    for directory in BINARY_DIRECTORIES:
-        root = tree / directory
+    for directory in directories:
+        root = tree / directory if directory else tree
         if not root.is_dir():
             continue
         for path in sorted(root.rglob("*")):
             if path.is_symlink() or not path.is_file():
                 continue
-            if kind(path) and loadable(path):
+            if kind(path) and loadable(path) and path not in found:
                 found.append(path)
     return found
 
@@ -487,7 +494,7 @@ def rewrite(tree: Path, libdir: str, bundled: set[str], executable_dir: Path) ->
             elf_set_rpath(path, anchor)
 
 
-def verify(tree: Path) -> list[str]:
+def verify(tree: Path, directories: Sequence[str] = BINARY_DIRECTORIES) -> list[str]:
     """Re-resolve every dependency and complain about anything outside the tree.
 
     Meant to be run on a *copy of the tree in a directory it has never seen*. Running it where the
@@ -502,7 +509,7 @@ def verify(tree: Path) -> list[str]:
     problems = []
     executable_dir = tree / "bin"
     search = loader_search(tree)
-    for path in machine_files(tree):
+    for path in machine_files(tree, directories):
         for spelling, resolved in dependencies(path, executable_dir, search):
             if is_system(spelling, resolved):
                 continue
@@ -574,9 +581,13 @@ def macos_floor(paths: list[Path]) -> str | None:
     return _highest(versions)
 
 
-def floor(tree: Path) -> tuple[str, str] | None:
-    """``(key, value)`` for the manifest's ``requires``, or None where the OS has no such notion."""
-    files = machine_files(tree)
+def floor(tree: Path, directories: Sequence[str] = BINARY_DIRECTORIES) -> tuple[str, str] | None:
+    """``(key, value)`` for the manifest's ``requires``, or None where the OS has no such notion.
+
+    None is also the honest answer for a statically linked binary: a Go build imports no glibc
+    symbol at all, so there is no version to be the floor rather than a floor of zero.
+    """
+    files = machine_files(tree, directories)
     if sys.platform == "darwin":
         measured = macos_floor(files)
         return ("macos", measured) if measured else None
