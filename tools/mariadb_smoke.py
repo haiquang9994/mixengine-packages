@@ -45,6 +45,7 @@ Python 3 stdlib only, by policy: this runs on a GitHub runner with nothing insta
 
 from __future__ import annotations
 
+import getpass
 import os
 import re
 import socket
@@ -152,9 +153,11 @@ def configuration(work: Path, tree: Path, port: int, windows: bool) -> Path:
         "innodb_buffer_pool_size = 32M",
     ]
     if not windows:
-        # Short, and not under the tree: a Unix socket path is limited to about a hundred characters
-        # by the kernel, and the moved tree's own path is already most of that.
-        lines.append(f'socket = "{(work / "mysql.sock").as_posix()}"')
+        # Under `/tmp` rather than beside the data directory, and with a name of two characters:
+        # `sockaddr_un` allows 103, and a runner's own temporary directory can be half of that
+        # before anything here is appended. See the note in `server`.
+        socket_directory = Path(tempfile.mkdtemp(prefix="mxe-", dir="/tmp"))
+        lines.append(f'socket = "{(socket_directory / "s.sock").as_posix()}"')
     else:
         # The plugin directory is derived from basedir on Unix and is not always on Windows, where
         # the server has been known to look beside its own executable instead. Stating it costs a
@@ -220,9 +223,13 @@ def install_db(tree: Path, work: Path, provides: dict[str, str], path: str, wind
             f"--datadir={data}",
             "--auth-root-authentication-method=normal",
             "--skip-test-db",
+            # Whoever is running this, stated. Left out, the script decides it should hand the data
+            # directory to a user called `mysql` — the account a distribution's package would have
+            # created — and stops when it cannot: "Cannot change ownership of the database
+            # directories to the 'mysql' user". MixEngine runs its services as the user who
+            # installed them and has no such account either, so this is the answer there as well.
+            f"--user={getpass.getuser()}",
         ]
-        # `--user` is refused unless the caller is root, and on a runner it is not. Leaving it out
-        # means "whoever is running this", which is also what MixEngine will do.
         #
         # `Path("/bin/sh")` rather than the string: `borrow.run` names the program in its failure
         # message, and a `str` there turns a diagnosable script failure into an AttributeError from
@@ -305,8 +312,24 @@ def server(tree: Path, version: str, provides: dict[str, str], windows: bool) ->
     The caller has already moved the tree somewhere it has never been; this makes it be a *database*
     while it is there. Returns the list of what was actually run, for the manifest.
     """
-    work = tree.parent / "instance"
-    work.mkdir(parents=True, exist_ok=True)
+    # **The instance lives outside the moved tree, and both reasons are limitations worth stating.**
+    #
+    # The tree itself stays where the caller put it — a path containing a space, deliberately — and
+    # that is the claim being tested: the *artifact* works from anywhere. What cannot live beside it
+    # is the data directory, for two independent reasons found one CI round apart.
+    #
+    # `mariadb-install-db` leaves `$datadir` unquoted just as it leaves `$basedir` unquoted, so it
+    # runs `chown` against two halves of a split path and stops with "Cannot change ownership of the
+    # database directories".
+    #
+    # And a Unix socket path is limited to 103 characters by `sockaddr_un` — a kernel limit, not
+    # MariaDB's — which the runner's own temporary directory very nearly exhausts before anything
+    # here is added. mariadbd reports it and aborts *after* InnoDB has started, which reads like a
+    # storage failure and is not one.
+    #
+    # Both are things T33 has to live with too: a data directory under "C:/Users/Nguyen Hai Quang"
+    # is fine on Windows and a socket beside it is not fine on macOS.
+    work = Path(tempfile.mkdtemp(prefix="mxe-instance-"))
     path = borrow.clean_path((tree / provides["mariadbd"]).parent, tree / "bin")
 
     banner = borrow.run(tree / provides["mariadbd"], "--version", path=path)

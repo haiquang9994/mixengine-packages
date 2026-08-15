@@ -285,6 +285,14 @@ def rearrange(root: Path, work: Path) -> Path:
     if share.is_dir() and not (share / "mariadb").exists():
         (share / "mariadb").symlink_to(".", target_is_directory=True)
 
+    # And `sbin` pointing at `bin`, for the same reason one directory along: the packaging installs
+    # the server as `/usr/sbin/mariadbd` and `mariadb-install-db` looks for it under `$basedir/sbin`,
+    # while a bintar — and therefore `mariadb_smoke.LAYOUT`, and therefore MixEngine — has one `bin`.
+    # Moving the file to `bin` is what makes the artifact one shape; this is what makes upstream's
+    # own first-run script still find it.
+    if (tree / "bin").is_dir() and not (tree / "sbin").exists():
+        (tree / "sbin").symlink_to("bin", target_is_directory=True)
+
     libraries = tree / "lib"
     libraries.mkdir(parents=True, exist_ok=True)
     for pattern in LIBRARY_GLOBS:
