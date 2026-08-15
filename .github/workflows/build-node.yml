@@ -1,0 +1,97 @@
+name: build node
+
+# Asked for, never automatic — the same rule the PHP workflow keeps, for the same reason: upstream
+# releases on its own schedule and a human decides which version is wanted.
+#
+# **One job for six targets, and no `plan` step.** Node.js is borrowed everywhere, so there is one
+# recipe rather than three and nothing to decide before the matrix starts. The whole per-target
+# difference is a file name, which `tools/node.py` reads off the machine it is running on.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Node line (22), exact version (22.11.0), or 'lts'. 16 upwards; Windows on ARM from 20."
+        required: true
+        type: string
+      release:
+        description: 'Publish as a GitHub release. Off means build and keep the artifacts for inspection only.'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  pack:
+    # Every leg runs on the operating system and architecture it packs for, because the recipe
+    # smoke-tests what it packed — it moves the tree to a directory it has never seen and makes
+    # `npm` find its own interpreter from there. Cross-packing would be a download and a rename,
+    # and would prove nothing.
+    #
+    # **Linux is on the newest image and not the oldest, unlike the PHP matrix.** There the runner
+    # decided the glibc floor, because the runner compiled the binary. Here the binary is upstream's
+    # and carries a floor of its own, which `relocate.glibc_floor` reads off the symbols it imports
+    # — so the runner cannot influence the answer and there is nothing to buy by being old.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-2022,     os: windows, arch: x86_64 }
+          - { runner: windows-11-arm,   os: windows, arch: aarch64 }
+          - { runner: macos-14,         os: macos,   arch: aarch64 }
+          - { runner: macos-15-intel,   os: macos,   arch: x86_64 }
+          - { runner: ubuntu-24.04,     os: linux,   arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, os: linux,   arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: borrow and repack
+        # -u because a failure here is diagnosed from the log, and block-buffered stdout arrives
+        # after the traceback that explains it.
+        run: python -u tools/node.py --version "${{ inputs.version }}" --out dist
+        timeout-minutes: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    # One release per exact version, holding every artifact of it. The version is read back out of
+    # each manifest rather than taken from the input, because the input may be a line or `lts` and
+    # each leg resolves it against upstream's index independently. If two legs disagree they land in
+    # different releases, which is the honest outcome rather than a mislabelled asset.
+    needs: pack
+    if: ${{ inputs.release && !failure() && !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: incoming, merge-multiple: true }
+      - name: publish one release per version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          versions=$(jq -r '.version' incoming/*.json | sort -u)
+          for version in $versions; do
+            tag="node-$version"
+            assets=()
+            for manifest in incoming/*.json; do
+              [ "$(jq -r '.version' "$manifest")" = "$version" ] || continue
+              # Both halves. The manifest is what the index generator reads, so a release holding
+              # only the archive is a release the index cannot be rebuilt from — and it is the
+              # release, not this run's scratch directory, that has to still be readable in a year.
+              assets+=("${manifest%.json}" "$manifest")
+            done
+            echo "== $tag: ${#assets[@]} artifact(s)"
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              gh release create "$tag" \
+                --title "Node.js $version" \
+                --notes "Relocatable Node.js $version for MixEngine, repacked from nodejs.org. Every artifact was run from a directory it had been moved to before being published — node from the moved tree, npm reporting the version packed beside it — see mixengine-artifact.json inside each one for what was proven."
+            fi
+            gh release upload "$tag" "${assets[@]}" --clobber
+          done

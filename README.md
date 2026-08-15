@@ -56,6 +56,21 @@ zero and shipped something wrong rather than on code that failed to compile.
 [`docs/building-from-source.md`](docs/building-from-source.md) is what that was worth keeping — read
 it before opening any other **built** cell, because little of it is about PHP.
 
+For Node.js there is nothing to evaluate and one recipe for every cell:
+
+| OS / arch | Range | How |
+| --- | --- | --- |
+| Windows x86_64 | **16 – newest** | **borrowed** — official nodejs.org zip, repacked |
+| Windows aarch64 | **20 – newest** | ditto; upstream's first Windows-on-ARM build is 20.0.0 |
+| macOS aarch64 | **16 – newest** | **borrowed** — official tarball; 16.0.0 is upstream's first native Apple Silicon build |
+| macOS x86_64 | **16 – newest** | ditto |
+| Linux x86_64, aarch64 | **16 – newest** | ditto |
+
+The floor is 16 because that is where a *native* build exists for every architecture MixEngine runs
+on — before it, the only macOS Node is x86_64, and handing that to an Apple Silicon machine would be
+offering emulation under the name of a version. Where a line has no build for a target,
+`tools/node.py` refuses with that sentence rather than with a 404 from the middle of a download.
+
 ## Repack, do not rearrange
 
 A borrowed artifact keeps the directory layout its publisher shipped. It is tempting to normalise
@@ -92,14 +107,17 @@ python3 tools/php_unix.py --branch 8.3 --out dist/
 # macOS / Linux, 7.0 – 8.0: compiled from source, then made to carry its own libraries
 python3 tools/php_legacy_unix.py --branch 7.4 --out dist/
 
+# Node.js: one recipe for every target, run on the target it packs for
+python tools/node.py --version 22 --out dist/
+
 # Then regenerate and sign the index from what the releases actually contain
 python tools/mkindex.py --base-url … --out dist/index.json
 minisign -Sm dist/index.json -s minisign.key
 ```
 
 In practice none of that is run by hand: `.github/workflows/build-php.yml` takes a version, picks the
-recipe from it and produces every target, and `publish-index.yml` regenerates and signs the index
-from every release that exists.
+recipe from it and produces every target, `build-node.yml` does the same with one recipe and six, and
+`publish-index.yml` regenerates and signs the index from every release that exists.
 
 ## The signing key
 

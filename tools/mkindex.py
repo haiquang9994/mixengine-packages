@@ -111,9 +111,15 @@ def merge(index: dict, found: list, eol: dict, channel: str) -> dict:
         package = packages.setdefault(
             (kind, version), {"kind": kind, "version": version, "channel": channel, "artifacts": []}
         )
-        branch = ".".join(version.split(".")[:2])
-        if kind in eol and branch in eol[kind]:
-            package["eol"] = eol[kind][branch]
+        # What a release *line* is differs per runtime, and it is the line that has an end-of-life
+        # date: PHP's is 8.3, Node.js's is 22. Both spellings are tried, narrowest first, so
+        # `data/eol.json` states each runtime's lines in the shape that runtime actually uses rather
+        # than in a shape this file imposes on all of them.
+        lines = (".".join(version.split(".")[:2]), version.split(".")[0])
+        for line in lines:
+            if line in eol.get(kind, {}):
+                package["eol"] = eol[kind][line]
+                break
 
         package["artifacts"] = [
             existing

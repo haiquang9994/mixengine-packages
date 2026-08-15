@@ -6,6 +6,26 @@
     "who reach for a local development environment rather than a container are very often the people",
     "maintaining something old. A warning is the honest answer; refusing to install is not."
   ],
+  "_node_comment": [
+    "Node.js lines are keyed by major, not by major.minor: a Node release line is 22, and 22.11 is",
+    "a patch of it. That is why mkindex.py looks a version up both ways. Dates are nodejs/Release's",
+    "own schedule.json. The odd-numbered lines are Current and last about eight months, which is why",
+    "several of them are already past — they are here so an index entry for one is marked rather",
+    "than silently undated."
+  ],
+  "node": {
+    "16": "2023-09-11",
+    "17": "2022-06-01",
+    "18": "2025-04-30",
+    "19": "2023-06-01",
+    "20": "2026-04-30",
+    "21": "2024-06-01",
+    "22": "2027-04-30",
+    "23": "2025-06-01",
+    "24": "2028-04-30",
+    "25": "2026-06-01",
+    "26": "2029-04-30"
+  },
   "php": {
     "7.0": "2019-01-10",
     "7.1": "2019-12-01",
