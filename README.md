@@ -34,6 +34,35 @@ current for every security release, for as long as MixEngine offers the version.
 and what each one settled, live in
 [MixEngine's `runtime-packaging.md`](https://github.com/haiquang9994/MixEngine/blob/master/.claude/operations/runtime-packaging.md).
 
+## One version means one thing, and no more than is needed
+
+Two rules that go together, because each without the other produces an artifact somebody regrets.
+
+**The artifacts of a version must be as alike as the platforms allow.** A user pins `mariadb 11.8`
+in a blueprint and hands it to a colleague on another operating system; what they get has to be the
+same database, not whatever that platform's publisher happened to compile. Upstreams do not help
+here — MariaDB's Linux bintar carries every storage engine its maintainers can build, its own `.deb`
+packages carry none of them because each is a separate package, and a source build carries whatever
+was configured. Left alone, one version means three different feature sets. So the set of features
+is **chosen here, once, for all cells of a kind**, and where two recipes express that choice
+separately — a packer deleting, a compiler configuring — each says so beside the other.
+
+Parity may be resolved in either direction, and which one is a judgement about the feature rather
+than about convenience. Something a local development environment does not do — a cluster engine, an
+ODBC bridge, PAM authentication — is dropped everywhere. Something it would reach for is *enabled*
+everywhere, even where that means compiling it on the targets nobody publishes a binary for; that is
+how `mariabackup` ended up in all six MariaDB cells after first being dropped from all six.
+
+**And an artifact contains what it takes to run, nothing else.** Not debug symbols — upstream's
+Linux bintar hides 700 MB of them inside its binaries and Windows keeps 74 MB in a single `.pdb`,
+while Debian and Windows both publish theirs separately for whoever wants them. Not test suites, not
+benchmarks, not headers or import libraries: MixEngine installs a database or a runtime, not an SDK.
+Every user downloads this once per version per machine, and none of that is ever read.
+
+Whatever is taken out or put in is **recorded in `mixengine-artifact.json`** — `upstream.removed`,
+`upstream.added`, `upstream.stripped` — so that "borrowed" keeps meaning something a reader can
+check against what the publisher shipped.
+
 For PHP:
 
 | OS / arch | Range | How |
