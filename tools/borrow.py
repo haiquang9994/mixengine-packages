@@ -24,6 +24,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -45,9 +47,31 @@ WINDOWS_TAR = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "
 SEVEN_ZIP = Path(r"C:\Program Files\7-Zip\7z.exe")
 
 
-def fetch(url: str, timeout: int = 120) -> bytes:
-    with urllib.request.urlopen(url, timeout=timeout) as response:
-        return response.read()
+def fetch(url: str, timeout: int = 120, attempts: int = 3) -> bytes:
+    """Download *url*, trying again when the network rather than the server refuses.
+
+    A retry here is not defensive programming for its own sake: the source builds fetch five
+    archives before they compile anything, one of them a 53 MB OpenSSL, and a run that gets through
+    that and dies twenty minutes later has thrown away a whole build over a dropped connection. It
+    happened on the release build of Ruby 3.2 — `[Errno 60] Operation timed out` on one leg of four,
+    on a version that had already gone green twice.
+
+    **An HTTP status is an answer and is not retried.** A 404 means "upstream does not publish
+    this", which is a fact three attempts will not change, and each recipe has something to say
+    about it that this cannot.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as response:
+                return response.read()
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as error:
+            if attempt == attempts:
+                raise
+            print(f"{url}: {error} (attempt {attempt} of {attempts})", file=sys.stderr)
+            time.sleep(5 * attempt)
+    raise AssertionError("unreachable")
 
 
 def sha256(path: Path) -> str:

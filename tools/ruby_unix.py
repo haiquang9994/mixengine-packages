@@ -262,8 +262,11 @@ def resolve(spec: str) -> tuple[str, str, str]:
 def source_tree(work: Path, version: str, url: str, expected: str) -> Path:
     tarball = work / url.rsplit("/", 1)[-1]
     print(f"fetching {url}")
+    # Through `borrow.fetch` rather than `urlretrieve` for the retry: everything this recipe
+    # downloads is fetched before anything is compiled, so a dropped connection here costs the
+    # whole build and nothing else.
     try:
-        urllib.request.urlretrieve(url, tarball)
+        tarball.write_bytes(borrow.fetch(url, timeout=600))
     except urllib.error.HTTPError as error:
         raise SystemExit(f"{url} answered {error.code}") from error
 
