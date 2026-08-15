@@ -50,6 +50,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import urllib.error
