@@ -249,7 +249,10 @@ def configure(source_tree: Path, build: Path, prefix: Path, found: dict[str, Pat
         "-DCONC_WITH_UNIT_TESTS=OFF",
         "-DWITH_EMBEDDED_SERVER=OFF",
         "-DWITH_WSREP=OFF",
-        "-DWITH_MARIABACKUP=OFF",
+        # `WITH_MARIABACKUP` is left at its default, which is on. It is the one optional thing in
+        # this build a developer would actually reach for — a physical backup of a running database
+        # — it needs nothing from the machine, and the borrowed cells ship it. See
+        # `mariadb.NOT_SHIPPED` for why the parity goes this way rather than the other.
         # **The test suite is pruned after installation rather than turned off at configure time.**
         # `-DINSTALL_MYSQLTESTDIR=` is what MariaDB's own documentation suggests and it produces a
         # broken install: paths derived from it lose their prefix, so `plugin/auth_pam/testing`

@@ -72,6 +72,9 @@ LAYOUT = {
     ],
     "mariadb-dump": ["bin/mariadb-dump", "bin/mysqldump"],
     "mariadb-upgrade": ["bin/mariadb-upgrade", "bin/mysql_upgrade"],
+    # Published so that the daemon can offer a physical backup where one exists, rather than
+    # discovering the file by looking. Two spellings because upstream renamed it and kept both.
+    "mariadb-backup": ["bin/mariadb-backup", "bin/mariabackup"],
 }
 
 # Without these there is no service to supervise. `mariadb-dump` and `mariadb-upgrade` are published

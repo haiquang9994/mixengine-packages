@@ -119,9 +119,16 @@ NOT_SHIPPED = (
     "*rocksdb*", "mariadb-ldb*", "mysql_ldb*", "sst_dump*",     # RocksDB, and its own tooling
     "*mroonga*", "*spider*", "*oqgraph*", "*columnstore*",
     "ha_connect*", "*.jar",                                     # CONNECT, and the JDBC bridge it uses
-    "ha_s3*", "*mariabackup*", "*mariadb-backup*",
+    "ha_s3*",
     "*auth_pam*",                                               # PAM: a system authentication stack
 )
+
+# **`mariabackup` is deliberately not in that list, and it was in it once.** Everything above is a
+# storage engine or an authentication stack a local development environment does not use; a backup
+# tool is not. It takes a physical copy of a running database — far faster than a logical dump once
+# a database stops being small — needs nothing from the machine, and compiles on every target,
+# including the two that upstream publishes no binary for. So the parity here is towards *having*
+# it: the bintar keeps it and `mariadb_build.py` no longer turns it off.
 
 # Debug information, by extension, wherever it sits. `bin/server.pdb` alone is 74 MB unpacked and
 # 29 MB of the Windows zip — the same waste `strip_debug` takes out of a Linux bintar, in the form
