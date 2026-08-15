@@ -272,6 +272,19 @@ def rearrange(root: Path, work: Path) -> Path:
             else:
                 shutil.copy2(path, target / path.name, follow_symlinks=False)
 
+    # **`share/mariadb` pointing at `share`, because the two halves of MariaDB disagree with each
+    # other.** `mariadb-install-db` reads its bootstrap SQL from `$basedir/share/mariadb` — that
+    # path is written into the script — while `mariadbd` looks for `english/errmsg.sys` under
+    # `$basedir/share`, which is where a bintar puts everything. Upstream's packaging satisfies both
+    # by installing into `/usr/share/mariadb` and setting `basedir=/usr`; a relocatable tree laid out
+    # like a bintar satisfies the server and not the script.
+    #
+    # A symlink is the whole of the fix, costs nothing, and keeps one copy of a 20 MB message
+    # directory. Made relative so it survives the tree being moved, which is the point of all of this.
+    share = tree / "share"
+    if share.is_dir() and not (share / "mariadb").exists():
+        (share / "mariadb").symlink_to(".", target_is_directory=True)
+
     libraries = tree / "lib"
     libraries.mkdir(parents=True, exist_ok=True)
     for pattern in LIBRARY_GLOBS:
@@ -347,6 +360,9 @@ def main() -> None:
     tree = rearrange(unpack(version, stanzas, work), work)
 
     provides = mariadb_smoke.describe(tree, windows=False)
+    # Shared with the bintar recipe rather than reimplemented: a plugin needing a library nobody has
+    # is the same fact whichever route the payload took here. See `mariadb.unshippable_plugins`.
+    dropped = mariadb.unshippable_plugins(tree)
     added = relocate.bundle(tree, search=[tree / "lib"])
     if added:
         print(f"bundled {len(added)} librar{'y' if len(added) == 1 else 'ies'}: "
@@ -370,6 +386,7 @@ def main() -> None:
             ),
             "variant": f"{', '.join(PACKAGES)} rearranged into upstream's own bintar layout",
             "added": sorted(f"lib/{library}" for library in added),
+            **({"removed": dropped} if dropped else {}),
         },
         "provides": provides,
     }

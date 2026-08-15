@@ -79,7 +79,8 @@ CHOCO_PACKAGES = ("winflexbison3",)
 # reads, and an artifact missing it differs from the borrowed ones in a way a user would notice.
 DISABLED_PLUGINS = ("ROCKSDB", "COLUMNSTORE", "MROONGA", "S3", "SPIDER", "CONNECT", "OQGRAPH")
 
-PRUNE = ("mysql-test", "sql-bench", "share/man", "share/doc", "man", "docs", "include",
+PRUNE = ("mariadb-test", "mysql-test", "sql-bench", "share/man", "share/doc", "man", "docs",
+         "include",
          # Where the Windows install layout puts the `.pdb` files: debug information for binaries
          # nobody is going to debug from an artifact, and a directory left empty once they are gone.
          "support-files", "symbols")
@@ -245,10 +246,12 @@ def configure(source_tree: Path, build: Path, prefix: Path, found: dict[str, Pat
         "-DWITH_EMBEDDED_SERVER=OFF",
         "-DWITH_WSREP=OFF",
         "-DWITH_MARIABACKUP=OFF",
-        # Not installed rather than installed and pruned: the test suite is most of the build time as
-        # well as most of the tree.
-        "-DINSTALL_MYSQLTESTDIR=",
-        "-DINSTALL_SQLBENCHDIR=",
+        # **The test suite is pruned after installation rather than turned off at configure time.**
+        # `-DINSTALL_MYSQLTESTDIR=` is what MariaDB's own documentation suggests and it produces a
+        # broken install: paths derived from it lose their prefix, so `plugin/auth_pam/testing`
+        # resolves to `/suite/plugins/pam` — at the root of the filesystem — and the install step
+        # fails there after a full build has already succeeded. Costing a minute of copying is
+        # better than a variable whose empty value is interpreted three directories away.
         "-DPLUGIN_AUTH_PAM=NO",
         # The bundled zlib rather than the machine's, and it is the *machine's* that caused trouble:
         # finding it is what dragged a second SDK's include directory into the compile on macOS (see

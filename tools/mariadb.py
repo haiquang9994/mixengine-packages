@@ -191,6 +191,45 @@ def resolve(spec: str, target: tuple[str, str]) -> tuple[str, str, str, str | No
     return (*chosen, series.get("release_eol_date"))
 
 
+def unshippable_plugins(tree: Path) -> list[str]:
+    """Drop the plugins that need a library this machine does not have, and name each one.
+
+    **Written after the third plugin in a row stopped a build, one CI round each.** A MariaDB bintar
+    is built on a machine with everything installed, so its plugin directory contains optional
+    features linked against libraries a runner has never heard of: `cracklib_password_check.so`
+    wants `libcrack.so.2`, and it is not the last of them. `relocate.bundle` refuses to continue —
+    correctly, it cannot invent a library — so each one costs a round of CI to discover and a line
+    to exclude.
+
+    Asking every plugin what it needs, once, turns that loop into a single pass. A plugin whose
+    dependency cannot be resolved *here* could not be loaded on a user's machine either: the archive
+    would carry a file that `INSTALL SONAME` fails on with a message about a library nobody has. So
+    it is not shipped, and `upstream.removed` says which.
+
+    Deliberately only ``lib/plugin``. The same missing library under ``bin/`` is a server that cannot
+    start, and that must remain a failure rather than becoming a deletion.
+    """
+    plugins = tree / "lib" / "plugin"
+    if not plugins.is_dir():
+        return []
+
+    dropped = []
+    for path in sorted(plugins.iterdir()):
+        if path.is_symlink() or not path.is_file() or not relocate.kind(path):
+            continue
+        missing = [
+            spelling
+            for spelling, resolved in relocate.dependencies(path, tree / "bin", [tree / "lib"])
+            if resolved is None and not relocate.is_system(spelling, resolved)
+        ]
+        if missing:
+            print(f"not shipping {path.name}: it needs {', '.join(missing)}, which this machine "
+                  f"does not have and a user's would not either")
+            path.unlink()
+            dropped.append(f"lib/plugin/{path.name}")
+    return dropped
+
+
 def plan(spec: str) -> list[str]:
     """Expand what a workflow was asked to build into the list of series to run.
 
@@ -309,6 +348,8 @@ def main() -> None:
     removed = prune(tree)
     if removed:
         print(f"removed {', '.join(removed)}: a test suite is not part of a database server")
+    if not windows:
+        removed += unshippable_plugins(tree)
 
     provides = mariadb_smoke.describe(tree, windows)
 
