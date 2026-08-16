@@ -899,7 +899,7 @@ packed before `keeps` existed. Same version, same check, opposite answers, and t
 between them is the task that landed in between. Formats: `.zip` through `zipfile`, `.tar.gz` and
 `.tar.zst` through `tar`, since the 3.12 the index workflow installs cannot read zstd itself.
 
-### [ ] P6a — The Windows cells `relocate.verify` was never allowed to look at
+### [x] P6a — The Windows cells `relocate.verify` was never allowed to look at
 
 P6 made the rule something CI can fail on. This is the discovery that on Windows it could not fail,
 and that the second half of the reason survived the first being fixed.
@@ -923,11 +923,44 @@ which is the failure this whole thread has now produced twice.
   beside it. Upstream's build is self-contained and this is the first time anything here said so.
 * **[x] `caddy.py`** — already unguarded and already `("",)`; confirmed by parsing a packed
   `caddy.exe` rather than by reading the source.
-* **[ ] `python.py`, `nginx.py`, `mariadb_build.py`, `postgres.py`** — each still guarded, and each
-  needs the same two questions answered in this order: does the guard come off, and *where does this
-  tree keep its binaries*. PostgreSQL is the one to expect trouble from — P7b already found its
-  Windows tree loads plugins out of `lib/` against an executable in `bin/`, which is the shape
-  `pe_resolve`'s *executable_dir* exists for.
+* **[x] `nginx.py`** — only the guard was wrong; `BINARIES = ("",)` had been right since the recipe
+  was written. One binary, every import into System32, which is the claim its docstring already made
+  about a statically linked build and could not check on the platform it was made about.
+* **[x] `mariadb_build.py`** — only the guard, and the default `directories` needs no help: 85
+  machine files under `bin` and `lib`, the same 85 a root scan finds on the published 12.3.2.
+* **[x] `python.py`** — the sharpest case, below.
+* **[x] `postgres.py`** — shipped a binary that cannot load, below.
+
+#### The third question, which is where the process runs from
+
+Two recipes needed more than a guard and a directory, and both needed the same third thing.
+
+**`verify` had `executable_dir = tree / "bin"` written into it as a constant.** That is a fact about
+MariaDB's tree, not about trees. The Windows Python keeps `python.exe` and `python314.dll` at the
+root with its extension modules in `DLLs\`, so the loader resolves their imports against the root —
+and `verify` asked a `bin` that does not exist and called **34 modules broken**. They are not: all 34
+import from a tree moved somewhere new on a cut-down `PATH`, run rather than reasoned about. A check
+that fails what works is not a strict check, it is a check nobody can leave on. It derives the
+directory from the tree now — `bin` if there is one, the root if not — and still takes it as an
+argument for a tree that is neither.
+
+**Python's default scan was not looking at nothing. It was looking at pip's binaries.** None of
+`DLLs\`, `python.exe` or `python314.dll` is in `BINARY_DIRECTORIES`. What *is*, on a case-insensitive
+file system, is `lib` — which matches `Lib\`, the Python **source library**. So the check read
+exactly eight files: six vendored `distlib` launcher stubs (two of them ARM64, in an x86_64 archive)
+and two venv launchers, and passed. Naming the root takes it from 8 to 53.
+
+**PostgreSQL was shipping `bin/stackbuilder.exe`, which cannot load.** `UNWANTED` keeps StackBuilder's
+own directory out at unpack time and `NOT_SHIPPED` removes the eight wxWidgets DLLs that EDB scatters
+into `bin/` — and the comment explaining the second says, in as many words, that removing the
+directory alone leaves the toolkit behind. Nobody wrote the sentence pointing the other way. The
+executable stayed, its three wx imports resolve to nothing, and it was in every archive this recipe
+had ever made. It reached no user only because P12 is still open and PostgreSQL has no release; the
+check found it in the first minute it was allowed to look. Both halves are one entry now.
+
+Measured, not argued: every claim above comes from a packed archive — the published 3.14.7, 12.3.2
+and 1.30.4, and an 18.6 built on this machine — and each recipe was re-run with its cell open before
+the change was written down.
 
 ---
 
