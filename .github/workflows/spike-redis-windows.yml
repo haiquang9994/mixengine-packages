@@ -1,0 +1,167 @@
+name: spike redis windows
+
+# **A measurement, not a recipe.** P8 recorded that Redis has no Windows build system, which is true
+# of MSVC and is not the whole question: `redis-windows/redis-windows` compiles the *unmodified*
+# upstream tarball under Cygwin and has published 8.10.0, 8.8.1, 8.6.5, 8.4.5, 8.2.8, 7.4.10, 7.2.15
+# and 6.2.23 — every line this repository ships. Before `tools/redis.py` grows a Windows branch,
+# this run answers the four things a recipe would otherwise have to assume:
+#
+#   1. does `make -C src` — our code path, not upstream's top-level one — build under Cygwin, and
+#      can the `module_tests` target be avoided by naming goals rather than by patching the Makefile
+#   2. is `-D_GNU_SOURCE` enough for `dlfcn.h`, so that no file outside the source tree is edited
+#   3. which DLLs does the result actually import, read off `cygcheck` rather than copied from
+#      somebody's workflow
+#   4. does the packed tree run as a **native Windows process** — started from PowerShell, not from
+#      a Cygwin shell — against a `redis.conf` holding a Windows path with a space in it
+#
+# Deliberately disposable: no digest check, no manifest, no artifact. It is deleted with the branch.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Exact Redis version to try, e.g. 8.10.0'
+        required: true
+        default: '8.10.0'
+        type: string
+
+jobs:
+  spike:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cygwin/cygwin-install-action@master
+        with:
+          packages: make gcc-core gcc-g++ pkg-config
+
+      - name: what this toolchain is
+        shell: bash
+        run: |
+          uname -a
+          gcc --version | head -1
+          make --version | head -1
+          # The branch of src/Makefile that will be taken. Not Linux, not Darwin, so the generic
+          # else applies: `-rdynamic`, `-ldl -pthread -lrt`. Whether Cygwin satisfies those is
+          # question zero and the compile answers it.
+          echo "uname -s = $(uname -s)"
+          ls /usr/lib/libdl.a /usr/lib/librt.a 2>&1 || echo "no libdl.a / librt.a — the generic else will not link"
+
+      - name: fetch and unpack
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -A 'mixengine-packages spike' \
+            -o "redis-${{ inputs.version }}.tar.gz" \
+            "https://download.redis.io/releases/redis-${{ inputs.version }}.tar.gz"
+          tar -xzf "redis-${{ inputs.version }}.tar.gz"
+          ls "redis-${{ inputs.version }}"
+          # What P8 read, re-read on the runner rather than quoted from a note.
+          for name in CMakeLists.txt win32 msvs; do
+            [ -e "redis-${{ inputs.version }}/$name" ] && echo "PRESENT: $name" || echo "absent: $name"
+          done
+          grep -n '^all:' "redis-${{ inputs.version }}/src/Makefile"
+
+      - name: build, naming goals rather than patching the Makefile
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "redis-${{ inputs.version }}"
+          # `-D_GNU_SOURCE` instead of editing /usr/include/dlfcn.h, which is what the community
+          # workflow does. Cygwin guards `dladdr` and `RTLD_DEFAULT` behind `__GNU_VISIBLE`, and that
+          # macro is derived from the feature-test macros — so asking for the feature is the
+          # supported way to get it, and it leaves the toolchain as installed.
+          #
+          # The six goals are named because `all` also builds `module_tests`, which links .so files
+          # against symbols exported by redis-server. A PE image has no such thing as an undefined
+          # symbol resolved at load time, so that target cannot work here — and naming goals avoids
+          # it without a patch, which `install` then needs all six of.
+          make -C src -j"$(nproc)" \
+            CFLAGS='-D_GNU_SOURCE -Wno-char-subscripts' \
+            redis-server redis-sentinel redis-cli redis-benchmark redis-check-rdb redis-check-aof \
+            2>&1 | tail -40
+          make -C src install PREFIX="$(pwd)/../prefix"
+          ls -la ../prefix/bin
+
+      - name: what it imports
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd prefix/bin
+          for exe in *.exe; do
+            echo "=== $exe"
+            # `cygcheck` is Cygwin's `ldd`: it walks the PE import table transitively. Everything
+            # under /cygdrive/c/Windows is the operating system; everything under the Cygwin root
+            # is a file this repository would have to ship beside the binary.
+            cygcheck "./$exe" || true
+          done
+
+      - name: pack a tree the way a recipe would
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p tree/bin
+          cp prefix/bin/*.exe tree/bin/
+          rm -f tree/bin/redis-benchmark.exe tree/bin/redis-sentinel.exe
+          # Beside the .exe, which is the whole of the "rewrite" on Windows: the PE loader searches
+          # the directory of the image being loaded before anything else, so a DLL copied here needs
+          # no rpath, no install name and no re-signing. There is no $ORIGIN to set because the
+          # behaviour $ORIGIN emulates is already the default.
+          for dll in $(cygcheck ./tree/bin/redis-server.exe ./tree/bin/redis-cli.exe \
+                       | tr -d ' \r' | grep -i '^/' | grep -iv '^/cygdrive/c/Windows' | sort -u); do
+            echo "bundling $dll"
+            cp "$dll" tree/bin/
+          done
+          ls -la tree/bin
+
+      - name: run it as a native Windows process, from a moved directory with a space
+        shell: pwsh
+        run: |
+          # The point of the whole spike. Everything above ran inside Cygwin, where a Cygwin binary
+          # is expected to work. MixEngine will start this from a Rust supervisor as an ordinary
+          # Windows process, with a Windows path in the config file — so that is what is tested,
+          # and from a directory the build has never named, with a space in it on purpose.
+          $moved = "C:\spike moved here\redis"
+          New-Item -ItemType Directory -Force -Path $moved | Out-Null
+          Copy-Item -Recurse -Force tree\bin\* $moved
+          $data = "C:\spike moved here\data"
+          New-Item -ItemType Directory -Force -Path $data | Out-Null
+
+          $port = 16399
+          $conf = "$data\redis.conf"
+          @"
+bind 127.0.0.1
+port $port
+dir "$($data -replace '\\','/')"
+save ""
+appendonly no
+daemonize no
+"@ | Set-Content -Encoding utf8 $conf
+
+          Get-Content $conf
+          $server = Start-Process -PassThru -NoNewWindow -FilePath "$moved\redis-server.exe" `
+            -ArgumentList "`"$conf`"" -RedirectStandardOutput "$data\redis.log" `
+            -RedirectStandardError "$data\redis.err"
+
+          $ok = $false
+          foreach ($i in 1..40) {
+            Start-Sleep -Milliseconds 500
+            if ($server.HasExited) { break }
+            $answer = & "$moved\redis-cli.exe" -p $port ping 2>$null
+            if ($answer -eq 'PONG') { $ok = $true; break }
+          }
+          Get-Content "$data\redis.log" -ErrorAction SilentlyContinue
+          Get-Content "$data\redis.err" -ErrorAction SilentlyContinue
+          if (-not $ok) { throw "redis-server never answered PING as a native process" }
+
+          & "$moved\redis-cli.exe" -p $port info server
+          & "$moved\redis-cli.exe" -p $port set mixengine:spike "hello from $moved"
+          $value = & "$moved\redis-cli.exe" -p $port get mixengine:spike
+          if ($value -ne "hello from $moved") { throw "GET answered '$value'" }
+          Write-Output "SET/GET round-tripped: $value"
+
+          & "$moved\redis-cli.exe" -p $port shutdown nosave 2>$null
+          Start-Sleep -Seconds 2
+          if (-not $server.HasExited) { $server.Kill(); throw "shutdown returned and the server was still up" }
+          Write-Output "shutdown nosave: the server exited"
