@@ -899,6 +899,36 @@ packed before `keeps` existed. Same version, same check, opposite answers, and t
 between them is the task that landed in between. Formats: `.zip` through `zipfile`, `.tar.gz` and
 `.tar.zst` through `tar`, since the 3.12 the index workflow installs cannot read zstd itself.
 
+### [ ] P6a — The Windows cells `relocate.verify` was never allowed to look at
+
+P6 made the rule something CI can fail on. This is the discovery that on Windows it could not fail,
+and that the second half of the reason survived the first being fixed.
+
+`relocate.kind` used to judge a file by its magic and answer `None` for `MZ`, so `verify` had nothing
+to say about a Windows tree. Every recipe written in that era therefore guards the call with
+`sys.platform != "win32"` — honestly, because the call did nothing there. P8a taught `relocate` to
+parse the PE import table out of the file itself, which quietly turned all of those guards from
+accurate into stale.
+
+**Removing a guard is not the whole of opening a cell, and Node is the proof.** With the guard gone
+`verify` still reported no problems, because it looks in `BINARY_DIRECTORIES` and a Windows Node tree
+has no `bin`: `node.exe` sits at the root. Measured on the packed 24.19.0 archives — 0 machine files
+against 1 for `("",)` on both `windows/x86_64` and `windows/aarch64`, and *the same single file*
+either way on `linux/x86_64` and `macos/aarch64`, so naming the root costs Unix nothing. A cell
+opened without checking where its payload actually sits reports the same green as a cell still shut,
+which is the failure this whole thread has now produced twice.
+
+* **[x] `node.py`** — `verify(elsewhere, directories=("",))`, unguarded. Both Windows cells now
+  genuinely read `node.exe`: eleven imports, every one resolving into System32, no MSVC runtime
+  beside it. Upstream's build is self-contained and this is the first time anything here said so.
+* **[x] `caddy.py`** — already unguarded and already `("",)`; confirmed by parsing a packed
+  `caddy.exe` rather than by reading the source.
+* **[ ] `python.py`, `nginx.py`, `mariadb_build.py`, `postgres.py`** — each still guarded, and each
+  needs the same two questions answered in this order: does the guard come off, and *where does this
+  tree keep its binaries*. PostgreSQL is the one to expect trouble from — P7b already found its
+  Windows tree loads plugins out of `lib/` against an executable in `bin/`, which is the shape
+  `pe_resolve`'s *executable_dir* exists for.
+
 ---
 
 ## Services still to pack
