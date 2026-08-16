@@ -9,7 +9,7 @@ name: check the archive is still there
 # same bytes, so the sha256 in the *signed* index can never be matched again; restoring means
 # publishing a different artifact under the same version and re-signing an index that describes it
 # differently. There is no repair here, only how long it takes to find out. See P11 in
-# docs/roadmap.md, and the archive section of the README for what may never be deleted.
+# docs/roadmap.md, and docs/the-archive.md for what may never be deleted.
 on:
   schedule:
     # Wednesday, and weekly for the same reason `check-eol.yml` is: the failure being looked for is

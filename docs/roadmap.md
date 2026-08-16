@@ -5,7 +5,7 @@ order: what is packed, what the rules say about it that is not true yet, and wha
 at all.
 
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **(rule)** = a conformance debt against
-[*One version means one thing, and no more than is needed*](../README.md#one-version-means-one-thing-and-no-more-than-is-needed).
+[*One version means one thing, and no more than is needed*](one-version-means-one-thing.md).
 
 ---
 
@@ -37,7 +37,7 @@ version produced three different feature sets, and fixing that is what
 [`6c344d0`](https://github.com/haiquang9994/mixengine-packages/commit/6c344d0) began. They did not
 finish it: a later audit of the six *finished* artifacts of a green run found four more asymmetries
 no recipe knew it had, and closing those took seven further commits; what that audit found is
-written down in [the README](../README.md#one-version-means-one-thing-and-no-more-than-is-needed),
+written down in [that rule](one-version-means-one-thing.md),
 because it is the argument for P6. The rule had never been applied backwards to the four runtime
 rows that were packed before it existed, and P1–P6 were that work. Measured against upstream's own
 archives, the gaps were not marginal: PHP 8.3 on Windows was missing two extensions this repository
@@ -1640,7 +1640,11 @@ Two things to do while running them, both of which get easier the fewer versions
 - New work goes **where it belongs in the order**, with the next free suffix on the task it follows
   (`P2a`, `P2b`) rather than at the end.
 - **One note, one place.** Why a recipe does what it does belongs in its docstring, beside the code
-  it is about; what a packaging decision settled for the whole repository belongs in
-  [`../README.md`](../README.md); what building something the hard way taught belongs in
-  [`building-from-source.md`](building-from-source.md). What this file carries is only what none of
-  those can: what has not been done yet, and what has to be decided before it can be.
+  it is about; what a packaging decision settled for one kind belongs on that kind's page in
+  [`packages/`](packages/), and what it settled for the whole repository belongs beside the rule it
+  is part of — [borrowing](borrow-before-you-build.md), [parity](one-version-means-one-thing.md),
+  [layout](repack-do-not-rearrange.md), [dates](end-of-life-dates.md),
+  [the archive](the-archive.md); what building something the hard way taught belongs in
+  [`building-from-source.md`](building-from-source.md). [`../README.md`](../README.md) carries the
+  table of what is packaged and links to all of it, and nothing else. What this file carries is only
+  what none of those can: what has not been done yet, and what has to be decided before it can be.

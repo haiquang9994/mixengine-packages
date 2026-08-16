@@ -31,7 +31,7 @@ than is needed*][rule].
 
 Nothing here downloads, unpacks or runs anything; :func:`keeps` reads a finished tree and no more.
 
-[rule]: ../README.md#one-version-means-one-thing-and-no-more-than-is-needed
+[rule]: ../docs/one-version-means-one-thing.md
 """
 
 from __future__ import annotations

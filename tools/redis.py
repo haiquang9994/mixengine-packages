@@ -87,8 +87,8 @@ AGENT = {"User-Agent": "mixengine-packages (+https://github.com/haiquang9994/mix
 # ends of that are still patched by upstream — 6.2, 7.2, 7.4 and every 8.x line took a release on
 # the same day in July 2026 — so a floor here is this repository's decision and not upstream's, and
 # the reason to put it at 7.2 rather than lower is that it is where a user who will not accept a
-# source-available licence still has a supported Redis. See the README section for what shipping the
-# newer ones obliges this repository to do.
+# source-available licence still has a supported Redis. See docs/packages/redis-memcached.md for
+# what shipping the newer ones obliges this repository to do.
 FLOOR = (7, 2)
 
 # What `make -C src install` puts in `bin/`, and what MixEngine will run. The last two are symlinks

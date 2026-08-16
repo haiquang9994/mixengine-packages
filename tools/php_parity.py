@@ -24,7 +24,7 @@ six finished cells of a version and treats every difference it is not told about
 is only a rule worth having if the list of things it is told about is short, argued and in one
 place. That is :func:`exempt`.
 
-[rule]: ../README.md#one-version-means-one-thing-and-no-more-than-is-needed
+[rule]: ../docs/one-version-means-one-thing.md
 """
 
 from __future__ import annotations

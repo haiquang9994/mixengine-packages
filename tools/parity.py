@@ -44,7 +44,7 @@ so nothing here asks how many cells a row should have.
 Python 3 stdlib only, and it has to keep running on the 3.12 the index workflow installs: no
 ``tarfile`` zstd, hence ``tar``.
 
-[rule]: ../README.md#one-version-means-one-thing-and-no-more-than-is-needed
+[rule]: ../docs/one-version-means-one-thing.md
 """
 
 from __future__ import annotations

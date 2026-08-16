@@ -459,8 +459,8 @@ def prune(tree: Path) -> list[str]:
     the Galera scripts this list has excluded since the first round, and Windows ARM64 kept 21 MB of
     test binaries, 18 demonstration plugins and a 14 MB import library — one version meaning three
     different things depending on which cell a user installed from, which is precisely what the
-    parity rule in the README exists to prevent. The layout-specific pruning stays with each recipe;
-    what is *not shipped* is decided once, here.
+    parity rule in docs/one-version-means-one-thing.md exists to prevent. The layout-specific
+    pruning stays with each recipe; what is *not shipped* is decided once, here.
     """
     removed = []
     for relative in PRUNE:
