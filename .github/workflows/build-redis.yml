@@ -3,11 +3,13 @@ name: build redis
 # Asked for, never automatic — the same rule every other workflow here keeps, for the same reason:
 # upstream releases on its own schedule and a human decides which version is wanted.
 #
-# **One job for six targets, and two of them exist only to say they are empty.** Redis has no
-# Windows build at all — no CMakeLists.txt, no win32 directory, a src/Makefile around POSIX fork()
-# and epoll — so `tools/redis.py` exits 75 there and the leg reports a notice instead of an
-# artifact. Running it costs a runner minute and buys the thing an omission cannot: the empty cell
-# is stated in every run's log rather than being a row somebody has to remember is missing.
+# **One job for six targets, and one of them exists only to say it is empty.** Redis is a POSIX
+# program with no project file of any kind, which P8 read as "no Windows cells" and which is only
+# half the finding: compiled *against* a POSIX runtime rather than ported to Win32, the unmodified
+# upstream tarball builds and runs. So windows/x86_64 installs Cygwin and packs like any other
+# cell, and windows/aarch64 exits 75 because neither Cygwin nor MSYS2 has an ARM64 build and an
+# artifact labelled aarch64 may not hold x86_64 binaries. Running the empty leg costs a runner
+# minute and buys what an omission cannot: the cell is stated in every run's log.
 on:
   workflow_dispatch:
     inputs:
@@ -49,13 +51,24 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
+      # The POSIX runtime the source is compiled against. Only on the x86_64 Windows leg: the ARM
+      # one has no Cygwin to install, which is the whole reason it exits 75.
+      #
+      # `gcc-g++` is in the list although Redis is C: `deps/hdr_histogram` and `deps/tre` are built
+      # by a Makefile that reaches for `$(CXX)`, and a missing one fails inside a dependency rather
+      # than in anything named Redis. `pkg-config` is what `src/Makefile` probes libsystemd with —
+      # absent, the probe errors instead of answering no.
+      - uses: cygwin/cygwin-install-action@master
+        if: matrix.os == 'windows' && matrix.arch == 'x86_64'
+        with:
+          packages: make gcc-core gcc-g++ pkg-config
       - name: build and pack
         id: pack
         # bash on every leg, Windows included, so the exit code is read the same way everywhere
         # rather than in two dialects that could disagree.
         #
-        # 75 is "there is no build for this target", which for Redis is a permanent fact about the
-        # two Windows cells rather than a version that happens to be missing. Every other non-zero
+        # 75 is "there is no build for this target", which for Redis is now a fact about one cell
+        # rather than two: windows/aarch64 has no Cygwin to compile against. Every other non-zero
         # code is real and is passed on. `|| code=$?` rather than reading `$?` on the next line,
         # because `shell: bash` runs with `-e` and a non-zero exit would end the step before
         # anything could look at the code.
@@ -64,7 +77,7 @@ jobs:
           code=0
           python -u tools/redis.py --version "${{ inputs.version }}" --out dist || code=$?
           if [ "$code" -eq 75 ]; then
-            echo "::notice::no Redis for ${{ matrix.os }}/${{ matrix.arch }}; upstream has no build system for it"
+            echo "::notice::no Redis for ${{ matrix.os }}/${{ matrix.arch }}; no POSIX runtime exists there to compile against"
             echo "skipped=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -109,7 +122,7 @@ jobs:
             if ! gh release view "$tag" >/dev/null 2>&1; then
               gh release create "$tag" \
                 --title "Redis $version" \
-                --notes "Relocatable Redis $version for MixEngine, compiled from upstream's own source release against the SHA-256 published in redis/redis-hashes. Four cells: macOS and Linux on both architectures. There is no Windows artifact and there will not be one before upstream has a Windows build — Redis is a POSIX program with no project file of any kind, Valkey is the same program forked and is unsupported there too, and Memurai is proprietary. Core Redis only: the modules the 8.x tarball vendors are not built, and TLS is off, so redis-server imports nothing outside the C runtime. Every artifact was run as a cache from a directory it had been moved to before being published — started against a rendered redis.conf, answering redis-cli ping, its reported version checked against the archive's, a key written and read back, and the server stopped with redis-cli shutdown — see mixengine-artifact.json inside each one for what was proven."
+                --notes "Relocatable Redis $version for MixEngine, compiled from upstream's own source release against the SHA-256 published in redis/redis-hashes. Five cells: macOS and Linux on both architectures, and Windows on x86_64. Redis is a POSIX program with no project file of any kind, so the Windows artifact is compiled against a POSIX runtime rather than ported — the source is unmodified and Cygwin's cygwin1.dll travels beside the binaries under LGPLv3, with its licence and runtime exception in licenses/. It is a development instance and reads like one: the event loop is select rather than epoll, and maxclients settles lower than on Unix. There is no windows/aarch64 artifact, because neither Cygwin nor MSYS2 has an ARM64 build and an archive labelled aarch64 may not hold x86_64 binaries. Core Redis only: the modules the 8.x tarball vendors are not built, and TLS is off. Every artifact was run as a cache from a directory it had been moved to before being published — started against a rendered redis.conf, answering redis-cli ping, its reported version checked against the archive's, a key written and read back, and the server stopped with redis-cli shutdown — see mixengine-artifact.json inside each one for what was proven."
             fi
             gh release upload "$tag" "${assets[@]}" --clobber
           done

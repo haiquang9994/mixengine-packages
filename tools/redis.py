@@ -1,26 +1,38 @@
 #!/usr/bin/env python3
-"""Compile Redis from upstream source for the four cells that can run it, and say so about the two.
+"""Compile Redis from upstream source for the five cells that can run it, and say so about the one.
 
-**The Windows cells are empty, and the finding is stronger than the roadmap expected.** P8 was
-written to decide between compiling Redis natively on a Windows runner and declaring the cell empty,
-on the understanding that Microsoft's fork died at 3.0 and what circulates since is community
-rebuilds. Asked rather than assumed, there is nothing to decide: Redis 8.10 has **no Windows build
-system at all** — no ``CMakeLists.txt``, no ``win32/``, no project file, and a ``src/Makefile``
-around POSIX ``fork()``, ``epoll`` and ``kqueue``. Upstream's own README lists Linux, OSX, OpenBSD,
-NetBSD and FreeBSD and does not mention Windows. This is not a build that needs the right flags; it
-is a build that does not exist, and a recipe cannot supply one.
+**P8 read the Windows question as "is there a Windows build system", and that was the wrong
+question.** There is not one, and re-reading the 8.10.0 tarball on a runner confirms it: no
+``CMakeLists.txt``, no ``win32/``, no project file, and a ``src/Makefile`` around POSIX ``fork()``,
+``epoll`` and ``kqueue``. No tag of ``redis/redis`` from 2.6 to 8.10 has ever contained one; the
+Windows support that existed lived in ``microsoftarchive/redis``, a separate fork with its own
+``msvs/`` and ``src/Win32_Interop``, which stopped at 3.0.504 in 2016.
 
-The three ways out were each asked and each answers no. **Valkey** — MixEngine's runtime table names
-it as the alternative — is a fork of the same POSIX program and is not supported on Windows either;
-its own installation page sends a Windows user to WSL, which
+But a program does not need to be *ported* to run somewhere — it needs the interfaces it calls. Both
+of the routes that supply POSIX on Windows compile this source unmodified, and this recipe takes
+the more conservative of them: **Cygwin**, whose runtime is documented for redistribution and whose
+licence and runtime exception ship as files an archive can carry, over MSYS2, whose own
+documentation says its runtime is for its build tools rather than for programs to be distributed.
+``cygwin1.dll`` and ``cyggcc_s-seh-1.dll`` travel beside the binaries — measured off the import
+table, not copied from anyone's list — and are the only two things outside ``C:\\Windows`` the
+result loads.
+
+The alternatives are still no, and for the reasons P8 gave. **Valkey** is the same POSIX program
+forked and sends a Windows user to WSL, which
 [ADR 0003](https://github.com/haiquang9994/MixEngine/blob/master/.claude/decisions/0003-no-container-isolation.md)
-excludes. **Memurai** is a proprietary product; a repository that redistributes what it packs cannot
-pack one. **The community rebuilds** are a fork nobody maintains, which is the thing the roadmap
-already refused to ship. So the cell is stated rather than filled, here and in the index, and a
-Windows leg of the workflow runs anyway and exits 75 — an empty cell that says so on every run is
-worth a runner minute.
+excludes. **Memurai** is proprietary; a repository that redistributes what it packs cannot pack one.
+**The community rebuilds** are a fork nobody maintains — and the point of compiling here is that
+their *method* can be borrowed without their binaries: the tarball is upstream's, checked against
+upstream's own digest, and nothing in it is patched.
 
-What the four remaining cells get:
+What that costs, stated rather than smoothed over. Cygwin has no ``epoll``, so ``ae.c`` falls to its
+``select`` backend, and the runtime cannot raise the descriptor limit as far as the default asks, so
+``maxclients`` settles lower. Both are properties of one unreplicated development instance on a
+developer's own machine, which is the only thing MixEngine runs. And ``windows/aarch64`` stays empty:
+neither Cygwin nor MSYS2 has an ARM64 build, x86_64 under emulation would work, and an artifact
+labelled ``aarch64`` may not hold binaries that are not.
+
+What the five cells get:
 
 *Core Redis, and none of the bundled modules.* Since 8.0 the release tarball vendors RediSearch,
 RedisJSON, RedisTimeSeries, RedisBloom and vector-sets — 6,671 files, and the reason the 8.10.0
@@ -93,13 +105,38 @@ FLOOR = (7, 2)
 
 # What `make -C src install` puts in `bin/`, and what MixEngine will run. The last two are symlinks
 # to `redis-server` that upstream's install target creates — a running instance's supervisor wants
-# them after a crash, and they cost nothing.
+# them after a crash, and they cost nothing. On Windows they are copies rather than links, because
+# `ln -sf` under Cygwin writes a symlink only Cygwin resolves and MixEngine starts a native process.
+# The server tells the three apart by reading its own `argv[0]`, so a copy serves as well as a link.
+SUFFIX = ".exe" if sys.platform == "win32" else ""
 LAYOUT = {
-    "redis-server": "bin/redis-server",
-    "redis-cli": "bin/redis-cli",
-    "redis-check-rdb": "bin/redis-check-rdb",
-    "redis-check-aof": "bin/redis-check-aof",
+    name: f"bin/{name}{SUFFIX}"
+    for name in ("redis-server", "redis-cli", "redis-check-rdb", "redis-check-aof")
 }
+
+# Upstream's own `DEPENDENCY_TARGETS`, named here because the Windows build drives `deps` directly
+# rather than letting `persist-settings` do it with a leading `-` that turns a failed dependency
+# into an ignored `Error 2` and a link failure twenty minutes later. `jemalloc` is in `deps/` and is
+# deliberately not in this list: the Makefile only chooses it as the allocator on Linux.
+DEPENDENCY_TARGETS = ("hiredis", "linenoise", "lua", "hdr_histogram", "fpconv", "xxhash", "tre")
+
+# **Goals, because `all` cannot be one here.** `src/Makefile`'s `all` ends in `module_tests`, which
+# links `tests/modules/*.so` against symbols `redis-server` exports — and a PE image has no
+# undefined symbol resolved at load time, so that target stops on `undefined reference to strncmp`
+# however cleanly the server itself builds. Naming goals avoids it without patching the Makefile,
+# which is also why `make install` is not used: `install: all`, so it drags the same target back in.
+WINDOWS_TARGETS = ("redis-server", "redis-cli", "redis-check-rdb", "redis-check-aof")
+
+# Two compiler flags, and neither touches a line of Redis.
+#
+# `-D_GNU_SOURCE` because Cygwin guards `dladdr` and `RTLD_DEFAULT` behind `__GNU_VISIBLE`, which is
+# derived from the feature-test macros — asking for the feature is the supported way to get it, and
+# it leaves the toolchain as installed. The community workflow edits `/usr/include/dlfcn.h` instead.
+#
+# `-Wno-char-subscripts` because `deps/hiredis` compiles with its own `-Werror` and `sds.c`
+# subscripts an array with a plain `char` through `isspace()`. glibc's macro casts to `int` so the
+# warning never fires there; Cygwin's newlib does not cast, and the same unmodified line is an error.
+WINDOWS_CFLAGS = "-D_GNU_SOURCE -Wno-char-subscripts"
 
 # Installed by upstream and then thrown away. `redis-benchmark` is a benchmark, which the second
 # half of *One version means one thing, and no more than is needed* names outright; `redis-sentinel`
@@ -108,7 +145,7 @@ LAYOUT = {
 # reason `mariadb_build` gives about the test suite: upstream's install target is one recipe and
 # taking a file out of the tree afterwards is checkable, while persuading a Makefile to install
 # three of six things is a patch that goes stale.
-PRUNE = ("bin/redis-benchmark", "bin/redis-sentinel")
+PRUNE = (f"bin/redis-benchmark{SUFFIX}", f"bin/redis-sentinel{SUFFIX}")
 
 # Every directory under `deps/` is compiled into `redis-server`, so every one of them is
 # redistributed by this archive and its licence has to travel with it. The value is where upstream
@@ -225,6 +262,105 @@ def source(spec: str, work: Path) -> tuple[str, Path, str, str]:
     return version, unpacked, actual, url
 
 
+def cygwin_root() -> Path:
+    """Where Cygwin is installed, **proved by asking it rather than by finding a `bash.exe`**.
+
+    Every Windows runner in this matrix already has a `bash` on `PATH` — Git for Windows ships one,
+    and it is an MSYS2 build. It compiles this source too, and the result would be a different
+    artifact depending on which one happened to be first in the path: a different runtime DLL, a
+    different licence to ship, a different set of quirks to have measured. That is the kind of
+    difference no smoke test asks about, so it is settled here instead. `uname -s` answers
+    `CYGWIN_NT-…` for Cygwin and `MSYS_NT-…` for the other, and the check costs one process.
+
+    Cygwin rather than MSYS2 for two reasons that outlast this recipe: MSYS2's own documentation
+    says its runtime is for its build tools rather than for programs to be distributed, and Cygwin
+    publishes the runtime licence and its exception as documents an archive can carry.
+    """
+    candidates: list[Path] = []
+    stated = os.environ.get("CYGWIN_ROOT")
+    if stated:
+        candidates.append(Path(stated))
+    found = shutil.which("bash")
+    if found:
+        candidates.append(Path(found).resolve().parent.parent)
+    candidates += [Path(r"C:\cygwin64"), Path(r"C:\cygwin"), Path(r"D:\cygwin")]
+
+    tried: list[str] = []
+    for root in candidates:
+        shell = root / "bin" / "bash.exe"
+        if not shell.is_file():
+            continue
+        try:
+            answer = subprocess.run(
+                [str(shell), "--noprofile", "--norc", "-c", "uname -s"],
+                capture_output=True, text=True, timeout=120,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError) as problem:
+            tried.append(f"{shell} ({problem})")
+            continue
+        if answer.startswith("CYGWIN_NT"):
+            return root
+        tried.append(f"{shell} says {answer!r}")
+
+    raise SystemExit(
+        "no Cygwin on this machine, and Redis has no other way onto Windows: upstream's source is "
+        "a POSIX program with no project file of any kind, so the build needs a POSIX runtime to "
+        "compile against. Install it with cygwin/cygwin-install-action, or set CYGWIN_ROOT. "
+        + (f"Looked at: {'; '.join(tried)}." if tried else "Found no bash.exe at all.")
+    )
+
+
+def cygwin(root: Path, script: str, cwd: Path) -> None:
+    """Run *script* under Cygwin's shell, from *cwd*.
+
+    No `-o igncr` here, unlike the workflow that measured this: that option exists because GitHub
+    writes a step's script to a **file** with CRLF endings, and this passes the script as an
+    argument built in Python, where the only line endings are the ones written above.
+    """
+    print(f"$ {root / 'bin' / 'bash.exe'} -c <<\n{script.strip()}\n", flush=True)
+    result = subprocess.run(
+        [str(root / "bin" / "bash.exe"), "--noprofile", "--norc", "-c", script],
+        cwd=str(cwd), timeout=3600,
+    )
+    if result.returncode != 0:
+        raise SystemExit(f"the Cygwin build exited {result.returncode}")
+
+
+def build_windows(source_tree: Path, prefix: Path) -> list[str]:
+    """Compile the core under Cygwin and put the four binaries where `assemble` expects them.
+
+    `deps` is built here rather than left to `persist-settings`, which invokes it with a leading `-`
+    so that a dependency that fails to compile is reported as `Error 2 (ignored)` and the build
+    carries on to a link that cannot work. Driving it directly means the failing dependency names
+    itself in the step that failed.
+
+    The install is four `copy2` calls because upstream's `install` target cannot run — see
+    :data:`WINDOWS_TARGETS` — and because what it would add beyond copying is `ln -sf`, which under
+    Cygwin writes a symlink nothing but Cygwin resolves.
+    """
+    root = cygwin_root()
+    print(f"building under Cygwin at {root}")
+    cygwin(
+        root,
+        f'set -e\n'
+        f'make -C deps -j{jobs()} CFLAGS="{WINDOWS_CFLAGS}" {" ".join(DEPENDENCY_TARGETS)}\n'
+        f'make -C src -j{jobs()} CFLAGS="{WINDOWS_CFLAGS}" {" ".join(WINDOWS_TARGETS)}\n',
+        cwd=source_tree,
+    )
+
+    binaries = prefix / "bin"
+    binaries.mkdir(parents=True, exist_ok=True)
+    for name in WINDOWS_TARGETS:
+        built = source_tree / "src" / f"{name}.exe"
+        if not built.is_file():
+            raise SystemExit(f"the build produced no {built.name}; make reported success")
+        shutil.copy2(built, binaries / built.name)
+    return [
+        f"make -C deps {' '.join(DEPENDENCY_TARGETS)} (Cygwin)",
+        f"make -C src {' '.join(WINDOWS_TARGETS)} CFLAGS={WINDOWS_CFLAGS!r}",
+    ]
+
+
 def build(source_tree: Path, prefix: Path) -> list[str]:
     """Compile the core and install it, and answer with what was asked for.
 
@@ -234,7 +370,14 @@ def build(source_tree: Path, prefix: Path) -> list[str]:
     tarball ships them cloned. ``src`` is the subdirectory upstream's own script recurses into for
     the core, it is the only Makefile 7.x has, and driving it directly is what makes one code path
     serve both lines.
+
+    Windows is the one target this does not describe, and :func:`build_windows` says why in full:
+    there is no `all` to run and no `install` to call, because both end in a target that links a
+    shared object against symbols an executable exports.
     """
+    if sys.platform == "win32":
+        return build_windows(source_tree, prefix)
+
     asked = ["make", "-C", "src", f"-j{jobs()}", "all"]
     run(*asked, cwd=source_tree)
     run("make", "-C", "src", "install", f"PREFIX={prefix}", cwd=source_tree)
@@ -327,8 +470,14 @@ def free_port() -> int:
 
 
 def await_pong(cli: Path, port: int, process: subprocess.Popen, log: Path,
-               seconds: float = 30) -> None:
-    """Wait for the server to answer ``PING``, or say what it said instead."""
+               seconds: float = 30, environment: dict | None = None) -> None:
+    """Wait for the server to answer ``PING``, or say what it said instead.
+
+    *environment* carries the cut-down ``PATH`` for the same reason every other call in this test
+    does. It matters most on Windows, where `redis-cli.exe` needs `cygwin1.dll`: inheriting the
+    build machine's ``PATH`` would let it load the one in the Cygwin installation and answer PONG
+    from an archive that is missing it.
+    """
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         if process.poll() is not None:
@@ -337,7 +486,8 @@ def await_pong(cli: Path, port: int, process: subprocess.Popen, log: Path,
                 f"{log.read_text(encoding='utf-8', errors='replace')}"
             )
         answer = subprocess.run(
-            [str(cli), "-p", str(port), "ping"], capture_output=True, text=True, timeout=30
+            [str(cli), "-p", str(port), "ping"], capture_output=True, text=True, timeout=30,
+            env=environment,
         )
         if answer.returncode == 0 and answer.stdout.strip() == "PONG":
             return
@@ -411,12 +561,21 @@ def smoke(tree: Path, version: str, provides: dict[str, str]) -> dict:
     environment = {**os.environ, "PATH": path}
     with log.open("wb") as sink:
         process = subprocess.Popen(
-            [str(server), str(config)],
+            # **The config is named relatively, against a working directory, and Windows is why.**
+            # `getAbsolutePath()` in `server.c` decides a path is absolute with `relpath[0] == '/'`
+            # and otherwise joins it to `getcwd()` — so under Cygwin an ordinary Windows path is
+            # treated as relative and glued onto the working directory, and the server dies on
+            # `can't open config file '/cygdrive/d/a/…/C:/…/redis.conf'`. Neither `C:\…` nor `C:/…`
+            # gets past that line; a `/cygdrive/c/…` path would, and is refused because it would put
+            # the emulation layer's private spelling into the command line MixEngine's supervisor
+            # builds. Naming the file relatively satisfies the same code path on every platform, so
+            # this is one rule rather than a Windows branch — and it is what T35 has to do too.
+            [str(server), config.name],
             stdout=sink, stderr=subprocess.STDOUT, env=environment, cwd=str(work),
         )
 
     try:
-        await_pong(cli, port, process, log)
+        await_pong(cli, port, process, log, environment=environment)
         print(f"redis-cli ping: PONG on {port}")
 
         info = borrow.run(cli, "-p", str(port), "info", "server", path=path)
@@ -479,13 +638,13 @@ def main() -> None:
     arguments = parser.parse_args()
 
     operating_system, arch = borrow.host("Redis")
-    if operating_system == "windows":
+    if operating_system == "windows" and arch != "x86_64":
         borrow.unavailable(
-            "Redis has no Windows build: no CMakeLists.txt, no win32 directory, no project file, "
-            "and a src/Makefile around POSIX fork(), epoll and kqueue. Upstream's README lists "
-            "Linux, OSX, OpenBSD, NetBSD and FreeBSD. Valkey is the same program forked and is not "
-            "supported there either; Memurai is proprietary; the community rebuilds are a fork "
-            "nobody maintains. This cell is empty and the index says so."
+            "no Cygwin for Windows on ARM, and Redis needs one: upstream's source is a POSIX "
+            "program with no project file of any kind, so it is compiled here against a POSIX "
+            "runtime rather than ported. Neither Cygwin nor MSYS2 has an ARM64 build. Emulating "
+            "x86_64 would work and is refused: an artifact labelled aarch64 would hold binaries "
+            "that are not. This cell is empty and the index says so; the x86_64 one is not."
         )
 
     work = Path(tempfile.mkdtemp(prefix="mixengine-redis-"))
@@ -499,6 +658,25 @@ def main() -> None:
     asked = build(source_tree, prefix)
     tree, provides = assemble(prefix, work, source_tree)
 
+    runtime = ""
+    if operating_system == "windows":
+        # **`libdir="bin"`, not `lib`, and that is the whole of the rewrite on Windows.** The PE
+        # loader searches the directory of the image being loaded before anything else, so a DLL
+        # copied beside the executable needs no rpath, no install name and no re-signing — the copy
+        # *is* the redirection. `search` is the Cygwin installation, which is where the two
+        # libraries come from and the one place `verify` deliberately will not look afterwards.
+        bundled = relocate.bundle(tree, libdir="bin", search=[cygwin_root() / "bin"])
+        if not bundled:
+            raise SystemExit(
+                "nothing was bundled, and a Cygwin build imports cygwin1.dll by construction — so "
+                "the import table was not read rather than the archive being self-contained. A "
+                "tree that needed nothing and a tree nothing looked at are the same shape here."
+            )
+        print(f"bundled {len(bundled)} librar{'y' if len(bundled) == 1 else 'ies'}: "
+              f"{', '.join(sorted(bundled))}")
+        relocate.bundled_licences(tree, bundled)
+        runtime = f"; POSIX runtime supplied by Cygwin ({', '.join(sorted(bundled))}, LGPLv3)"
+
     manifest = {
         "schema": 1,
         "kind": "redis",
@@ -509,6 +687,7 @@ def main() -> None:
         "recipe": (
             f"redis-{version}.tar.gz from source (sha256 {digest[:12]}…, as published in "
             f"redis/redis-hashes); {'; '.join(asked)}; core only — no bundled modules, no TLS"
+            f"{runtime}"
         ),
         "provides": provides,
     }
@@ -520,7 +699,7 @@ def main() -> None:
     manifest["smoke"] = smoke(tree, version, provides)
     print(f"built from {url}")
 
-    borrow.publish(tree, manifest, arguments.out, "tar")
+    borrow.publish(tree, manifest, arguments.out, "zip" if operating_system == "windows" else "tar")
     shutil.rmtree(work, ignore_errors=True)
 
 

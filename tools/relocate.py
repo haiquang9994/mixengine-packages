@@ -64,7 +64,19 @@ SYSTEM_PREFIXES = ("/usr/lib/", "/System/")
 # dependencies of its own, and they have to be followed as well.
 BINARY_DIRECTORIES = ("bin", "sbin", "ext", "lib", "libexec", "modules")
 
+# Left alone on Windows, by location, and the location is the only rule that works: Windows has no
+# soname, no `/System`, and a DLL is named by a bare file name with no path in it at all.
+WINDOWS_ROOT = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+SYSTEM_DIRECTORIES = (WINDOWS_ROOT / "System32", WINDOWS_ROOT / "SysWOW64", WINDOWS_ROOT)
+
+# **Named in import tables and not files.** `api-ms-win-core-*.dll` and `ext-ms-*.dll` are API sets:
+# the loader resolves them from a schema it carries, and there is nothing on disk to copy. Any tool
+# that reports a path for one has found a file that merely happens to be on `PATH` — `cygcheck`
+# answered a Java toolcache for twenty of them in one run — so a match here is never bundled.
+API_SET_PREFIXES = ("api-ms-win-", "ext-ms-")
+
 ELF_MAGIC = b"\x7fELF"
+PE_MAGIC = b"MZ"
 MACHO_LITTLE = {b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe"}    # 64- and 32-bit, little endian
 MACHO_BIG = {b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce"}
 MACHO_FAT = {b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}       # universal
@@ -93,10 +105,14 @@ def run(*command: str, check: bool = True, environment: dict[str, str] | None = 
 
 
 def kind(path: Path) -> str | None:
-    """``elf``, ``macho`` or None, decided by the file's own first four bytes.
+    """``elf``, ``macho``, ``pe`` or None, decided by the file's own first bytes.
 
     Asking ``file(1)`` would mean depending on it being installed and on its wording; the magic
     number is the thing itself.
+
+    ``MZ`` is the weakest of the three — it is a DOS header, and everything from a 1983 ``.com``
+    stub to a ``.scr`` carries it — so it is only a *candidate* here and :func:`loadable` is what
+    confirms a PE signature behind it.
     """
     try:
         with path.open("rb") as handle:
@@ -107,7 +123,31 @@ def kind(path: Path) -> str | None:
         return "elf"
     if magic in MACHO_MAGICS:
         return "macho"
+    if magic[:2] == PE_MAGIC:
+        return "pe"
     return None
+
+
+def pe_signature(handle) -> int | None:
+    """Offset of the ``PE\\0\\0`` signature in *handle*, or None if there is not one.
+
+    The DOS header at 0x3C points at it. A file that has ``MZ`` and nothing there is a DOS
+    executable, an installer stub or a resource-only file, and none of those is something the
+    Windows loader resolves imports for.
+    """
+    try:
+        handle.seek(0)
+        if handle.read(2) != PE_MAGIC:
+            return None
+        handle.seek(0x3C)
+        raw = handle.read(4)
+        if len(raw) < 4:
+            return None
+        offset = int.from_bytes(raw, "little")
+        handle.seek(offset)
+        return offset if handle.read(4) == b"PE\0\0" else None
+    except OSError:
+        return None
 
 
 def loadable(path: Path) -> bool:
@@ -124,6 +164,8 @@ def loadable(path: Path) -> bool:
     try:
         with path.open("rb") as handle:
             header = handle.read(20)
+            if header[:2] == PE_MAGIC:
+                return pe_signature(handle) is not None
     except OSError:
         return False
     if len(header) < 18:
@@ -246,7 +288,7 @@ def loader_search(tree: Path) -> list[Path]:
     than the loader would reject archives that work.
     """
     binaries = tree / "bin"
-    if sys.platform == "darwin" or not binaries.is_dir():
+    if sys.platform in ("darwin", "win32") or not binaries.is_dir():
         return []
     found: list[Path] = []
     for path in sorted(binaries.iterdir()):
@@ -367,6 +409,117 @@ def absolutise(libdir: Path) -> list[Path]:
     return repaired
 
 
+# ---------------------------------------------------------------------------------------- PE ---
+#
+# **Read out of the file rather than asked of a tool, and that is the difference that matters.**
+# `ldd` and `otool` are on every machine that could run the recipes that need them. The Windows
+# equivalent is `cygcheck`, which exists only where Cygwin is installed — that is, only on the build
+# machine — and it answers with what *this* machine's `PATH` happens to offer rather than with what
+# the file requires. A verify that consulted it would be the "build machine is the one machine where
+# a broken artifact works" failure in its purest form: a run that bundled nothing at all reported
+# success, because the loader found cygwin1.dll in the Cygwin installation that was still on `PATH`.
+#
+# So the import table is parsed here. It is about sixty lines of offsets and it depends on nothing.
+
+
+def pe_imports(path: Path) -> list[str]:
+    """Every DLL named in *path*'s import and delay-load import directories.
+
+    PE names a dependency by bare file name — no path, no version, no soname. All the meaning is in
+    how the loader then searches, and :func:`pe_resolve` is that half.
+
+    Both directories are read. A delay-load import is not resolved until the first call through it,
+    so a missing one does not fail the load; it crashes the program later, somewhere unrelated to
+    the library that was actually absent, which is a worse failure than the one this file exists to
+    prevent. Only the modern RVA form is understood — the pre-2002 linkers wrote absolute addresses
+    there and set no flag for it, and nothing in this table is that old.
+    """
+    with path.open("rb") as handle:
+        offset = pe_signature(handle)
+        if offset is None:
+            return []
+        handle.seek(0)
+        data = handle.read()
+
+    coff = offset + 4
+    sections_count = int.from_bytes(data[coff + 2:coff + 4], "little")
+    optional_size = int.from_bytes(data[coff + 16:coff + 18], "little")
+    optional = coff + 20
+    magic = int.from_bytes(data[optional:optional + 2], "little")
+    # The only thing the two shapes disagree about here is where the data directories start: PE32
+    # carries a `BaseOfData` field and a 32-bit `ImageBase`, PE32+ carries neither and a 64-bit one.
+    directories = optional + {0x10B: 96, 0x20B: 112}.get(magic, 0)
+    if directories == optional:
+        return []
+
+    sections = []
+    for index in range(sections_count):
+        entry = optional + optional_size + index * 40
+        sections.append((
+            int.from_bytes(data[entry + 12:entry + 16], "little"),   # VirtualAddress
+            int.from_bytes(data[entry + 16:entry + 20], "little"),   # SizeOfRawData
+            int.from_bytes(data[entry + 20:entry + 24], "little"),   # PointerToRawData
+        ))
+
+    def offset_of(rva: int) -> int | None:
+        """An address as the loader sees it, turned into a position in the file on disk."""
+        for virtual, size, raw in sections:
+            if virtual <= rva < virtual + size:
+                return raw + (rva - virtual)
+        return None
+
+    def string_at(rva: int) -> str | None:
+        where = offset_of(rva)
+        if where is None:
+            return None
+        end = data.find(b"\0", where)
+        return data[where:end if end != -1 else None].decode("ascii", "replace") or None
+
+    names: list[str] = []
+    # (directory index, descriptor size, where the name RVA sits in a descriptor). Both tables end
+    # with an all-zero descriptor rather than stating a count.
+    for index, stride, name_field in ((1, 20, 12), (13, 32, 4)):
+        table = int.from_bytes(data[directories + index * 8:directories + index * 8 + 4], "little")
+        if not table:
+            continue
+        cursor = offset_of(table)
+        if cursor is None:
+            continue
+        while cursor + stride <= len(data):
+            descriptor = data[cursor:cursor + stride]
+            if not any(descriptor):
+                break
+            name = string_at(int.from_bytes(descriptor[name_field:name_field + 4], "little"))
+            if name and name not in names:
+                names.append(name)
+            cursor += stride
+    return names
+
+
+def pe_resolve(name: str, beside: Path, search: Sequence[Path]) -> Path | None:
+    """Where the loader will find *name*, searched the way it searches.
+
+    **The directory of the image being loaded comes first, and that is the whole of the relocation
+    story on Windows.** There is no rpath to set, no install name to rewrite and no signature to
+    repair: a DLL copied next to the executable that needs it *is* the fix, and `$ORIGIN` is
+    emulating a behaviour Windows already has by default. It is also why `bundle` is called with
+    ``libdir="bin"`` here where every other platform uses ``lib``.
+
+    *search* is where the build put libraries this tree does not carry yet — Cygwin's own `bin` —
+    and it is deliberately absent from `verify`, so that a tree which failed to bundle resolves
+    nothing and says so.
+    """
+    for directory in (beside, *search, *SYSTEM_DIRECTORIES):
+        candidate = directory / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def pe_dependencies(path: Path, search: Sequence[Path] = ()) -> list[tuple[str, Path | None]]:
+    return [(name, pe_resolve(name, path.parent, search)) for name in pe_imports(path)]
+
+
 # ------------------------------------------------------------------------------------ shared ---
 
 
@@ -374,6 +527,13 @@ def is_system(spelling: str, resolved: Path | None) -> bool:
     if sys.platform == "darwin":
         target = str(resolved) if resolved else spelling
         return target.startswith(SYSTEM_PREFIXES)
+    if sys.platform == "win32":
+        # By location, because a PE import is a bare name and carries nothing else to judge it by.
+        # An unresolved name is *not* system: it is a library this machine does not have either,
+        # which `bundle` refuses and `verify` reports — the same treatment ELF gives a "not found".
+        if Path(spelling).name.lower().startswith(API_SET_PREFIXES):
+            return True
+        return resolved is not None and inside(resolved, WINDOWS_ROOT)
     name = Path(spelling).name
     return name in SYSTEM_SONAMES or name.startswith("ld-linux")
 
@@ -458,12 +618,23 @@ def dependencies(
 ) -> list[tuple[str, Path | None]]:
     if sys.platform == "darwin":
         return macho_dependencies(path, executable_dir)
+    if sys.platform == "win32":
+        return pe_dependencies(path, search)
     return elf_dependencies(path, search)
 
 
 def rewrite(tree: Path, libdir: str, bundled: set[str], executable_dir: Path,
             directories: Sequence[str] = BINARY_DIRECTORIES) -> None:
-    """Point every load at the copy beside it, relative to whoever is doing the loading."""
+    """Point every load at the copy beside it, relative to whoever is doing the loading.
+
+    Nothing to do on Windows, and it is worth saying so rather than leaving the reader to infer it
+    from an empty branch. A PE image names its dependencies by bare file name and the loader looks
+    in the image's own directory first — so the copy `bundle` just made *is* the redirection, with
+    no search path to set and no signature to repair. That is also why the caller passes
+    ``libdir="bin"``: on Windows the library directory has to be the executable's own.
+    """
+    if sys.platform == "win32":
+        return
     library_directory = tree / libdir
     for path in machine_files(tree, directories):
         relative = os.path.relpath(library_directory, path.parent).replace(os.sep, "/")
@@ -634,11 +805,67 @@ def dpkg_owner(path: Path) -> str | None:
     return result.stdout.split(":", 1)[0].strip() or None
 
 
+def cygwin_owner(root: Path, path: Path) -> str | None:
+    """Which Cygwin package installed this file, with its version cut off.
+
+    ``cygcheck -f`` answers ``cygwin-3.6.10-1`` and ``libgcc1-14.4.0-1``; ``/usr/share/doc`` is
+    filed under the bare name. This is `dpkg_owner` in the other dialect, and it is reached through
+    the installation the library came from rather than through ``PATH`` — the recipe may be running
+    with Cygwin deliberately hidden from it.
+    """
+    try:
+        result = subprocess.run([str(root / "bin" / "cygcheck.exe"), "-f", str(path)],
+                                capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    named = result.stdout.strip().splitlines()
+    return re.sub(r"-\d.*$", "", named[0].strip()) if named else None
+
+
+def cygwin_licences(real: Path) -> list[tuple[str, Path]]:
+    """What has to travel with a DLL taken out of a Cygwin installation.
+
+    Two documents, and the first is not optional: **cygwin1.dll is LGPLv3**, so an archive that
+    redistributes it has to carry its terms. ``/usr/share/doc/Cygwin/`` holds `COPYING` and
+    `CYGWIN_LICENSE` — the second states the runtime exception, which is the part a reader actually
+    needs and which no glob in :data:`LICENCE_GLOBS` would have matched. The package's own directory
+    is added when it has one, so `libgcc1` is licensed as libgcc rather than as Cygwin.
+
+    The root is the parent of the directory the library was taken from — ``<root>/bin/cygwin1.dll``
+    — which is the same walk the Homebrew branch does, for the same reason: nothing else on a
+    Windows runner can say where the installation is once `PATH` has been cut down.
+    """
+    root = real.parent.parent
+    shared = root / "usr" / "share" / "doc"
+    found: list[tuple[str, Path]] = []
+
+    for name in ("COPYING", "CYGWIN_LICENSE"):
+        text = shared / "Cygwin" / name
+        if text.is_file():
+            found.append(("cygwin", text))
+
+    owner = cygwin_owner(root, real)
+    if owner:
+        for pattern in LICENCE_GLOBS:
+            found.extend((owner, text) for text in sorted((shared / owner).glob(pattern))
+                         if text.is_file())
+        # Cygwin's per-package note, which states where the source came from and under what terms.
+        readme = shared / "Cygwin" / f"{owner}.README"
+        if readme.is_file():
+            found.append((owner, readme))
+    return found
+
+
 def licence_texts(origin: Path) -> list[tuple[str, Path]]:
     """The licence files belonging to a library at ``origin``, as ``(who it belongs to, file)``."""
     real = origin.resolve()
     places: list[Path] = []
     owner: str | None = None
+
+    if sys.platform == "win32":
+        return cygwin_licences(real)
 
     if "/Cellar/" in str(real):
         # **The keg, not the formula directory.** Walking up until the parent is `Cellar` stops at
@@ -709,8 +936,8 @@ def main() -> None:
                         help="check an already-bundled tree instead of bundling it")
     arguments = parser.parse_args()
 
-    if sys.platform not in ("darwin",) and not sys.platform.startswith("linux"):
-        raise SystemExit(f"nothing to relocate on {sys.platform}; this is for ELF and Mach-O")
+    if sys.platform not in ("darwin", "win32") and not sys.platform.startswith("linux"):
+        raise SystemExit(f"nothing to relocate on {sys.platform}; this is for ELF, Mach-O and PE")
 
     if not arguments.verify_only:
         bundled = bundle(arguments.tree, arguments.libdir)
