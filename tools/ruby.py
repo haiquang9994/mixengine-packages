@@ -158,8 +158,17 @@ def resolve(spec: str, arch: str) -> tuple[str, str, str, str | None]:
 
 
 def describe(tree: Path, version: str, arch: str, tag: str, url: str, digest: str,
-             published: str | None) -> dict:
-    """What is in the archive, as the daemon will read it."""
+             published: str | None,
+             added: list[str] | tuple[()] = (), removed: list[str] | tuple[()] = ()) -> dict:
+    """What is in the archive, as the daemon will read it.
+
+    *added* and *removed* are empty today and are arguments rather than a later edit because P5 is
+    the task that fills them: ``ruby_unix.py`` prunes ``share/man``, ``share/doc`` and ``share/ri``
+    from the four cells it compiles and this recipe prunes nothing from the two it borrows, which is
+    the packer/compiler pair that has to answer the same question or say why it does not. See
+    :func:`borrow.declare` for what the two fields promise and what is checked before they are
+    written.
+    """
     provides = {}
     for name, candidates in LAYOUT.items():
         found = next((path for path in candidates if (tree / path).exists()), None)
@@ -174,7 +183,7 @@ def describe(tree: Path, version: str, arch: str, tag: str, url: str, digest: st
             f"{sorted(path.name for path in (tree / 'bin').iterdir())[:25]}"
         )
 
-    return {
+    manifest = {
         "schema": 1,
         "kind": "ruby",
         "version": version,
@@ -199,6 +208,7 @@ def describe(tree: Path, version: str, arch: str, tag: str, url: str, digest: st
         },
         "provides": provides,
     }
+    return borrow.declare(tree, manifest, added, removed)
 
 
 def smoke(tree: Path, version: str, manifest: dict) -> dict:

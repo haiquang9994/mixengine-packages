@@ -28,6 +28,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+from collections.abc import Iterable
 from pathlib import Path
 
 # What a recipe exits with when the answer is "upstream builds nothing here", as opposed to
@@ -270,6 +271,53 @@ def run(program: Path, *args: str, path: str, drop: tuple[str, ...] = (), timeou
             f"{result.stdout.strip()}\n{result.stderr.strip()}"
         )
     return result.stdout.strip()
+
+
+def declare(
+    tree: Path, manifest: dict, added: Iterable[str] = (), removed: Iterable[str] = (),
+) -> dict:
+    """Write what this repository put into a borrowed archive and took out of it, having checked it.
+
+    ``upstream.added`` and ``upstream.removed`` are what keep the word *borrowed* checkable: a reader
+    holding this artifact and the publisher's own archive should find every difference between them
+    named here, rather than deducing it from two hashes that do not match. A recipe that quietly
+    deletes something is a recipe whose artifact cannot be told apart from a corrupted download.
+
+    **Checked rather than trusted, because the fields are a claim and a claim can be stale.** Every
+    path in *added* has to exist in the tree, every path in *removed* has to be gone from it, and a
+    recipe that says otherwise fails the pack. That is not hypothetical carefulness: MariaDB shipped
+    a pattern excluding ``mysql_ldb`` for four rounds while the file stayed in every artifact,
+    because deleting its target first had made the symlink invisible to ``Path.exists``. A
+    declaration nothing verifies decays into a comment.
+
+    Paths are POSIX-relative to the root of the tree, sorted and de-duplicated here so that six cells
+    of one version can be compared field to field rather than read side by side.
+    """
+    declared = manifest.setdefault("upstream", {})
+
+    if added:
+        added = sorted(dict.fromkeys(added))
+        absent = [path for path in added if not (tree / path).exists()]
+        if absent:
+            raise SystemExit(
+                f"upstream.added names {', '.join(absent)}, which this tree does not contain — "
+                f"either the recipe stopped writing them or the declaration was never true"
+            )
+        declared["added"] = added
+
+    if removed:
+        removed = sorted(dict.fromkeys(removed))
+        # `lexists` rather than `exists`: a dangling symlink is still a file in the archive, and
+        # `exists` follows the link and answers no. That is the mysql_ldb bug, in one call.
+        survivors = [path for path in removed if os.path.lexists(tree / path)]
+        if survivors:
+            raise SystemExit(
+                f"upstream.removed names {', '.join(survivors)}, which are still in the tree — "
+                f"the removal did not happen, or it happened somewhere this does not see"
+            )
+        declared["removed"] = removed
+
+    return manifest
 
 
 def pack(tree: Path, out: Path, name: str, suffix: str) -> Path:

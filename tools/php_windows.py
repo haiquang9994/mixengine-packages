@@ -32,6 +32,14 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# One function, not a migration. This recipe predates `borrow` and still fetches, hashes, unpacks
+# and packs by itself; moving that over is a separate change with a separate risk. What is borrowed
+# here is `declare`, because the alternative is a second implementation of the same check — and the
+# whole reason `borrow` exists is that two producers of one manifest field drift apart invisibly,
+# precisely because they agree on the name of the field.
+import borrow  # noqa: E402  — siblings, and this directory is not importable as a package
+
 RELEASES = "https://windows.php.net/downloads/releases"
 ARCHIVES = f"{RELEASES}/archives"
 
@@ -145,7 +153,17 @@ def php(binary: Path, *args: str) -> tuple[str, str]:
     return result.stdout.strip(), result.stderr.strip()
 
 
-def describe(tree: Path, version: str, arch: str, url: str, upstream_hash: str | None) -> dict:
+def describe(tree: Path, version: str, arch: str, url: str, upstream_hash: str | None,
+             added: list[str] | tuple[()] = (), removed: list[str] | tuple[()] = ()) -> dict:
+    """What is in the archive, as the daemon will read it.
+
+    *added* and *removed* are empty today and are arguments rather than a later edit because P2 is
+    the task that fills them, and it is the widest of the four: this archive carries PHP's own
+    ``dl_test`` and ``zend_test`` extensions, an ODBC bridge and 892 KB of import library that the
+    Unix legs do not, and it lacks ``redis`` and ``mongodb``, which those legs fail a build over.
+    Each of those differences is settled in one direction for all six cells, and the artifact says
+    which. See :func:`borrow.declare` for what the two fields promise and what is checked first.
+    """
     binaries = {p.stem: p.name for p in sorted(tree.glob("*.exe"))}
     provides = {name: path for name, path in binaries.items() if name != "deplister"}
     if "php" not in provides:
@@ -192,7 +210,7 @@ def describe(tree: Path, version: str, arch: str, url: str, upstream_hash: str |
     }
     if requires:
         manifest["requires"] = requires
-    return manifest
+    return borrow.declare(tree, manifest, added, removed)
 
 
 def smoke(tree: Path, version: str, manifest: dict) -> dict:

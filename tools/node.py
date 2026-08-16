@@ -168,8 +168,19 @@ def published_hash(version: str, name: str) -> str:
     raise SystemExit(f"{name} is not in SHASUMS256.txt for v{version}")
 
 
-def describe(tree: Path, version: str, target: tuple[str, str], url: str, digest: str) -> dict:
-    """What is in the archive, as the daemon will read it."""
+def describe(
+    tree: Path, version: str, target: tuple[str, str], url: str, digest: str,
+    added: list[str] | tuple[()] = (), removed: list[str] | tuple[()] = (),
+) -> dict:
+    """What is in the archive, as the daemon will read it.
+
+    *added* and *removed* are empty today and are arguments rather than a later edit because P3 is
+    the task that fills them: the six cells of one Node.js version differ by 92 MB of
+    ``include/node`` that upstream ships on Unix and not on Windows, and whichever way that is
+    settled — dropped everywhere or fetched for Windows too — the artifact has to say so. See
+    :func:`borrow.declare` for what the two fields promise and what is checked before they are
+    written.
+    """
     operating_system, arch = target
     layout = LAYOUT["windows" if operating_system == "windows" else "unix"]
 
@@ -182,7 +193,7 @@ def describe(tree: Path, version: str, target: tuple[str, str], url: str, digest
             f"{sorted(path.name for path in tree.iterdir())[:20]}"
         )
 
-    return {
+    manifest = {
         "schema": 1,
         "kind": "node",
         "version": version,
@@ -196,6 +207,7 @@ def describe(tree: Path, version: str, target: tuple[str, str], url: str, digest
         },
         "provides": provides,
     }
+    return borrow.declare(tree, manifest, added, removed)
 
 
 def smoke(tree: Path, version: str, manifest: dict) -> dict:

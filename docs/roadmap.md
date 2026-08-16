@@ -42,18 +42,29 @@ correctly; what they do not do is *choose*, and choosing once is the whole of th
 
 ## Conformance — apply the rule to the rows packed before it
 
-### [ ] P1 — Give the borrowed recipes somewhere to say what they took out **(rule)**
+### [x] P1 — Give the borrowed recipes somewhere to say what they took out **(rule)**
 
 `upstream.removed`, `upstream.added` and `upstream.stripped` are what keep "borrowed" checkable
 against what the publisher shipped. `tools/python.py`, `tools/mariadb.py` and `tools/mariadb_deb.py`
-write them — the three recipes written against the rule, or corrected under it. `node.py`,
-`php_windows.py` and `ruby.py` have no parameter for it at all, so even a correct decision made in
-P2–P5 would have nowhere to be declared. `borrow.publish` already carries whatever the manifest
-holds, so this is a `describe(…, added, removed)` signature in three recipes and nothing more.
+wrote them — the three recipes written against the rule, or corrected under it. `node.py`,
+`php_windows.py` and `ruby.py` had no parameter for it at all, so even a correct decision made in
+P2–P5 would have had nowhere to be declared. `borrow.publish` already carries whatever the manifest
+holds, so this was a `describe(…, added, removed)` signature in three recipes and nothing more.
 
 **First, because P2–P5 each end in a manifest field that does not exist yet.** `php_windows.py` does
 not use `borrow.py` at all — it predates it — so it either grows the two arguments itself or is moved
 onto `borrow` in passing; moving it is the larger change and is not required to close this.
+
+Closed as `borrow.declare`, which is one function rather than four copies of six lines, and which
+does one thing the fields did not do before: **it checks the claim against the tree before writing
+it.** A path in `added` has to be there, a path in `removed` has to be gone — by `os.path.lexists`,
+because a dangling symlink is still a file in the archive and `exists` follows the link and answers
+no, which is precisely how `mysql_ldb` survived four rounds of being excluded. `python.py` gave up
+its own copy of the two fields to it; `php_windows.py` imports `borrow` for this one function and
+keeps fetching, hashing and packing by itself, because moving the rest is still the larger change.
+The MariaDB recipes are the remaining writers of `upstream.*` outside `declare`, and they also write
+`stripped`, which nothing else does — folding them in belongs with P6, where the check that reads
+these fields is written.
 
 ### [ ] P2 — PHP: one extension set, chosen once **(rule)**
 

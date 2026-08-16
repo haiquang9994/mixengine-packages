@@ -315,14 +315,12 @@ def describe(
         },
         "provides": provides,
     }
-    if added:
-        # Named rather than implied: this archive is not byte-for-byte what upstream published, and
-        # somebody comparing hashes a year from now should find the difference written down here
-        # instead of deducing it.
-        manifest["upstream"]["added"] = added
-    if removed:
-        manifest["upstream"]["removed"] = removed
-    return manifest
+    # Named rather than implied: this archive is not byte-for-byte what upstream published, and
+    # somebody comparing hashes a year from now should find the difference written down here instead
+    # of deducing it. `borrow.declare` also checks the claim against the tree before writing it —
+    # this recipe is the one that had the fields first, and it is not the one that gets to keep its
+    # own copy of what they mean.
+    return borrow.declare(tree, manifest, added, removed)
 
 
 PROBE = """
