@@ -157,11 +157,28 @@ jobs:
           # the directory of the image being loaded before anything else, so a DLL copied here needs
           # no rpath, no install name and no re-signing. There is no $ORIGIN to set because the
           # behaviour $ORIGIN emulates is already the default.
-          for dll in $(cygcheck ./tree/bin/redis-server.exe ./tree/bin/redis-cli.exe \
-                       | tr -d ' \r' | grep -i '^/' | grep -iv '^/cygdrive/c/Windows' | sort -u); do
-            echo "bundling $dll"
-            cp "$dll" tree/bin/
+          # **`cygcheck` answers in Windows paths, not POSIX ones** — `D:\cygwin\bin\cygwin1.dll`,
+          # not `/usr/bin/cygwin1.dll`. A first attempt filtered on `^/`, matched nothing, bundled
+          # nothing, and the run still started the server because the Cygwin bin directory was on
+          # PATH. That is the shape of false pass this repository exists to refuse.
+          #
+          # The rule is by location and needs no list: anything under the Cygwin installation is
+          # ours to ship, anything else is the operating system's. That also excludes the
+          # `api-ms-win-core-*.dll` rows, which are API sets resolved by the loader from a schema —
+          # cygcheck prints them against whatever directory PATH happened to offer, here a Java
+          # toolcache, and copying one would ship a stranger's file to satisfy nothing.
+          root=$(cygpath -w / | sed 's/\\*$//')
+          echo "cygwin root: $root"
+          count=0
+          for win in $(cygcheck ./tree/bin/redis-server.exe ./tree/bin/redis-cli.exe \
+                       | tr -d ' \r' | sort -u); do
+            case "$win" in "$root"\\*) ;; *) continue ;; esac
+            posix=$(cygpath -u "$win")
+            echo "bundling $posix"
+            cp "$posix" tree/bin/
+            count=$((count + 1))
           done
+          [ "$count" -gt 0 ] || { echo "bundled nothing; cygcheck output was not understood"; exit 1; }
           ls -la tree/bin
 
       - name: run it as a native Windows process, from a moved directory with a space
@@ -177,8 +194,24 @@ jobs:
           $data = "C:\spike moved here\data"
           New-Item -ItemType Directory -Force -Path $data | Out-Null
 
+          # **PATH is cut down to the operating system, and without this the step proves nothing.**
+          # The previous run bundled no DLL at all and the server still started, because
+          # `D:\cygwin\bin` was on PATH and the loader found cygwin1.dll there. A user's machine has
+          # no Cygwin on it; this is what makes the bundled copy the only one available.
+          $env:PATH = "$env:SystemRoot\system32;$env:SystemRoot"
+          Get-ChildItem $moved | Select-Object Name, Length | Format-Table
+
           $port = 16399
           $conf = "$data\redis.conf"
+          # **Forward slashes, and the previous run is why.** Handed `C:\spike moved here\data\
+          # redis.conf`, the Cygwin runtime read it as a *relative* path and prefixed the working
+          # directory, so the server died on
+          #   can't open config file '/cygdrive/d/a/.../C:\spike moved here\data\redis.conf'
+          # That is the one warning redis-windows's README gives, measured rather than taken on
+          # trust. `C:/...` is accepted, and it is also what `Path.as_posix()` already produces —
+          # the same spelling `redis.py` writes into the `dir` directive today, so a recipe has one
+          # rule for both rather than a special case.
+          $slashed = $conf -replace '\\','/'
           # An array rather than a here-string, and the reason is the two syntaxes cannot both be
           # satisfied: PowerShell requires the closing `"@` at column 0, and a line at column 0
           # ends a YAML block scalar. The first push of this file was unparseable for exactly that.
@@ -192,8 +225,9 @@ jobs:
           )
 
           Get-Content $conf
+          Write-Output "argument: $slashed"
           $server = Start-Process -PassThru -NoNewWindow -FilePath "$moved\redis-server.exe" `
-            -ArgumentList "`"$conf`"" -RedirectStandardOutput "$data\redis.log" `
+            -ArgumentList "`"$slashed`"" -RedirectStandardOutput "$data\redis.log" `
             -RedirectStandardError "$data\redis.err"
 
           $ok = $false
