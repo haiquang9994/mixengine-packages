@@ -119,7 +119,21 @@ jobs:
           echo "### 3. the core"
           make -C src -j"$(nproc)" CFLAGS="$FLAGS" \
             redis-server redis-sentinel redis-cli redis-benchmark redis-check-rdb redis-check-aof
-          make -C src install PREFIX="$(pwd)/../prefix"
+          echo "### 4. install without upstream's install target, which cannot run here"
+          # **`install: all` (src/Makefile:573), and `all` ends in `module_tests`.** That target
+          # links `tests/modules/*.so` against symbols the server exports, and a PE image has no
+          # undefined symbol resolved at load time — so `commandfilter.so` stops on `undefined
+          # reference to strncmp` however cleanly the server itself built. Naming goals avoided it
+          # for the build and cannot avoid it for `install`.
+          #
+          # Nothing is lost by not calling it. The goals above already produced all six binaries,
+          # three of them through upstream's own copy rule (`INSTALL redis-check-rdb` in the log is
+          # src/Makefile copying redis-server, because the server reads its own argv[0]). What
+          # `install` adds is `ln -sf`, and under Cygwin that writes a symlink only Cygwin resolves —
+          # unusable by the native Windows process MixEngine will start.
+          mkdir -p ../prefix/bin
+          cp src/redis-server.exe src/redis-cli.exe \
+             src/redis-check-rdb.exe src/redis-check-aof.exe ../prefix/bin/
           ls -la ../prefix/bin
 
       - name: what it imports
@@ -139,7 +153,6 @@ jobs:
         run: |
           mkdir -p tree/bin
           cp prefix/bin/*.exe tree/bin/
-          rm -f tree/bin/redis-benchmark.exe tree/bin/redis-sentinel.exe
           # Beside the .exe, which is the whole of the "rewrite" on Windows: the PE loader searches
           # the directory of the image being loaded before anything else, so a DLL copied here needs
           # no rpath, no install name and no re-signing. There is no $ORIGIN to set because the
