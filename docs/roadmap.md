@@ -1235,6 +1235,42 @@ on the branch, not merely past target 1206 — the last run on `REL_19_STABLE` f
 `pg_amcheckCheck`. And EDB has to still not publish one, because a borrow beats a build here as
 everywhere else.
 
+#### Re-asked 2026-08-16: still shut, and one of the conditions was watching the wrong machine
+
+**The release.** `versions.json` names 18 as the newest major and lists no 19 at all — 19 is at
+**Beta 3**, released 2026-08-13, the same day as the five minors, with no RC yet and GA planned for
+September. `series()` reads that document, so until it gains a 19 row there is nothing for a recipe
+to offer. This is a wait of weeks, not of anything anybody here has to do.
+
+**The borrow.** Still none: `postgresql-18.0-1-windows-arm64-binaries.zip` answers 403 where the
+`windows-x64` name of the same version answers 200. A build is still the route.
+
+**The buildfarm, which is the condition that needed correcting.** The two animals have names, and
+writing them down is most of what makes this cheap to ask again — `unicorn` (approved 2025-12-12,
+Windows 11 Pro 10.0.26100, MSVC 19.50.35718, arch `aarch64`) and `hoatzin` (2026-03-16, Windows 11,
+msvc 19.50.35725, arch **`ARM`** — which is why a search of the member list for `arm64` finds only
+one of the two).
+
+The condition as written points at `unicorn`, and **`unicorn` is not a fair witness**. Its last green
+run on any branch was 208 days ago; the 49 runs since have all failed, 44 of them at
+`pg_amcheckCheck`, on `master` exactly as on `REL_19_STABLE`. And each takes 13 to 17 hours where
+`hoatzin` does the same work in 45 minutes. A failure that behaves identically on every branch and
+takes twenty times as long as the same platform needs is measuring the machine, not the branch.
+
+`hoatzin` is what the platform actually looks like: **44 of 53 `master` runs green**, ~45 minutes
+each, the newest 16 days ago. So Windows/ARM64 MSVC compiles PostgreSQL *and passes its whole test
+suite* — a stronger statement than P7b could make, and the reason to expect 19 to work rather than
+merely to hope it. `msvc_gendef.pl` accepting `aarch64` was the gate; on `master` it is open and
+everything behind it is green too.
+
+But `hoatzin` has never reported on `REL_19_STABLE`, or on any stable branch. So the condition as
+written **cannot be met by evidence that exists** — not because 19 is broken there but because the
+only animal reporting on 19 is the broken one. The question to re-ask is therefore not "is `unicorn`
+green on 19" but **"is there a green `REL_19_STABLE` run from an animal that is also green on
+`master`"** — `hoatzin` picking up the branch, or `unicorn` recovering. If 19 ships and neither has,
+then the first green run of `postgres_build.py` is itself the evidence, and it costs one
+`workflow_dispatch` to find out.
+
 ### [ ] P8 — Redis and Memcached
 
 **The evaluation here is likely to answer "build", and on the platform that usually borrows.**

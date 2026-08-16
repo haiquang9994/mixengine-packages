@@ -602,9 +602,9 @@ Nobody publishes a Windows-on-ARM PostgreSQL, and the plan was to do what `maria
 does for three cells nobody publishes: compile it natively. Asked instead of assumed, **PostgreSQL
 does not build there** on any version MixEngine offers.
 
-The evidence is upstream's own. The buildfarm has two Windows/ARM64 MSVC machines, approved in
-December 2025 and March 2026; the newer reports on `master` only, and the older tried the stable
-branches once. On 18 and 17 the build stops at target **1206 of 2047**, with 1205 objects already
+The evidence is upstream's own. The buildfarm has two Windows/ARM64 MSVC machines — `unicorn`,
+approved December 2025, and `hoatzin`, March 2026; the newer reports on `master` only, and the older
+tried the stable branches once. On 18 and 17 the build stops at target **1206 of 2047**, with 1205 objects already
 compiled for `/MACHINE:ARM64` — not at a compiler, an intrinsic or an atomic, but at
 `src/tools/msvc_gendef.pl`, the Perl script that generates the export file the server's extensions
 link against, whose usage line reads `arch: x86 | x86_64` and which exits rather than accept
@@ -615,6 +615,13 @@ nobody knows what target 1207 does, because upstream has never got past 1206 on 
 patch carried here would be this repository claiming a platform its publisher does not test, on
 evidence that stops exactly where the evidence stops. So the cell stays empty, the index says so,
 and it opens when PostgreSQL 19 ships.
+
+**That it will open is an observation rather than a hope.** `hoatzin` is green on `master` in 44 of
+its 53 runs, ~45 minutes each — so once `msvc_gendef.pl` accepts `aarch64`, everything behind it
+compiles on Windows/ARM64 and passes the whole test suite. What is missing is the branch, not the
+platform: 19 was at Beta 3 when this was last checked, and no healthy animal reports on
+`REL_19_STABLE` yet. See P7c in [docs/roadmap.md](docs/roadmap.md) for the conditions and the date
+they were last asked.
 
 ## Repack, do not rearrange
 
