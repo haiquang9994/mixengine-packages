@@ -85,10 +85,27 @@ jobs:
           # against symbols exported by redis-server. A PE image has no such thing as an undefined
           # symbol resolved at load time, so that target cannot work here — and naming goals avoids
           # it without a patch, which `install` then needs all six of.
+          # Three stages rather than one line, because the first attempt piped everything through
+          # `tail -40` and threw away the only part that mattered. Each stage answers one question.
+
+          echo "### 1. does mkreleasehdr.sh run here"
+          # `src/Makefile:19` is `release_hdr := $(shell sh -c './mkreleasehdr.sh')` — a parse-time
+          # assignment, so release.h is supposed to exist before the first object compiles. It did
+          # not, and `release.c` stopped the build. Run it by hand to find out whether the script
+          # fails or whether something later removes what it wrote.
+          ls -l src/mkreleasehdr.sh
+          ( cd src && sh ./mkreleasehdr.sh ) ; echo "mkreleasehdr.sh exit=$?"
+          ls -l src/release.h && cat src/release.h
+
+          echo "### 2. which dependency fails"
+          # `persist-settings` builds these with a leading `-`, so make reported Error 2 and carried
+          # on to a link that could not have worked. Without the `-`, the failing one names itself.
+          make -C deps -j"$(nproc)" hiredis linenoise lua hdr_histogram fpconv xxhash tre
+
+          echo "### 3. the core"
           make -C src -j"$(nproc)" \
             CFLAGS='-D_GNU_SOURCE -Wno-char-subscripts' \
-            redis-server redis-sentinel redis-cli redis-benchmark redis-check-rdb redis-check-aof \
-            2>&1 | tail -40
+            redis-server redis-sentinel redis-cli redis-benchmark redis-check-rdb redis-check-aof
           make -C src install PREFIX="$(pwd)/../prefix"
           ls -la ../prefix/bin
 
