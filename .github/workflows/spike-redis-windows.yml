@@ -49,6 +49,27 @@ jobs:
         with:
           packages: make gcc-core gcc-g++ pkg-config
 
+      - name: where Cygwin keeps its licences
+        shell: bash --noprofile --norc -o igncr -eo pipefail {0}
+        run: |
+          # `relocate.bundled_licences` treats a bundled library whose licence text cannot be found
+          # as a **failure**, not a warning — redistributing cygwin1.dll under LGPLv3 obliges the
+          # archive to carry its terms. `licence_texts` knows Homebrew kegs and dpkg; it knows
+          # nothing about Cygwin, and guessing the layout would cost a ten-minute build round to
+          # find out. This step costs one minute and runs before the build.
+          cygcheck -f /usr/bin/cygwin1.dll
+          cygcheck -f /usr/bin/cyggcc_s-seh-1.dll
+          echo "=== /usr/share/doc"
+          ls /usr/share/doc 2>/dev/null | head -20 || echo "absent"
+          echo "=== /usr/share/doc/Cygwin"
+          ls /usr/share/doc/Cygwin 2>/dev/null | head -30 || echo "absent"
+          echo "=== /usr/share/licenses"
+          ls /usr/share/licenses 2>/dev/null | head -30 || echo "absent"
+          for package in $(cygcheck -f /usr/bin/cygwin1.dll /usr/bin/cyggcc_s-seh-1.dll | sort -u); do
+            echo "=== package $package"
+            find /usr/share/doc /usr/share/licenses -maxdepth 2 -iname "*${package%%-*}*" 2>/dev/null | head -10
+          done
+
       - name: what this toolchain is
         shell: bash --noprofile --norc -o igncr -eo pipefail {0}
         run: |
