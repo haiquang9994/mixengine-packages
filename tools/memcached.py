@@ -44,16 +44,18 @@ instead, the Unix artifact is one file that imports nothing outside the C runtim
 SHA-256 and checked, which is one better than :mod:`ruby_unix` does for the three libraries it pins,
 and it costs three lines.
 
-*On Windows nothing in :mod:`relocate` says anything, and that is worth knowing rather than
-assuming.* ``relocate.kind`` decides what a file is from its first four bytes and answers ``None``
-for a PE, so ``machine_files`` finds nothing in a Windows tree and ``verify`` inspects nothing —
-the call does not fail, it *passes without looking*. What replaces it here is two checks that are
-not a model of the loader: :func:`imports` reads the import table with ``cygcheck`` at pack time and
-refuses anything that is neither in the Cygwin tree nor under ``%SystemRoot%``, and :func:`smoke`
-then starts the binary with :func:`borrow.clean_path`, which is the loader's own verdict. Teaching
-:mod:`relocate` to read PE would turn a no-op into a real check inside seven other recipes at once —
-Caddy, Node, Python, nginx, MariaDB and PostgreSQL all call ``verify`` unconditionally on Windows —
-so it is left alone here deliberately, and that is the whole reason ``cygcheck`` lives in this file.
+*On Windows this file answers the dependency question itself, and by now that is a duplication
+rather than a necessity.* It was written when :mod:`relocate` could not read a PE at all —
+``relocate.kind`` judged a file by its first four bytes, answered ``None`` for ``MZ``, and ``verify``
+therefore *passed without looking* at a Windows tree. So two checks were written here instead:
+:func:`imports` reads the import table with ``cygcheck`` at pack time and refuses anything that is
+neither in the Cygwin tree nor under ``%SystemRoot%``, and :func:`smoke` then starts the binary with
+:func:`borrow.clean_path`, which is the loader's own verdict. Redis has since taught :mod:`relocate`
+to parse the import table out of the file, so the same question now has two answers in this
+repository — and the first Windows build failed on the difference: the parser knows that
+``api-ms-win-*`` is a virtual name and ``cygcheck`` does not. :func:`strays` was taught the rule
+separately. Collapsing the two is worth doing and is not a bug fix, so it is written down rather
+than smuggled in here.
 
 *No TLS, no SASL, no proxy.* Each is a ``configure`` flag, a dependency and a feature of a cache
 somebody else operates. MixEngine supervises one instance on loopback for one developer.
@@ -466,12 +468,22 @@ def strays(binary: Path) -> list[str]:
     A match on the file name rather than on the path, because ``cygcheck`` resolves a name the way
     its own environment does and this tree is not on it — so the copy it names may be Cygwin's while
     the copy the loader will use is the one sitting beside the ``.exe``.
+
+    **API sets are passed over by name, because they are not files.** ``api-ms-win-*`` and
+    ``ext-ms-*`` are virtual names the loader resolves from a schema inside the operating system;
+    no directory has to hold them and ``%SystemRoot%`` generally does not. ``cygcheck`` does not
+    know that and resolves them like anything else — through its own ``PATH``, which on a GitHub
+    runner lands on the private copies the Java toolcache and the Windows SDK ship in their own
+    ``bin`` directories. Judged by location, all 27 of memcached's read as "outside the tree" and
+    the first real Windows build died on them with nothing wrong with it. Copying one would ship a
+    stranger's file to satisfy an import that was never going to open a file.
     """
     system = Path(os.environ.get("SystemRoot", r"C:\Windows"))
     beside = {path.name.lower() for path in binary.parent.iterdir() if path.is_file()}
     problems = []
     for path, where in imports(binary):
-        if path.name.lower() in beside:
+        name = path.name.lower()
+        if name in beside or name.startswith(relocate.API_SET_PREFIXES):
             continue
         try:
             path.resolve().relative_to(system.resolve())
