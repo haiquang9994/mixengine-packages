@@ -20,9 +20,9 @@ a terminate.
 
 *What that cell costs, said here rather than found in a tree.* A Cygwin binary links
 ``cygwin1.dll``, so the Windows archive is **two files rather than one** and the second is
-**LGPLv3** — a licence text to ship and a source route to offer, both of which :func:`licences`
-does, and a "this imports nothing outside the C runtime" claim that holds for the four Unix cells
-and not for this one.
+**LGPLv3** — a licence text to ship and a source route to offer, both of which
+:func:`relocate.bundled_licences` does, and a "this imports nothing outside the C runtime" claim
+that holds for the four Unix cells and not for this one.
 
 *And ``windows``/``aarch64`` stays empty*, for the reason ``nginx.py`` states about its own: Cygwin
 has no aarch64 port — the toolchain and runtime are not upstream and package porting has not begun
@@ -44,18 +44,23 @@ instead, the Unix artifact is one file that imports nothing outside the C runtim
 SHA-256 and checked, which is one better than :mod:`ruby_unix` does for the three libraries it pins,
 and it costs three lines.
 
-*On Windows this file answers the dependency question itself, and by now that is a duplication
-rather than a necessity.* It was written when :mod:`relocate` could not read a PE at all —
-``relocate.kind`` judged a file by its first four bytes, answered ``None`` for ``MZ``, and ``verify``
-therefore *passed without looking* at a Windows tree. So two checks were written here instead:
-:func:`imports` reads the import table with ``cygcheck`` at pack time and refuses anything that is
-neither in the Cygwin tree nor under ``%SystemRoot%``, and :func:`smoke` then starts the binary with
-:func:`borrow.clean_path`, which is the loader's own verdict. Redis has since taught :mod:`relocate`
-to parse the import table out of the file, so the same question now has two answers in this
-repository — and the first Windows build failed on the difference: the parser knows that
-``api-ms-win-*`` is a virtual name and ``cygcheck`` does not. :func:`strays` was taught the rule
-separately. Collapsing the two is worth doing and is not a bug fix, so it is written down rather
-than smuggled in here.
+*The Windows dependency question is :mod:`relocate`'s, and this file used to answer it a second
+time.* It had to, once: ``relocate.kind`` judged a file by its first four bytes, answered ``None``
+for ``MZ``, and ``verify`` therefore *passed without looking* at a Windows tree — so ninety lines of
+``cygcheck`` were written here instead, and they worked. Then Redis taught :mod:`relocate` to parse
+the import table out of the file itself, and one question had two answers in one repository. **The
+difference cost a red build within a day.** The parser knows ``api-ms-win-*`` is a virtual name the
+loader resolves from a schema; ``cygcheck`` does not, and resolves all twenty-seven of them through
+its own ``PATH`` into a Java toolcache. The rule was then taught here separately, which fixed the
+build and left the divergence in place. So the second answer is gone: this recipe calls
+:func:`relocate.bundle` with ``libdir="bin"`` and :func:`relocate.verify` exactly as ``redis.py``
+does, and what is left of Cygwin in this file is the *toolchain* — a compiler reached by absolute
+path — rather than a second opinion about PE.
+
+The mechanism that survived is also the better one, and not by much of an argument: ``cygcheck``
+exists only where Cygwin is installed, which is to say only on the build machine, and answers with
+what *that* machine's ``PATH`` offers rather than with what the file requires. Reading the import
+table needs neither.
 
 *No TLS, no SASL, no proxy.* Each is a ``configure`` flag, a dependency and a feature of a cache
 somebody else operates. MixEngine supervises one instance on loopback for one developer.
@@ -155,19 +160,14 @@ PRUNE = ("include", "share/man")
 OWN_LICENCES = ("COPYING", "LICENSE", "LICENSE.bipbuffer", "LICENSE.itoa_ljust")
 LIBEVENT_LICENCES = ("LICENSE",)
 
-# Where Cygwin publishes the source of what it ships. Named in the tree rather than only here,
-# because LGPLv3 asks the recipient to be able to get it and a reader holding the archive has this
-# file and not this recipe. Only the Windows cell ever reaches it.
-CYGWIN_SOURCE = "https://cygwin.com/pub/cygwin/x86_64/release"
-
 
 def cygwin(script: str, capture: bool = False, stdin: str | None = None,
            timeout: int = 3600) -> str:
     """Run *script* in Cygwin's own bash, reached by absolute path rather than through ``PATH``.
 
     A **login** shell, so that ``/etc/profile`` composes the POSIX ``PATH`` the toolchain expects —
-    which is what makes ``configure``, ``make`` and ``cygcheck`` resolvable without Cygwin appearing
-    on the ``PATH`` of whatever started this recipe. See :data:`CYGWIN_ROOT` for why that matters.
+    which is what makes ``configure``, ``make`` and ``gcc`` resolvable without Cygwin appearing on
+    the ``PATH`` of whatever started this recipe. See :data:`CYGWIN_ROOT` for why that matters.
 
     ``SHELLOPTS`` is removed from the environment rather than merely left unset by the workflow. A
     recipe run by hand out of a Cygwin shell inherits it the same way a step would, and what it
@@ -385,187 +385,17 @@ def build(source_tree: Path, prefix: Path, libevent_prefix: Path) -> list[str]:
     return [f"./configure --prefix=… --with-libevent=… (libevent {LIBEVENT['version']}, static)"]
 
 
-# ---------------------------------------------------------------------------- the Windows cell ---
-#
-# What follows does for one cell what :mod:`relocate` does for the other four, and lives here rather
-# than there for the reason the module docstring gives: `relocate.verify` is a no-op on Windows
-# inside seven other recipes, and making it stop being one is a change to all seven.
-
-
-def imports(binary: Path) -> list[tuple[Path, str]]:
-    r"""Everything *binary* loads, transitively, as ``(the Windows path, the same path POSIX)``.
-
-    ``cygcheck`` is Cygwin's ``ldd`` and walks the PE import table. It prints **Windows** paths —
-    ``C:\cygwin64\bin\cygwin1.dll``, never ``/usr/bin/cygwin1.dll`` — which is the detail that cost
-    the spike a run: a filter written as ``grep '^/'`` matched nothing, the tree was packed with no
-    DLL in it at all, and it still passed on the runner that had Cygwin on ``PATH``.
-
-    Both spellings are answered because both are needed: the Windows one is what :func:`shutil.copy2`
-    takes, and the POSIX one is what decides whether a file is *inside the Cygwin tree* — which is
-    the mount table's answer (``/usr/bin/…`` for inside, ``/cygdrive/…`` for out) rather than a
-    string comparison's. An earlier attempt compared against ``cygpath -w /`` through ``awk -v``,
-    which expands escape sequences in the value it is handed: ``C:\cygwin64`` arrived as
-    ``C:cygwin64`` and matched nothing.
-    """
-    # `|| true` because `cygcheck` reports a DLL it cannot resolve by exiting non-zero as well as by
-    # printing it, and an unresolvable import is a finding this should read rather than a reason to
-    # stop reading. Nothing is swallowed: the two checks below are on the *content* of the answer.
-    printed = cygwin(f"cygcheck {shlex.quote(posix(binary))} || true", capture=True)
-    windows: list[str] = []
-    for line in printed.splitlines():
-        entry = line.strip()
-        if re.match(r"^[A-Za-z]:\\", entry) and entry not in windows:
-            windows.append(entry)
-    if not windows:
-        raise SystemExit(
-            f"cygcheck named no import at all for {binary.name}, which cannot be true of a PE. Its "
-            f"output was:\n{printed}"
-        )
-
-    converted = cygwin("cygpath -u -f -", capture=True, stdin="\n".join(windows) + "\n")
-    posix_paths = [line.strip() for line in converted.splitlines() if line.strip()]
-    if len(posix_paths) != len(windows):
-        raise SystemExit(
-            f"cygpath answered for {len(posix_paths)} path(s) and cygcheck named {len(windows)}; "
-            f"the two lists cannot be paired up"
-        )
-    return list(zip((Path(entry) for entry in windows), posix_paths))
-
-
-def bundle(binary: Path) -> list[tuple[Path, str]]:
-    """Copy every DLL that came out of the Cygwin tree in beside *binary*.
-
-    **Beside the ``.exe`` is the whole of the rewrite on Windows.** The PE loader searches the
-    directory of the image being loaded first, so a DLL copied there needs no rpath, no install name
-    and no re-signing — what ``$ORIGIN`` emulates on ELF is already the default, and there is nothing
-    for :func:`relocate.rewrite` to have an opinion about.
-    """
-    carried = [(path, where) for path, where in imports(binary) if not where.startswith("/cygdrive/")]
-    if not carried:
-        # The failure the spike hid for a whole run, made loud here instead of three steps later: a
-        # Cygwin binary links `cygwin1.dll` by definition, so an empty list is a parse that went
-        # wrong and never a tree that needed nothing.
-        raise SystemExit(
-            f"cygcheck found nothing from the Cygwin tree in {binary.name}. A Cygwin binary links "
-            f"cygwin1.dll by definition, so this is an import list that was not parsed."
-        )
-    for source_path, where in carried:
-        destination = binary.parent / source_path.name
-        shutil.copy2(source_path, destination)
-        print(f"bundling {where} ({source_path.stat().st_size:,} bytes)")
-    return carried
-
-
-def strays(binary: Path) -> list[str]:
-    """Anything *binary* loads that is neither this tree's nor the operating system's.
-
-    Not a proof that the tree is closed — :func:`smoke` gets that from the loader itself, by starting
-    the binary on a :func:`borrow.clean_path` that has no build environment on it, which is the only
-    thing that would have caught the spike's first false pass. This catches the different hazard:
-    a DLL picked up from *somewhere else on the build machine*, which would be copied nowhere and
-    found nowhere.
-
-    A match on the file name rather than on the path, because ``cygcheck`` resolves a name the way
-    its own environment does and this tree is not on it — so the copy it names may be Cygwin's while
-    the copy the loader will use is the one sitting beside the ``.exe``.
-
-    **API sets are passed over by name, because they are not files.** ``api-ms-win-*`` and
-    ``ext-ms-*`` are virtual names the loader resolves from a schema inside the operating system;
-    no directory has to hold them and ``%SystemRoot%`` generally does not. ``cygcheck`` does not
-    know that and resolves them like anything else — through its own ``PATH``, which on a GitHub
-    runner lands on the private copies the Java toolcache and the Windows SDK ship in their own
-    ``bin`` directories. Judged by location, all 27 of memcached's read as "outside the tree" and
-    the first real Windows build died on them with nothing wrong with it. Copying one would ship a
-    stranger's file to satisfy an import that was never going to open a file.
-    """
-    system = Path(os.environ.get("SystemRoot", r"C:\Windows"))
-    beside = {path.name.lower() for path in binary.parent.iterdir() if path.is_file()}
-    problems = []
-    for path, where in imports(binary):
-        name = path.name.lower()
-        if name in beside or name.startswith(relocate.API_SET_PREFIXES):
-            continue
-        try:
-            path.resolve().relative_to(system.resolve())
-        except (ValueError, OSError):
-            problems.append(f"{binary.name}: {where} is neither in the tree nor under {system}")
-    return problems
-
-
-def cygwin_licences(carried: list[tuple[Path, str]], into: Path) -> list[str]:
-    """Ship the licence of every DLL bundled out of the Cygwin tree, and a route to its source.
-
-    **``cygwin1.dll`` is LGPLv3, which is not the shape of any other licence in this archive.** It
-    asks for the text, and it asks that whoever receives the binary can obtain the library's source
-    and relink against a modified one. The second half answers itself here — the DLL is a separate
-    file beside the ``.exe`` and can be replaced with another — so what is left is the text and a
-    place to get the source, and both are written into the tree rather than promised in a README.
-
-    A bundled file whose licence cannot be found is a failure and not a warning, which is the rule
-    :func:`relocate.bundled_licences` already sets for every library bundled on the Unix cells.
-    """
-    doc, licences_dir = (
-        Path(line.strip()) for line in
-        cygwin("cygpath -w /usr/share/doc; cygpath -w /usr/share/licenses", capture=True).splitlines()
-    )
-
-    shipped, unlicensed, rows = [], [], []
-    for source_path, where in carried:
-        # `cygcheck -f` answers with the package a file was installed by, which is the only thing
-        # that can be asked — a DLL carries no licence of its own and Cygwin files them per package.
-        package = cygwin(f"cygcheck -f {shlex.quote(where)} || true", capture=True).strip().splitlines()
-        package = package[0].strip() if package else ""
-        if not package:
-            raise SystemExit(f"cygcheck cannot say which package installed {where}")
-        bare = re.sub(r"-\d[\w.]*-\d+$", "", package)
-        rows.append(f"{source_path.name}\t{where}\t{package}")
-
-        found = []
-        for place in (doc / bare, doc / bare.capitalize(), doc / "Cygwin", licences_dir / bare):
-            if not place.is_dir():
-                continue
-            for pattern in ("LICENSE*", "LICENCE*", "COPYING*", "COPYRIGHT*", "CYGWIN_LICENSE*"):
-                found += [text for text in sorted(place.glob(pattern)) if text.is_file()]
-        if not found:
-            unlicensed.append(f"{source_path.name} (from {package}; looked in {doc / bare} and beside it)")
-            continue
-        for text in found:
-            shutil.copy2(text, into / f"{bare}-{text.name}")
-            shipped.append(f"{bare} {text.name}")
-
-    if unlicensed:
-        raise SystemExit(
-            "no licence text was found for a bundled DLL, and this archive may not be redistributed "
-            "without one: " + "; ".join(unlicensed)
-        )
-
-    (into / "CYGWIN-SOURCE.txt").write_text(
-        "The Windows archive links the Cygwin runtime, which is LGPLv3. Nothing in it is patched: "
-        "each DLL below is the file the named Cygwin package installs, copied beside the binary "
-        "unmodified.\n\n"
-        "file\tinstalled from\tpackage\n" + "\n".join(rows) + "\n\n"
-        "The corresponding source for each package is published by Cygwin at\n"
-        f"  {CYGWIN_SOURCE}/<package>/\n"
-        "as a <package>-<version>-src.tar.xz beside the binary package, and can also be fetched "
-        "with Cygwin's own setup program using --download --include-source. The runtime's history "
-        "is at\n"
-        "  https://sourceware.org/git/?p=newlib-cygwin.git\n",
-        encoding="utf-8",
-    )
-    return shipped
-
-
-def licences(tree: Path, source_tree: Path, libevent_source: Path,
-             carried: list[tuple[Path, str]] = ()) -> None:
-    """Ship the licence of memcached, of the library compiled into it, and of anything bundled.
+def licences(tree: Path, source_tree: Path, libevent_source: Path) -> None:
+    """Ship the licence of memcached and of the library compiled into it.
 
     Each requires its text to travel with the binary, so this is a condition of redistributing the
     archive rather than tidiness — and libevent is the half a walk over the *tree* would miss
-    entirely, because after a static link there is no file in the archive that came from it.
+    entirely, because after a static link there is no file in the archive that came from it. That is
+    the whole of why this function exists beside :func:`relocate.bundled_licences` rather than being
+    replaced by it: everything that walk can see is a *file*, and these two are not files here.
 
-    *carried* is what :func:`bundle` copied in on the Windows cell and is empty everywhere else. It
-    is the opposite half of the same problem: a file that **is** in the tree, under its own licence
-    rather than memcached's, and the one licence here that asks for more than its text.
+    Whatever the Windows cell bundles is the other half and is licensed there, from the origin
+    :func:`relocate.bundle` answers with.
     """
     into = tree / "licenses"
     into.mkdir(exist_ok=True)
@@ -587,9 +417,6 @@ def licences(tree: Path, source_tree: Path, libevent_source: Path,
             )
         shutil.copy2(text, into / f"libevent-{name}")
         shipped.append(f"libevent {name}")
-
-    if carried:
-        shipped += cygwin_licences(list(carried), into)
 
     print(f"shipping {len(shipped)} licence file(s): {', '.join(shipped)}")
 
@@ -706,7 +533,7 @@ def smoke(tree: Path, version: str, provides: dict[str, str]) -> dict:
     # found cygwin1.dll there. `--version` below is where that comes out, as 0xC0000135.
     path = borrow.clean_path(memcached.parent)
 
-    problems = strays(memcached) if WINDOWS else relocate.verify(elsewhere)
+    problems = relocate.verify(elsewhere)
     for problem in problems:
         print(f"error: {problem}", file=sys.stderr)
     if problems:
@@ -815,16 +642,29 @@ def main() -> None:
     # The Windows cell is the only one where anything outside the payload has to travel with it, and
     # the difference from the Unix cells is not the bundling but *what is left over*: after a static
     # libevent those archives are one file, and this one is two.
-    carried: list[tuple[Path, str]] = []
+    #
+    # **`libdir="bin"`, not `lib`, and that is the whole of the rewrite here.** The PE loader searches
+    # the directory of the image being loaded first, so a DLL copied beside the `.exe` needs no
+    # rpath, no install name and no re-signing — the copy *is* the redirection. `search` is the
+    # Cygwin installation, which is where the runtime comes from and the one place `verify`
+    # deliberately will not look afterwards.
     if WINDOWS:
-        carried = bundle(tree / provides["memcached"])
+        bundled = relocate.bundle(tree, libdir="bin", search=[CYGWIN_ROOT / "bin"])
+        if not bundled:
+            raise SystemExit(
+                "nothing was bundled, and a Cygwin build imports cygwin1.dll by construction — so "
+                "the import table was not read rather than the archive being self-contained. A "
+                "tree that needed nothing and a tree nothing looked at are the same shape here."
+            )
+        print(f"bundled {len(bundled)} librar{'y' if len(bundled) == 1 else 'ies'}: "
+              f"{', '.join(sorted(bundled))}")
+        relocate.bundled_licences(tree, bundled)
         asked.append(
-            "built with Cygwin's toolchain; "
-            + ", ".join(sorted(path.name for path, _ in carried))
+            "built with Cygwin's toolchain; " + ", ".join(sorted(bundled))
             + " copied in beside the binary (LGPLv3 — see licenses/CYGWIN-SOURCE.txt)"
         )
 
-    licences(tree, source_tree, libevent_source, carried)
+    licences(tree, source_tree, libevent_source)
 
     manifest = {
         "schema": 1,
@@ -848,7 +688,10 @@ def main() -> None:
     manifest["smoke"] = smoke(tree, version, provides)
     print(f"built from {url}")
 
-    borrow.publish(tree, manifest, arguments.out, "tar")
+    # `zip` on Windows and `tar.zst` everywhere else, which is `redis.py`'s split and was this
+    # recipe's one remaining disagreement with it. The recipient of the Windows archive is a Windows
+    # machine, where a `.zip` opens in the shell with nothing installed and a `.tar.zst` does not.
+    borrow.publish(tree, manifest, arguments.out, "zip" if operating_system == "windows" else "tar")
     shutil.rmtree(work, ignore_errors=True)
 
 

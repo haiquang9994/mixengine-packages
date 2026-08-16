@@ -803,6 +803,12 @@ def floor(tree: Path, directories: Sequence[str] = BINARY_DIRECTORIES) -> tuple[
 # `COPYING` and every suffix of each.
 LICENCE_GLOBS = ("LICENSE*", "LICENCE*", "COPYING*", "COPYRIGHT*", "copyright")
 
+# Where Cygwin publishes the source of everything it ships. Written *into the tree* by
+# `cygwin_source_note` rather than only stated here, because LGPLv3 asks that whoever receives the
+# binary be able to obtain the library's source, and a reader holding the archive has the tree and
+# not this file.
+CYGWIN_SOURCE = "https://cygwin.com/pub/cygwin/x86_64/release"
+
 
 def dpkg_owner(path: Path) -> str | None:
     """Which Debian package installed this file, if the machine can say."""
@@ -818,13 +824,13 @@ def dpkg_owner(path: Path) -> str | None:
     return result.stdout.split(":", 1)[0].strip() or None
 
 
-def cygwin_owner(root: Path, path: Path) -> str | None:
-    """Which Cygwin package installed this file, with its version cut off.
+def cygwin_package(root: Path, path: Path) -> str | None:
+    """Which Cygwin package installed this file, exactly as ``cygcheck -f`` names it.
 
-    ``cygcheck -f`` answers ``cygwin-3.6.10-1`` and ``libgcc1-14.4.0-1``; ``/usr/share/doc`` is
-    filed under the bare name. This is `dpkg_owner` in the other dialect, and it is reached through
-    the installation the library came from rather than through ``PATH`` — the recipe may be running
-    with Cygwin deliberately hidden from it.
+    ``cygwin-3.6.10-1``, ``libgcc1-14.4.0-1`` — version and release included, which is the spelling
+    that identifies *the* source tarball rather than the project it came from. Reached through the
+    installation the library came from rather than through ``PATH``, because the recipe may be
+    running with Cygwin deliberately hidden from it.
     """
     try:
         result = subprocess.run([str(root / "bin" / "cygcheck.exe"), "-f", str(path)],
@@ -834,7 +840,16 @@ def cygwin_owner(root: Path, path: Path) -> str | None:
     if result.returncode != 0:
         return None
     named = result.stdout.strip().splitlines()
-    return re.sub(r"-\d.*$", "", named[0].strip()) if named else None
+    return named[0].strip() if named else None
+
+
+def cygwin_owner(root: Path, path: Path) -> str | None:
+    """The same package with its version cut off, which is how ``/usr/share/doc`` files it.
+
+    This is `dpkg_owner` in the other dialect.
+    """
+    package = cygwin_package(root, path)
+    return re.sub(r"-\d.*$", "", package) if package else None
 
 
 def cygwin_licences(real: Path) -> list[tuple[str, Path]]:
@@ -869,6 +884,49 @@ def cygwin_licences(real: Path) -> list[tuple[str, Path]]:
         if readme.is_file():
             found.append((owner, readme))
     return found
+
+
+def cygwin_source_note(licences: Path, bundled: dict[str, Path]) -> None:
+    """Say where the source of every bundled Cygwin DLL is published, in the archive itself.
+
+    **LGPLv3 asks for more than its text, and this is the half that a licence file does not cover.**
+    The recipient has to be able to obtain the library's source and relink against a modified one.
+    The second half answers itself on Windows — the DLL is a separate file beside the ``.exe`` and
+    can be replaced with another, which is the whole reason `bundle` puts it there — so what is left
+    is a route to the source, and naming the exact package is enough of one because nothing here is
+    patched: each file is the one its Cygwin package installs, copied over unmodified.
+
+    A package that cannot be named is a failure rather than an ``unknown`` in a table. The archive
+    would be redistributing an LGPL library while pointing at nothing, and a file that says so
+    politely is worse than a build that stops.
+    """
+    rows, unnamed = [], []
+    for name, origin in sorted(bundled.items()):
+        real = origin.resolve()
+        # `<root>/bin/cygwin1.dll` — the same walk `cygwin_licences` makes, and for the same reason:
+        # once `PATH` has been cut down, nothing else on the runner can say where Cygwin is.
+        package = cygwin_package(real.parent.parent, real)
+        if not package:
+            unnamed.append(f"{name} (from {origin})")
+            continue
+        rows.append(f"{name}\t{origin}\t{package}")
+    if unnamed:
+        raise SystemExit(
+            "cygcheck cannot say which package installed a bundled DLL, so this archive cannot "
+            "state where its source is published: " + "; ".join(unnamed)
+        )
+
+    (licences / "CYGWIN-SOURCE.txt").write_text(
+        "This archive links the Cygwin runtime, which is LGPLv3. Nothing in it is patched: each DLL "
+        "below is the file the named Cygwin package installs, copied beside the binary unmodified.\n"
+        "\nfile\tinstalled from\tpackage\n" + "\n".join(rows) + "\n\n"
+        "The corresponding source for each package is published by Cygwin at\n"
+        f"  {CYGWIN_SOURCE}/<package>/\n"
+        "as a <package>-<version>-src.tar.xz beside the binary package, and can also be fetched with "
+        "Cygwin's own setup program using --download --include-source. The runtime's history is at\n"
+        "  https://sourceware.org/git/?p=newlib-cygwin.git\n",
+        encoding="utf-8",
+    )
 
 
 def licence_texts(origin: Path) -> list[tuple[str, Path]]:
@@ -915,6 +973,9 @@ def bundled_licences(tree: Path, bundled: dict[str, Path]) -> None:
     several of those licences require their text to travel with them. That is a condition of
     redistributing the archive, not tidiness, so a library whose licence cannot be found is a failure
     and not a warning — a warning is what the last one was.
+
+    On Windows there is a second obligation and one licence that carries it, so
+    :func:`cygwin_source_note` runs as well. See its docstring for what a text alone does not answer.
     """
     if not bundled:
         return
@@ -934,6 +995,8 @@ def bundled_licences(tree: Path, bundled: dict[str, Path]) -> None:
     (licences / "BUNDLED.tsv").write_text(
         "library\tbuilt from\n" + "\n".join(rows) + "\n", encoding="utf-8"
     )
+    if sys.platform == "win32":
+        cygwin_source_note(licences, bundled)
     if unlicensed:
         raise SystemExit(
             "no licence text found for a bundled library, and the archive may not be redistributed "

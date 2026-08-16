@@ -125,19 +125,27 @@ licence asks for more than its text: the recipient must be able to obtain the li
 relink against a modified one. Dynamic linking answers the second half by itself, since the DLL sits
 beside the `.exe` and can be replaced; the first half is `licenses/CYGWIN-SOURCE.txt`, which names
 the exact package the file came from and where Cygwin publishes its source. Nothing is patched, so
-naming the package is enough to point at the corresponding source.
+naming the package is enough to point at the corresponding source. Both archives carry that file,
+which they did not always: it was written for memcached, and Redis — under the identical obligation
+— shipped the licence text without the source route until the two recipes were made one.
 
-**And on Windows `relocate.verify` proves nothing, which is worth stating rather than assuming.**
-`relocate.kind` reads a file's first four bytes and answers `None` for a PE, so `machine_files`
-finds nothing in a Windows tree and `verify` returns no problems — it does not fail, it *passes
-without looking*. Teaching it to read PE would turn that no-op into a real check inside seven other
-recipes at once, since Caddy, Node, Python, nginx, MariaDB and PostgreSQL all call it unconditionally
-on Windows, so `tools/memcached.py` answers the question locally instead: `cygcheck` reads the import
-table at pack time and refuses anything that is neither Cygwin's nor `%SystemRoot%`'s, and the smoke
-test then starts the binary on a `PATH` trimmed to the operating system. That last one is the check
-that matters, and it is not theoretical — the spike that measured this cell passed once with a tree
-containing no DLL at all, because Cygwin's own `bin` was on `PATH` and the loader found the library
-there. The ARM leg, which has no Cygwin, is where it came out, as `STATUS_DLL_NOT_FOUND`.
+**One question, two mechanisms, and the second one cost a red build.** `relocate.kind` used to read
+a file's first four bytes and answer `None` for a PE, so `machine_files` found nothing in a Windows
+tree and `verify` returned no problems — it did not fail, it *passed without looking*. Teaching it
+to read PE would have turned that no-op into a real check inside seven other recipes at once, so
+`tools/memcached.py` answered the question locally instead, with ninety lines of `cygcheck`. Redis
+then taught `relocate` to parse the import table out of the file, and the divergence lasted about a
+day: the parser knows `api-ms-win-*` is a virtual name the loader resolves from a schema, `cygcheck`
+does not, and memcached's first real Windows build died on twenty-seven of them that `cygcheck` had
+resolved through its own `PATH` into a Java toolcache. Both recipes now call `relocate.bundle` with
+`libdir="bin"` and `relocate.verify`, and reading the import table is the better half on its own
+merits: `cygcheck` exists only where Cygwin is installed — that is, only on the build machine — and
+answers with what *that* machine's `PATH` offers rather than with what the file requires.
+
+The check that matters is still the smoke test, which starts the binary on a `PATH` trimmed to the
+operating system, and it is not theoretical — the spike that measured this cell passed once with a
+tree containing no DLL at all, because Cygwin's own `bin` was on `PATH` and the loader found the
+library there. The ARM leg, which has no Cygwin, is where it came out, as `STATUS_DLL_NOT_FOUND`.
 
 Three smaller decisions, one per project and one shared.
 
