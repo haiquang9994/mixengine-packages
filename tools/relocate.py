@@ -824,23 +824,54 @@ def dpkg_owner(path: Path) -> str | None:
     return result.stdout.split(":", 1)[0].strip() or None
 
 
+def cygwin_posix(root: Path, path: Path) -> str:
+    r"""*path* spelled the way Cygwin spells it, asked of Cygwin's own mount table.
+
+    **``cygcheck -f`` looks its answer up in a database keyed by POSIX paths**, so a Windows spelling
+    finds nothing in it — and says so by printing nothing and exiting zero, which is the shape of
+    failure this repository keeps meeting. Redis 8.10.0 shipped because of it: its archive bundles
+    ``cyggcc_s-seh-1.dll`` and carries the Cygwin runtime's licence and not libgcc's, because the
+    owner lookup answered ``None`` and the only two documents left are the ones found by path.
+
+    Through ``cygpath`` rather than by string surgery, because the answer is the mount table and not
+    a rule: ``<root>\bin`` is mounted at ``/usr/bin`` and not at ``/bin``, and a drive letter is not
+    always ``/cygdrive``. By absolute path, because the caller may be running with Cygwin
+    deliberately kept off ``PATH``.
+    """
+    try:
+        answered = subprocess.run(
+            [str(root / "bin" / "cygpath.exe"), "-u", str(path)],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return str(path)
+    return answered.stdout.strip() or str(path)
+
+
 def cygwin_package(root: Path, path: Path) -> str | None:
     """Which Cygwin package installed this file, exactly as ``cygcheck -f`` names it.
 
     ``cygwin-3.6.10-1``, ``libgcc1-14.4.0-1`` — version and release included, which is the spelling
-    that identifies *the* source tarball rather than the project it came from. Reached through the
-    installation the library came from rather than through ``PATH``, because the recipe may be
-    running with Cygwin deliberately hidden from it.
+    that identifies *the* source tarball rather than the project it came from.
+
+    A failure here prints what the tool actually said. The previous version returned ``None`` for
+    every reason alike, so a lookup that had never once worked looked exactly like a library that
+    happened to have no package — and that is precisely what it was doing.
     """
+    spelling = cygwin_posix(root, path)
     try:
-        result = subprocess.run([str(root / "bin" / "cygcheck.exe"), "-f", str(path)],
+        result = subprocess.run([str(root / "bin" / "cygcheck.exe"), "-f", spelling],
                                 capture_output=True, text=True, timeout=120)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as refusal:
+        print(f"cygcheck -f {spelling} could not be run: {refusal}", file=sys.stderr)
         return None
-    if result.returncode != 0:
+    named = [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
+    if result.returncode != 0 or not named:
+        said = result.stderr.strip() or "(nothing on stderr)"
+        print(f"cygcheck -f {spelling} exited {result.returncode} and named no package: {said}",
+              file=sys.stderr)
         return None
-    named = result.stdout.strip().splitlines()
-    return named[0].strip() if named else None
+    return named[0]
 
 
 def cygwin_owner(root: Path, path: Path) -> str | None:
