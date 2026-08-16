@@ -56,6 +56,7 @@ import borrow  # noqa: E402  — siblings, and this directory is not importable 
 import eol  # noqa: E402
 import php_parity  # noqa: E402
 import php_smoke  # noqa: E402
+import relocate  # noqa: E402
 
 RELEASES = "https://windows.php.net/downloads/releases"
 ARCHIVES = f"{RELEASES}/archives"
@@ -353,6 +354,36 @@ def unreachable(tree: Path, deplister: Path) -> list[Path]:
     return [path for name, path in sorted(local.items()) if name not in reached]
 
 
+def stranded(tree: Path, doomed: set[str]) -> list[Path]:
+    """Everything below the root that imports a library `unreachable` is about to delete.
+
+    **The other half of the question that one deliberately does not ask.** It sweeps the root, on the
+    grounds that a reachability sweep is the wrong instrument for a library loaded by name at run
+    time — and that leaves the case of a run-time plugin whose *owner* is being removed.
+    ``lib/enchant/libenchant2_hunspell.dll`` is enchant's hunspell backend, 0.8 MB, and nothing
+    imports it because ``libenchant2.dll`` loads it by name. Dropping ``ext/php_enchant.dll`` orphans
+    ``libenchant2.dll`` and the three GLib DLLs under it; the backend stays, now importing two files
+    that are no longer in the archive. It shipped that way in every Windows PHP archive this recipe
+    has made, and `relocate.verify` named it the first minute it was allowed to look at this tree.
+
+    Read out of the file rather than asked of ``deplister``, which is deleted by the time this could
+    matter and which this repository has an answer of its own for now. To a fixed point, because a
+    provider can sit on another provider. Only below the root, because a root DLL that survived the
+    sweep cannot import an orphan by construction — if it did, the orphan would have been reached.
+    """
+    fallen: list[Path] = []
+    while True:
+        falling = [
+            path for path in relocate.machine_files(tree, ("",))
+            if path.parent != tree and path not in fallen
+            and any(name.lower() in doomed for name in relocate.pe_imports(path))
+        ]
+        if not falling:
+            return fallen
+        fallen += falling
+        doomed |= {path.name.lower() for path in falling}
+
+
 def prune(tree: Path, branch: str) -> list[str]:
     """Throw away everything this artifact does not need, and answer with what went.
 
@@ -406,10 +437,16 @@ def prune(tree: Path, branch: str) -> list[str]:
     deplister = tree / "deplister.exe"
     if deplister.exists():
         orphaned = unreachable(tree, deplister)
+        # Before they go, whatever below the root was only there to be loaded *by* them. See
+        # `stranded`: the sweep answers for the root and this answers for what the root was serving.
+        left_behind = stranded(tree, {path.name.lower() for path in orphaned})
         for path in orphaned:
             print(f"nothing left in the archive imports {path.name}")
             path.unlink()
-        removed += orphaned
+        for path in left_behind:
+            print(f"{path.relative_to(tree).as_posix()} was loaded by one of those, and goes too")
+            path.unlink()
+        removed += orphaned + left_behind
         deplister.unlink()
         removed.append(deplister)
     else:
@@ -513,10 +550,25 @@ def smoke(tree: Path, version: str, manifest: dict) -> dict:
     a weaker thing on one cell than on the other five. It is load-bearing rather than tidy, too:
     :func:`prune` deletes libraries by reachability, and an extension whose DLL went with them is
     only visible here.
+
+    **And before either, that nothing in the tree reaches outside it.** This row had no
+    `relocate.verify` at all — not a guarded one like the other five Windows cells P6a opened, none —
+    because when it was written `relocate` judged a file by its magic and had nothing to say about a
+    PE. Loading every extension is a strong check and it is not this one: it exercises `ext/` and the
+    libraries `ext/` pulls in, while `php8.dll`, the eleven ICU and OpenSSL DLLs beside it and
+    `extras/ssl/legacy.dll` are loaded by nothing here. `("",)` rather than the default for the
+    reason `node` and `python` found: this tree keeps its payload at the root, where the default
+    scan — which does find `ext/` — sees 37 of its 63 binaries.
     """
     elsewhere = Path(tempfile.mkdtemp(prefix="mixengine-smoke-")) / "moved here" / "php"
     elsewhere.parent.mkdir(parents=True)
     shutil.copytree(tree, elsewhere)
+
+    problems = relocate.verify(elsewhere, directories=("",))
+    for problem in problems:
+        print(f"error: {problem}", file=sys.stderr)
+    if problems:
+        raise SystemExit("the relocated tree reaches outside itself")
 
     ran = []
     for name in VERSION_CHECKED:

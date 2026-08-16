@@ -618,12 +618,16 @@ def main() -> None:
         print(f"needs {measured[0]} {measured[1]} or newer")
 
     elsewhere = borrow.moved(tree)
-    if not windows:
-        problems = relocate.verify(elsewhere)
-        for problem in problems:
-            print(f"error: {problem}", file=sys.stderr)
-        if problems:
-            raise SystemExit("the relocated tree reaches outside itself")
+    # Windows included since P6a. **This is the recipe that packs the Windows x86_64 cell** —
+    # `mariadb_build.py` compiles the aarch64 one — so unguarding that file and not this one would
+    # have left the shipping cell of the two unchecked, which is what the first pass at P6a did.
+    # The default `directories` is right for both: `bin` and `lib` hold everything, 85 machine files
+    # here and 75 there, the same either way as a root scan of the published 12.3.2.
+    problems = relocate.verify(elsewhere)
+    for problem in problems:
+        print(f"error: {problem}", file=sys.stderr)
+    if problems:
+        raise SystemExit("the relocated tree reaches outside itself")
     manifest["smoke"] = {
         "relocated": True,
         "ran": mariadb_smoke.server(elsewhere, version, provides, windows),

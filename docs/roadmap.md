@@ -926,10 +926,17 @@ which is the failure this whole thread has now produced twice.
 * **[x] `nginx.py`** — only the guard was wrong; `BINARIES = ("",)` had been right since the recipe
   was written. One binary, every import into System32, which is the claim its docstring already made
   about a statically linked build and could not check on the platform it was made about.
-* **[x] `mariadb_build.py`** — only the guard, and the default `directories` needs no help: 85
-  machine files under `bin` and `lib`, the same 85 a root scan finds on the published 12.3.2.
+* **[x] `mariadb_build.py` and `mariadb.py`** — only the guard, and the default `directories` needs
+  no help: `bin` and `lib` hold everything, 85 machine files in the x86_64 cell and 75 in the
+  aarch64 one, the same either way as a root scan of the published 12.3.2. **Two files, because the
+  first pass at this changed only `mariadb_build.py` and that is not the recipe that packs the
+  Windows cell people install** — it compiles aarch64, while x86_64 is borrowed through
+  `mariadb.py`. A list of recipes written from `grep relocate.verify` found five; the sixth was
+  found by reading which script the green CI leg had actually run.
 * **[x] `python.py`** — the sharpest case, below.
 * **[x] `postgres.py`** — shipped a binary that cannot load, below.
+* **[x] `php_windows.py`** — had no `verify` call **at all**, guarded or otherwise, so it never
+  appeared in a search for one. Also below.
 
 #### The third question, which is where the process runs from
 
@@ -958,9 +965,28 @@ executable stayed, its three wx imports resolve to nothing, and it was in every 
 had ever made. It reached no user only because P12 is still open and PostgreSQL has no release; the
 check found it in the first minute it was allowed to look. Both halves are one entry now.
 
+**PHP had no `verify` to guard, and its Windows tree was stranding a plugin.** Loading every
+extension out of the relocated tree is a strong test and it is not this one: it exercises `ext/` and
+what `ext/` imports, while `php8.dll`, the eleven ICU and OpenSSL DLLs beside it and
+`extras/ssl/legacy.dll` are loaded by nothing in it. Pointed at the root, the check failed on the
+first run — `lib/enchant/libenchant2_hunspell.dll`, 0.8 MB, importing `libenchant2.dll` and
+`glib-2.dll`, neither of which is in the archive. `unreachable` sweeps the *root* for libraries
+nothing imports, deliberately, because a reachability sweep cannot see a plugin loaded by name at run
+time. The half nobody had written was the mirror image: a run-time plugin whose **owner** is being
+removed. Dropping `ext/php_enchant.dll` orphans `libenchant2.dll`, and enchant's hunspell backend —
+which nothing imports, being a plugin — stayed behind pointing at it. `stranded` is that half, to a
+fixed point because a provider can sit on a provider.
+
 Measured, not argued: every claim above comes from a packed archive — the published 3.14.7, 12.3.2
-and 1.30.4, and an 18.6 built on this machine — and each recipe was re-run with its cell open before
-the change was written down.
+and 1.30.4, and an 18.6, an 8.5.9 and a 1.30.4 built on this machine — and each recipe was re-run
+with its cell open before the change was written down.
+
+Two things this turned up that are **not** P6a and are not fixed here. Both are the same shape as the
+gap itself — work that landed and was ticked without the workflow ever being run again — and both are
+now first-class open items: P4b's strip check has never once run in CI and fails on all four Unix
+Python cells; and every published PHP archive predates P2, so `pdo_firebird` is in them, declared in
+`extensions.shared` and unable to load. The PostgreSQL smoke test also cannot pass on a GitHub
+Windows runner at all, which runs as an administrator; that one blocks P12 rather than this.
 
 ---
 
