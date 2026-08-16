@@ -390,9 +390,17 @@ def smoke(tree: Path, version: str, provides: dict[str, str]) -> dict:
         # Everything a MixEngine dev instance is: loopback only, no snapshot, no append-only log.
         # `dir` is set because a server that writes its dump where it was started from would write
         # into the moved copy, and the point of the move is that nothing does.
+        #
+        # **Quoted, and that is the whole reason this test earns its runner minute.** `borrow.moved`
+        # puts the tree under a directory whose name contains a space on purpose, and a `redis.conf`
+        # directive is split on whitespace: unquoted, `dir` arrives with two arguments and the
+        # server answers `*** FATAL CONFIG FILE ERROR *** ... wrong number of arguments` before it
+        # ever listens. A user whose projects live under `C:\Users\Ha Quang` or `/Users/ha quang`
+        # would have been the one to find that out. `core::generate` renders the real one and has to
+        # quote every path it writes for the same reason — see T35.
         f"bind 127.0.0.1\n"
         f"port {port}\n"
-        f"dir {work.as_posix()}\n"
+        f"dir \"{work.as_posix()}\"\n"
         f"save \"\"\n"
         f"appendonly no\n"
         f"daemonize no\n",
