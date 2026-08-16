@@ -18,7 +18,7 @@ What is *not* done is the rule itself.
 | --- | --- | --- | --- |
 | PHP | 7.0 – newest, 6 targets | `php_windows`, `php_unix`, `php_legacy_unix` | yes — P2 |
 | Node.js | 16 – newest, 6 targets | `node` | yes — P3 |
-| Python | 3.10 – newest, 6 targets | `python` | yes — P4 and P4a, less P4b |
+| Python | 3.10 – newest, 6 targets | `python` | yes — P4, P4a and P4b |
 | Ruby | 3.2 – newest, 6 targets | `ruby`, `ruby_unix` | unknown — P5 |
 | Caddy | 2.0 – newest, 6 targets | `caddy` | yes |
 | MariaDB | 10.6 – newest, 6 targets | `mariadb`, `mariadb_deb`, `mariadb_build` | yes — it is where the rule came from |
@@ -35,9 +35,12 @@ rows that were packed before it existed, and P1–P6 are that work. Measured aga
 archives, the gaps were not marginal: PHP 8.3 on Windows was missing two extensions this repository
 fails a Unix build over, which P2 closed; Node.js 24.19.0 was 106 MB on Windows against 198 MB on
 Linux, which P3 closed; and CPython 3.13.15 shipped Tk 8.6 to Windows and Tk 9.0 to Unix under one
-version number, which P4 closed by shipping neither. Twice now the answer has been the *opposite* of
-the one the task expected — P3 kept npm's manual pages after going and reading npm, P4a keeps 30 MiB
-of a shared library nothing in the archive loads — which is what a rule is for.
+version number, which P4 closed by shipping neither. Three times now a task has come out somewhere
+other than where it was pointed — P3 kept npm's manual pages after going and reading npm, P4a keeps
+30 MiB of a shared library nothing in the archive loads, and P4b found its own title wrong and two of
+its stated reasons for existing wrong with it. That is what a rule is for, and it is the argument for
+measuring the artifacts rather than the release notes: every one of those three was written from what
+the publisher says and corrected by what the publisher ships.
 
 Nothing below is a rewrite. Every recipe already downloads, verifies, relocates, proves and packs
 correctly; what they do not do is *choose*, and choosing once is the whole of the rule.
@@ -371,7 +374,7 @@ Run against every tarball of 3.10, 3.11, 3.12, 3.13 and 3.14 on all three operat
 fourteen cells, every one clean through `prune`, `keeps` and `borrow.declare` — and packed end to
 end on Windows for 3.10.21, 3.13.15 and 3.14.7, all three validating against the schema.
 
-### [ ] P4b — Python: the stripped variant is not stripped **(rule)**
+### [x] P4b — Python: the stripped variant is not stripped **(rule)**
 
 `tools/python.py` takes `install_only_stripped` and says why at length: *"the same tree without the
 debug symbols, and the saving is not marginal"*. Measured on the tarballs rather than on the
@@ -400,6 +403,112 @@ And the smoke test cannot cover what P4a just kept `libpython` for: it runs the 
 does not link anything against the library, so a `strip` that damaged the dynamic symbol table
 would pass every check in the file and fail in somebody's `pip install`. Settle what proves a
 stripped library still links before stripping one.
+
+**The title is wrong and the variant is honestly named**, which is the first thing reading it as a
+diff against `install_only` shows. Upstream's step removed every `.debug_*` section and every
+`.rela.debug_*` beside it and touched nothing else: 80 MB out of `bin/python3.13`, 207 MB out of
+`lib/libpython3.13.so.1.0`, a tarball of 118.5 MB becoming one of 34.8 MB. What it left is what
+`--strip-debug` was never going to take. So the recipe's own sentence — *"the same tree without the
+debug symbols"* — was exact, and the 14.5 MB measured above is not debug information at all.
+
+It is two things with different owners, and the archive names the second one itself:
+
+- **A symbol table**, on every version from 3.10 on and on both Unix formats: `.symtab` and
+  `.strtab` on Linux, `LC_SYMTAB` on macOS. 1.6 MB per binary on 3.10, 2.4–2.8 MB on 3.13.
+- **8.8 MB of relocations that were an input to an optimisation that never ran on the file holding
+  them.** `.note.bolt_info` — a note llvm-bolt writes and nothing else does — is in `bin/python3.X`
+  on 3.12, 3.13 and 3.14 and in no library; `.rela.text` is in the library on those same three
+  versions and in no executable. So BOLT ran on the executable and consumed its relocations, while
+  the library was linked with the same `--emit-relocs` and then left alone. That is why the weight
+  appears in 3.12 and grows to 12.2 MB by 3.14, and it is why no amount of `strip -d` finds it.
+
+Both come out together whether one wants them to or not: `.rela.text` names its symbols by index
+into `.symtab`, so a tool that removes the table removes the relocations with it.
+
+**Windows decides the direction, from the far side.** Its `install_only_stripped` ships **no `.pdb`
+at all** — zero files, of 3,303 — so a Windows cell has already had its symbols taken and no
+levelling-up is available. Taking the other two down to it is the move `prune` made with tkinter, in
+the same direction and for the same clause of the rule.
+
+#### The proof, which is what the task actually asked for
+
+The check is `python.mapped`, and it is structural rather than empirical because the empirical proof
+does not reach: the file most at risk is the one P4a kept *because nothing in the archive loads it*,
+so a smoke test may start the interpreter a thousand times without touching it. Instead — if every
+byte the loader maps and every table the linker reads is identical before and after, the two files
+cannot behave differently, and running either one would say no more than that. On ELF the line is
+drawn by the hardware: `SHF_ALLOC` is exactly the set `strip` may not touch, and `.dynsym`,
+`.dynstr`, `.gnu.hash`, `.dynamic` and the loader's `.rela.dyn`/`.rela.plt` are all inside it.
+Program headers are compared whole and separately. Measured across the operation on ten cells: 26
+allocated sections identical, 9 program headers identical, byte for byte, including on the BOLTed
+executable whose layout was rewritten after the linker was done.
+
+**The flag is not the same on both Unix halves, and that is the finding, not a portability wrinkle.**
+ELF keeps two symbol tables and a linker reads only the allocated one. Mach-O keeps *one*, whose
+exported range `LC_DYSYMTAB` indexes — and `--strip-all` there empties it: measured on
+`libpython3.13.dylib`, 1,755 exported symbols become 0 and `_Py_Initialize` stops existing in the
+file, to save 66 KB more than `-x` saves. So `--strip-all` on Linux and `-x` on macOS.
+
+Two more things only measuring found:
+
+- **The arm64 cells are ad-hoc signed and the kernel answers a stale signature with `SIGKILL`.** Not
+  an error a caller prints — the process does not start. And it would pass every other check here,
+  for the same reason the library is unreachable. So `python.countersigned` recomputes the
+  CodeDirectory's 4,230 page hashes rather than trusting the tool to have re-signed; corrupting one
+  byte makes it name page 1420. `x86_64-apple-darwin` carries no `LC_CODE_SIGNATURE` at all, so the
+  check is real on two cells of six and answers `None` on the rest rather than calling that a fault.
+- **`mapped` refused its own first run, and was right to.** Comparing Mach-O segments whole reported
+  `__TEXT` as changed on every *successful* strip, because `__TEXT` starts at file offset 0 and
+  therefore contains the header and every load command — including the `LC_SYMTAB` and
+  `LC_CODE_SIGNATURE` offsets a strip is *supposed* to move. It compares sections within segments
+  now, which is the granularity the ELF branch always used.
+
+#### Two claims in the paragraph above this one were wrong
+
+This is not the second recipe to shell out to a toolchain binary and it is not the first to modify a
+borrowed executable. `mariadb.strip_debug` has run `strip --strip-debug` over every machine file in a
+borrowed bintar since before this repository had a rule — it is the reason `upstream.stripped`
+exists. What is new here is not the operation but the *checking*, and MariaDB is the argument for it:
+that function passes `capture_output=True` without reading the exit code, keeps whatever came out of
+the tool, and declines to claim a saving only if the tree got bigger. Reconciling it with what P4b
+built belongs where P1 already put it — with P6, which is where the check that reads these fields is
+written.
+
+`upstream.changed` is the fourth kind of difference and the one `borrow.declare` was written without,
+because for three tasks there was no such thing: a recipe added files, removed files, or left them
+alone. A file that ships at upstream's path and is not upstream's bytes is the difference a reader
+comparing two archives is least able to account for, because it looks like a corrupted download. It
+maps each path to the command that made it — `strip --strip-all` — rather than to prose: the reader
+holding both archives wants to know what was done, and the argument lives here.
+
+#### What it comes to, on 3.13.15
+
+| | after P4a | after P4b | |
+| --- | --- | --- | --- |
+| Windows | 48.1 MiB | 48.1 MiB | nothing to do |
+| macOS | 52.2 MiB | **49.5 MiB** | 2.7 MiB, 3 binaries |
+| Linux | 81.4 MiB | **66.7 MiB** | 14.7 MiB, 4 binaries |
+
+Four binaries, because `lib-dynload` holds three entries and one of them is `.empty`: everything
+except `_dbm` and `_tkinter` is compiled into the interpreter, `prune` deletes `_tkinter`, and `_dbm`
+is 2.38 MB on Linux with 834 KB of symbol table in it because gdbm is linked in statically.
+
+The gap between Linux and Windows was 33.3 MiB after P4a and is **18.6 MiB** now — and
+`lib/libpython3.13.so.1.0` is 19.1 MiB of that, which is to say all of it and more. Without the
+second copy of the interpreter P4a decided to keep, the Linux artifact would be *smaller* than the
+Windows one. macOS is within 1.4 MiB of Windows while carrying a 15.3 MiB duplicate dylib of its own.
+Nothing is left in this row that one cell has and another does not.
+
+Run on all ten Unix cell-versions available — 3.10, 3.11, 3.12, 3.13, 3.14 on `x86_64-unknown-linux-gnu`
+plus 3.13.15 on the other three Unix triples — every one clean through `prune`, `strip_symbols`,
+`keeps` and `borrow.declare`, and packed end to end on Windows for 3.10.21, 3.13.15 and 3.14.7, whose
+archives came out byte-for-byte the size they were before P4b, which is what "no-op" has to mean.
+Two honest limits on that. The tool driving it here was `llvm-objcopy` (as `rust-objcopy`), because
+it reads ELF and Mach-O from any host and a runner's own `strip` cannot be run from this machine —
+`mapped` is precisely what makes the substitution acceptable, since whatever the tool, the artifact
+is not published unless the mapped image is identical. And extracting a Unix tarball on Windows turns
+symlinks into copies, so the local run stripped `bin/python` and `bin/python3` as well; on a runner
+`relocate.machine_files` skips them and the four paths above are what `upstream.changed` will name.
 
 ### [ ] P5 — Ruby: make the two recipes answer the same questions **(rule)**
 
@@ -457,6 +566,14 @@ The Unix entries are also the reminder that this check will never be the whole o
 pattern above would flag a `.so` in `lib/`, and P4a declared 30 MiB of one anyway, because the
 reason it is kept is not reconstructable from the file. What the check enforces is that everything
 matching the patterns is declared; what the field is *for* is larger than that, and stays larger.
+
+The fold-in P1 deferred to here got larger while waiting, and clearer. `upstream.stripped` is a
+sentence MariaDB writes about an unchecked `strip --strip-debug`; `upstream.changed` is a mapping
+P4b writes about a strip that refuses to publish unless the loader's and the linker's whole view of
+the file came through identical. Two spellings of one fact is the shape of thing this rule exists to
+remove, and the fold-in is not a rename: it is `mariadb.strip_debug` reading its own exit code and
+answering to `python.mapped`, which is worth more to that row than to this one — MariaDB strips 371
+MB of bintar down to 27 and nothing checks what came out.
 
 Run it in `publish-index.yml`, where every artifact of a version is visible at once. An empty cell is
 not a failure — a target upstream never built is already an `exit 75`, and this must keep that

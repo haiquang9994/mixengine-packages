@@ -275,7 +275,7 @@ def run(program: Path, *args: str, path: str, drop: tuple[str, ...] = (), timeou
 
 def declare(
     tree: Path, manifest: dict, added: Iterable[str] = (), removed: Iterable[str] = (),
-    keeps: Mapping[str, str] | None = None,
+    keeps: Mapping[str, str] | None = None, changed: Mapping[str, str] | None = None,
 ) -> dict:
     """Write what this repository put into a borrowed archive and took out of it, having checked it.
 
@@ -303,6 +303,15 @@ def declare(
     the reason travels with the artifact instead of living in a commit message. CPython is the first
     row that needs it: ``pip install`` of a source distribution compiles a C extension on the user's
     machine, and it compiles it against ``include/`` and links it against ``libs/python3XX.lib``.
+
+    *changed* is the fourth kind of difference and the one this function was written without, because
+    for three tasks there was no such thing: a recipe added files, deleted files, or left them alone.
+    CPython's symbol tables are the first case of a file that ships **and is not the file upstream
+    published** — same path, same purpose, different bytes — and that is exactly the difference a
+    reader comparing the two archives is least able to explain, since it looks like corruption and
+    nothing else here would name it. The value is the command that made it, not an argument for it:
+    somebody holding both archives wants to know what was done to the file, and the reasoning lives
+    where all the other reasoning lives.
     """
     declared = manifest.setdefault("upstream", {})
 
@@ -327,6 +336,20 @@ def declare(
                 f"the removal did not happen, or it happened somewhere this does not see"
             )
         declared["removed"] = removed
+
+    if changed:
+        # Checked like `added`, and the check is weaker than the other three by nature: this can
+        # prove the path is still there, not that the modification named is the one that happened.
+        # What proves that is the caller — `python.strip_symbols` compares the loader's and the
+        # linker's whole view of the file across the operation and refuses to return if any of it
+        # moved — and saying so here is better than implying a check that is not being made.
+        absent = [path for path in sorted(changed) if not (tree / path).exists()]
+        if absent:
+            raise SystemExit(
+                f"upstream.changed names {', '.join(absent)}, which this tree does not contain — a "
+                f"modification is being claimed for a file that is not shipping"
+            )
+        declared["changed"] = dict(sorted(changed.items()))
 
     if keeps:
         # Checked the same way `added` is, and for the same reason: a path kept on purpose that is
