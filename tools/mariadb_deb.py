@@ -342,9 +342,17 @@ def rearrange(root: Path, work: Path) -> tuple[Path, list[str]]:
     #
     # A symlink is the whole of the fix, costs nothing, and keeps one copy of a 20 MB message
     # directory. Made relative so it survives the tree being moved, which is the point of all of this.
+    #
+    # **And `share/mysql` beside it, because the script's spelling changed mid-catalogue.** 11.8 reads
+    # `$basedir/share/mariadb/mariadb_system_tables.sql`; 10.11 reads
+    # `$basedir/share/mysql/mysql_system_tables.sql` — the rename happened in 11.x and the older line
+    # kept the old directory. `MOVES` flattens both spellings into `share`, so one link answered 11.8
+    # and 10.11 failed its first run with *Could not find share/mysql/fill_help_tables.sql*. Both
+    # links are laid because the recipe must not have to know which series it is unpacking.
     share = tree / "share"
-    if share.is_dir() and not (share / "mariadb").exists():
-        (share / "mariadb").symlink_to(".", target_is_directory=True)
+    for compatibility in ("mariadb", "mysql"):
+        if share.is_dir() and not (share / compatibility).exists():
+            (share / compatibility).symlink_to(".", target_is_directory=True)
 
     # And `sbin` pointing at `bin`, for the same reason one directory along: the packaging installs
     # the server as `/usr/sbin/mariadbd` and `mariadb-install-db` looks for it under `$basedir/sbin`,
