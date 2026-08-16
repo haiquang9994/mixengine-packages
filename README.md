@@ -460,6 +460,75 @@ sharing almost none of its options — and Windows mariadbd writes its error log
 directory and sends nothing to stdout, so a check reading the process's own output concludes the
 server said nothing.
 
+### PostgreSQL, where most of the download is not a database
+
+MariaDB's evaluation found the table wrong about *which* platforms upstream builds for. PostgreSQL's
+finds something else: the project itself publishes **no binaries at all**, only source. What the
+download page points at on Windows and macOS is EnterpriseDB's, and what EDB publishes is an
+installer's payload rather than a server.
+
+| OS / arch | Range | How |
+| --- | --- | --- |
+| Windows x86_64 | **14 – newest** | **borrowed** — EDB's `postgresql-<version>-<n>-windows-x64-binaries.zip` |
+| macOS aarch64, x86_64 | **14 – newest** | **borrowed** — one `osx-binaries.zip`, a **universal** build serving both cells |
+| Linux x86_64, aarch64 | — | EDB stopped publishing Linux tarballs; from `apt.postgresql.org`'s own packages, still to do |
+| Windows aarch64 | — | nobody publishes one |
+
+**The floor is where the archive changes shape.** EDB's macOS zip for 13 is a thin x86_64 Mach-O and
+from 14 on it is universal, so a 13 packed here would mean *Intel* on a row where every other version
+means both architectures — one version meaning two things, decided by which cell a user installed
+from. PostgreSQL 13 also went out of support in November 2025, so upstream's answer and the
+catalogue's shape agree on where to stop.
+
+**Most of what is downloaded is never written to disk.** The Windows zip unpacks to 914 MB, of which
+717 MB is pgAdmin 4 — an Electron application with its own Python — beside StackBuilder, a downloader
+for more EDB software. The macOS zip is 1,215 MB with the same two inside. Neither is a thing
+MixEngine installs, so they are skipped *during* unpacking rather than deleted afterwards, and the
+second reason is better than the first: `pgsql/pgAdmin 4/python/Lib/site-packages/azure/mgmt/rdbms/…`
+is past `MAX_PATH`, and extracting the archive whole dies half way through with a `FileNotFoundError`
+naming a file whose only problem is the length of its name. Every skipped root is still listed in
+`upstream.removed` — "never unpacked" and "deleted" are the same difference to a reader holding both
+archives.
+
+What else does not ship is decided by the rule rather than by size: the headers and the static and
+import libraries, PGXS and its `pkgconfig` file, `pg_config` and `ecpg` — without `include/` there is
+nothing for any of them to compile — the test modules that live beside the real ones, EDB's own
+`plugin_debugger` and `system_stats`, and 14 MB of wxWidgets DLLs sitting in `bin/` for
+StackBuilder's window. **And the procedural languages that are not PostgreSQL's own**: `plperl`,
+`plpython3u` and `pltcl` each need an interpreter installed on the user's machine, so `CREATE
+EXTENSION plperl` on a clean one fails with a message about a missing library — and Debian packages
+each separately, so the Linux cells could not have had them either. `plpgsql` is compiled into the
+server and stays. 344 MB of download becomes a 38 MB artifact with 46 extensions in it.
+
+**The version catalogue and the end-of-life dates are one document.** `postgresql.org/versions.json`
+states every major, its newest minor, whether it is supported and the day support ends — so
+`data/eol.json`'s `postgres` block is transcribed from a publisher rather than from a schedule page,
+as MariaDB's is, and `tools/postgres.py` prints the date it saw on every run.
+
+**EDB publishes no checksum, and the manifest says so in those words.** Every other borrow here is
+checked against a digest its publisher states; `get.enterprisedb.com` answers 403 to `.sha256` and
+`.md5` beside every archive it serves. What is left is TLS to the publisher's own host with no mirror
+redirector in between — which is exactly what `tools/ruby.py` records when RubyInstaller publishes no
+checksum file. `upstream.verified_against` reads *"HTTPS to get.enterprisedb.com; EDB publishes no
+checksum for these archives"*, because an artifact that implied otherwise would be making the one
+claim a reader cannot check.
+
+The proof asks a database's questions, as MariaDB's does: `initdb` bootstraps a cluster with a
+password-authenticated superuser, the server starts against a rendered `postgresql.conf` — never one
+written into the data directory, so generated configuration stays disposable — `pg_isready` answers,
+a row is written and read back, and **`hstore` and `pgcrypto` are created and used**. That last one
+is the check on the pruning: an extension needs a module in the library directory *and* a control
+file in the share tree, the two live in different halves of the archive, and `pgcrypto`'s `digest()`
+is computed by the OpenSSL travelling inside it. Then `pg_ctl stop -m fast`, with the
+clean-shutdown line looked for in the log.
+
+One finding worth stating on its own, because it is invisible from a build log. Run without a stated
+locale on a machine whose system locale is Vietnamese, `initdb` reports *could not find suitable text
+search configuration* and quietly sets the default to `simple` — a cluster where full-text search
+does not stem — **and exits zero**. The same artifact on two developers' machines then produces two
+databases that answer differently. The check states `--locale=C -E UTF8` so it is reproducible; what
+that teaches the daemon is that it has to choose, because the default is whatever the machine is.
+
 ## Repack, do not rearrange
 
 A borrowed artifact keeps the directory layout its publisher shipped. It is tempting to normalise
@@ -516,6 +585,9 @@ python tools/mariadb.py --version 11.8 --out dist/        # Windows x86_64, Linu
 python3 tools/mariadb_deb.py --version 11.8 --out dist/   # Linux aarch64, out of upstream's .deb
 python tools/mariadb_build.py --version 11.8 --out dist/  # macOS, and Windows on ARM64
 
+# PostgreSQL: EDB's binaries on Windows and macOS, most of which is never unpacked
+python tools/postgres.py --version 18 --out dist/
+
 # Then regenerate and sign the index from what the releases actually contain
 python tools/mkindex.py --base-url … --out dist/index.json
 minisign -Sm dist/index.json -s minisign.key
@@ -532,6 +604,12 @@ two cells, `.deb` packages for a third and nothing at all for the rest. And it t
 versions — `all` expands to every supported series — because MariaDB maintains four at once with
 end-of-life dates years apart, so a workflow that took one version would have to be invoked four
 times and would miss one.
+
+`build-postgres.yml` takes a list for the same reason and has the opposite shape otherwise: one
+recipe across **three** legs, because that is how many cells anybody publishes a binary for. The two
+macOS legs download the same universal archive, which looks wasteful and is the point — what each
+one proves is that *this* Mach-O slice starts and serves on *this* machine, and a single leg
+producing both artifacts could only ever have run one of them.
 
 The five borrowed recipes share `tools/borrow.py` — downloading, hashing, unwrapping the publisher's
 wrapper directory where there is one, packing, and running a program with a `PATH` the runner cannot

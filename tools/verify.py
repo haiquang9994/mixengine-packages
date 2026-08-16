@@ -86,6 +86,21 @@ def invariants(index: dict, previous: dict | None) -> list[str]:
                 problems.append(
                     f"caddy {key[1]} {where[0]}/{where[1]} provides no caddy; nothing could run it"
                 )
+            # Two rather than one, and the second is the half a server-only check would miss: a
+            # PostgreSQL that cannot be started is useless, and a PostgreSQL that starts with no
+            # `initdb` beside it has nothing to start *against* — the data directory is a first-run
+            # job rather than part of the install, which is the one thing both databases here agree
+            # on and neither says in its file layout.
+            for kind, needs in (("mariadb", ("mariadbd", "mariadb-install-db")),
+                                ("postgres", ("postgres", "initdb"))):
+                if package["kind"] != kind:
+                    continue
+                for command in needs:
+                    if command not in artifact["provides"]:
+                        problems.append(
+                            f"{kind} {key[1]} {where[0]}/{where[1]} provides no {command}; the "
+                            f"daemon could not supervise it"
+                        )
 
     if previous:
         lost = {(p["kind"], p["version"]) for p in previous["packages"]} - seen

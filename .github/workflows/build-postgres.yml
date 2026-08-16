@@ -1,0 +1,143 @@
+name: build postgres
+
+# Asked for, never automatic — the same rule every other workflow here keeps.
+#
+# **One run covers many majors**, as the MariaDB workflow does and for the same reason: PostgreSQL
+# supports five majors at once whose end-of-life dates are years apart, and a blueprint pinning 15 is
+# as ordinary as one pinning 18. `tools/postgres.py --plan` expands `all` into upstream's own
+# `versions.json`, and the matrix below is the cross product of that with the targets EDB builds for.
+#
+# **Three targets, not six, and the three that are missing are missing for stated reasons.** EDB
+# publishes a Windows x86_64 zip and one universal macOS zip that serves both Apple cells; it stopped
+# publishing Linux tarballs, and the PostgreSQL project itself publishes source only, so Linux comes
+# from apt.postgresql.org's own packages in a recipe of its own (P7a). Nobody publishes a
+# Windows-on-ARM build at all (P7b). An unlisted cell here is an empty cell of the index, which is a
+# real answer as long as the index says so.
+on:
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: "'all' for every supported major, 'latest', or a comma-separated list (18, 16.10)."
+        required: true
+        default: 'all'
+        type: string
+      release:
+        description: 'Publish as a GitHub release. Off means build and keep the artifacts for inspection only.'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    # Which majors exist is upstream's answer rather than a list kept here: `versions.json` states
+    # the catalogue and its end-of-life dates together, so a list in this repository would go stale
+    # the day a major is released. The dates *are* copied into `data/eol.json`, which is a different
+    # question — the index has to be rebuildable from release assets years later, and a generator
+    # that called this API would answer differently depending on the day it ran.
+    runs-on: ubuntu-24.04
+    outputs:
+      majors: ${{ steps.expand.outputs.majors }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - id: expand
+        run: |
+          set -euo pipefail
+          majors=$(python -u tools/postgres.py --version "${{ inputs.versions }}" --plan)
+          echo "majors=$majors" >> "$GITHUB_OUTPUT"
+          echo "::notice::building $majors"
+
+  pack:
+    needs: plan
+    # Every leg runs on the operating system and architecture it packs for, because the recipe does
+    # not merely unpack what it downloaded: it bootstraps a cluster with `initdb`, starts the server
+    # against a rendered `postgresql.conf`, waits for `pg_isready`, writes and reads back a row,
+    # creates `hstore` and `pgcrypto`, and stops with `pg_ctl stop -m fast`. None of that can be
+    # cross-packed.
+    #
+    # **The macOS legs download the same universal archive twice and that is deliberate.** One zip
+    # holds both slices, so a single leg could produce both artifacts — and neither could then be run
+    # on the architecture it is for. What each leg proves is that *this* Mach-O slice starts and
+    # serves on *this* machine, which is the only thing that makes a universal build a fact rather
+    # than a claim about a header.
+    strategy:
+      fail-fast: false
+      matrix:
+        major: ${{ fromJSON(needs.plan.outputs.majors) }}
+        target:
+          - { runner: windows-2022,   os: windows, arch: x86_64 }
+          - { runner: macos-14,       os: macos,   arch: aarch64 }
+          - { runner: macos-15-intel, os: macos,   arch: x86_64 }
+    runs-on: ${{ matrix.target.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: pack ${{ matrix.major }}
+        id: pack
+        # bash on every leg, Windows included, so the exit code is read the same way everywhere
+        # rather than in two dialects that could disagree.
+        #
+        # 75 is "EDB publishes nothing for this cell at this version", which is an empty cell of the
+        # table and not a failure. Every other non-zero code is real and is passed on. `|| code=$?`
+        # rather than reading `$?` on the next line, because `shell: bash` runs with `-e`.
+        shell: bash
+        run: |
+          code=0
+          python -u tools/postgres.py --version "${{ matrix.major }}" --out dist || code=$?
+          if [ "$code" -eq 75 ]; then
+            echo "::notice::no PostgreSQL ${{ matrix.major }} for ${{ matrix.target.os }}/${{ matrix.target.arch }}; nothing to pack"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit "$code"
+        # Generous for a borrow, because the download is what takes the time: EDB's archives are
+        # 330–440 MB each, of which this recipe unpacks about a fifth.
+        timeout-minutes: 45
+      - uses: actions/upload-artifact@v4
+        if: steps.pack.outputs.skipped != 'true'
+        with:
+          # The major is in the name because one run produces several versions, and two legs
+          # uploading `postgres-macos-aarch64` would be one artifact overwriting another.
+          name: postgres-${{ matrix.major }}-${{ matrix.target.os }}-${{ matrix.target.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    # One release per exact version, holding every artifact of it — the version read back out of each
+    # manifest rather than taken from the input, because the input may be a major or `all` and each
+    # leg resolves it against upstream independently.
+    needs: pack
+    if: ${{ inputs.release && !failure() && !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: incoming, merge-multiple: true }
+      - name: publish one release per version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          versions=$(jq -r '.version' incoming/*.json | sort -u)
+          for version in $versions; do
+            tag="postgres-$version"
+            assets=()
+            for manifest in incoming/*.json; do
+              [ "$(jq -r '.version' "$manifest")" = "$version" ] || continue
+              # Both halves: the manifest is what the index generator reads, so a release holding
+              # only the archive is one the index cannot be rebuilt from.
+              assets+=("${manifest%.json}" "$manifest")
+            done
+            echo "== $tag: ${#assets[@]} artifact(s)"
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              gh release create "$tag" \
+                --title "PostgreSQL $version" \
+                --notes "Relocatable PostgreSQL $version for MixEngine, repacked from EnterpriseDB's binary archives — one Windows x86_64 zip and one universal macOS zip, which is why both Apple cells carry the same build proven separately on each. pgAdmin, StackBuilder, the headers, the static and import libraries, PGXS and the procedural languages that need an interpreter nobody installed are not shipped; every one of them is named in upstream.removed. EDB publishes no checksum for these archives, which upstream.verified_against says in those words. Every artifact was run as a database from a directory it had been moved to before being published — a cluster bootstrapped with initdb, the server started against a rendered postgresql.conf, pg_isready answered, a row written and read back, hstore and pgcrypto created and used, and the server stopped with pg_ctl stop -m fast — see mixengine-artifact.json inside each one for what was proven."
+            fi
+            gh release upload "$tag" "${assets[@]}" --clobber
+          done

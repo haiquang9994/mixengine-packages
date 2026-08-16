@@ -11,10 +11,12 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **(rule)** = a conforma
 
 ## Where we are
 
-Every row of the runtime table is packed, and both service rows that have been evaluated are packed.
+Every row of the runtime table is packed, and every service row that has been evaluated is packed.
 Every recipe now conforms to the rule and there is a program that says so. What is *not* done is the
 **repack**: the artifacts on the releases page were packed before P2–P5, and `tools/parity.py` names
 every one of those differences on every run. P6 below is what it says and what it does not.
+PostgreSQL is the first row packed *after* it, and the difference shows: the rule caught an
+asymmetry inside EDB's own release before anything was published.
 
 | Kind | Cells | Recipes | Conforms |
 | --- | --- | --- | --- |
@@ -24,6 +26,7 @@ every one of those differences on every run. P6 below is what it says and what i
 | Ruby | 3.2 – newest, 6 targets | `ruby`, `ruby_unix` | yes — P5, P5a and P5b |
 | Caddy | 2.0 – newest, 6 targets | `caddy` | yes |
 | MariaDB | 10.6 – newest, 6 targets | `mariadb`, `mariadb_deb`, `mariadb_build` | yes — it is where the rule came from |
+| PostgreSQL | 14 – newest, 3 of 6 targets | `postgres` | yes — P7, and it is the first row packed under the rule |
 
 The rule was written **after** MariaDB, because MariaDB is what taught it: three routes to one
 version produced three different feature sets, and fixing that is what
@@ -892,19 +895,179 @@ between them is the task that landed in between. Formats: `.zip` through `zipfil
 
 ## Services still to pack
 
-Caddy and MariaDB are in. The remaining three are the same shape, and each owes the same two things:
-an evaluation — **borrow before you build**, asking the catalogue rather than assuming it, which is
-how MariaDB's row turned out to be wrong in three cells — and a smoke test that exercises *run,
-configure, health-check, stop* rather than `--version`.
+Caddy, MariaDB and PostgreSQL are in. The remaining two are the same shape, and each owes the same
+two things: an evaluation — **borrow before you build**, asking the catalogue rather than assuming
+it, which is how MariaDB's row turned out to be wrong in three cells and how PostgreSQL's turned out
+to be wrong in four — and a smoke test that exercises *run, configure, health-check, stop* rather
+than `--version`.
 
-### [ ] P7 — PostgreSQL
+### [x] P7 — PostgreSQL: EDB's two archives, and what is actually inside them
 
-The evaluation question is Windows and macOS. EDB publishes a Windows binary archive and macOS
-builds; Linux has no relocatable upstream tarball worth the name, and the `.deb`-rearrangement route
-MariaDB's aarch64 cell uses is the obvious candidate. The smoke test's own terms are `initdb`, a
-server started against a rendered `postgresql.conf`, `pg_isready`, a row written and read back
-through a real table, and `pg_ctl stop -m fast` — the `mariadb-install-db` / `mariadb-admin ping` /
-`mariadb-admin shutdown` trio, one database over.
+The evaluation question was Windows and macOS, and the answer moved three of the four cells it
+touched. Closed as `tools/postgres.py` and `tools/postgres_smoke.py`, with `build-postgres.yml`
+running three legs.
+
+#### What the catalogue actually says
+
+Every line of this was measured against upstream rather than read off a download page, and the page
+would have been wrong about most of it.
+
+* **The PostgreSQL project publishes no binaries at all**, only source with a `.sha256` beside it.
+  What `postgresql.org/download` points at for Windows and macOS is EnterpriseDB's.
+* **Windows x86_64** — `postgresql-<version>-<n>-windows-x64-binaries.zip`, 344 MB. Borrowed.
+* **macOS** — one `osx-binaries.zip`, and `bin/postgres` inside it is a **fat Mach-O carrying x86_64
+  and arm64**. One download is the build for two cells, which nothing else in this repository can
+  say. Read out of the file's own header, four bytes at a time, over an HTTP range request — the
+  archive is 445 MB and this cost 64 KB.
+* **Linux** — `…-linux-x64-binaries.tar.gz` answers 403 for every version tried. EDB stopped. That
+  is P7a.
+* **Windows on ARM** — nothing, from anybody. P7b.
+* **The version catalogue and the end-of-life dates are one document**, `versions.json`, which states
+  every major, its newest minor, whether it is supported and the day support ends. The same trade
+  `mariadb.py` makes with the MariaDB REST API — and `data/eol.json` gets a `postgres` block all the
+  same, which that file had already promised to whichever service branched its support next. Read
+  from a publisher rather than a schedule page is a fact about where the dates came from; the index
+  still has to be rebuildable from release assets years later, and a generator that called the API
+  would answer differently depending on the day it ran.
+
+**The floor is 14, and it is where the archive changes shape rather than a preference.** EDB's macOS
+zip for 13 is a *thin x86_64* Mach-O; from 14 on it is universal. A 13 packed here would mean Intel
+on a row where every other version means both architectures — one version meaning two things,
+decided by which cell a user installed from. PostgreSQL 13 also went out of support in November
+2025, so upstream's answer and the catalogue's shape agree on where to stop.
+
+#### Most of the download is not a database, and it is never written to disk
+
+The Windows zip unpacks to 914 MB of which **717 MB is pgAdmin 4**, an Electron desktop application
+with its own Python; the macOS zip is 1,215 MB with pgAdmin and StackBuilder inside. So `UNWANTED` is
+applied *while unpacking* rather than after, and the second reason is stronger than saving a minute
+of I/O per run: `pgsql/pgAdmin 4/python/Lib/site-packages/azure/mgmt/rdbms/…` is past `MAX_PATH`, and
+extracting this archive whole dies half way with a `FileNotFoundError` naming a file whose only
+problem is the length of its name. Every root skipped is named in `upstream.removed` all the same —
+"never unpacked" and "deleted" are the same difference to a reader holding both archives.
+
+That meant not using `borrow.unpack`, which meant doing what `zipfile` does not: **permission bits
+and symlinks**. A zip stores the Unix mode in the top half of `external_attr` and `extractall`
+discards it, so a macOS tree unpacked that way has a `bin/postgres` nobody can execute and a
+`lib/libpq.5.dylib` that is a copy of its target instead of a link to it.
+
+What else is not shipped is the rule rather than the size: headers, static and import libraries,
+PGXS and its `pkgconfig`, `pg_config` and `ecpg` — without `include/` there is nothing for either to
+compile, which is the argument that removed `mariadb_config` — the test modules that sit beside the
+real ones, and 14 MB of wxWidgets DLLs in `bin/` that exist for StackBuilder's window.
+
+**And the procedural languages that are not PostgreSQL's own.** `plperl`, `plpython3u` and `pltcl`
+each need an interpreter *installed on the user's machine*: EDB's `plperl.dll` links a Perl this
+archive does not carry, so `CREATE EXTENSION plperl` on a clean machine fails with a message about a
+missing library. Debian packages each as its own `postgresql-plperl-N`, so P7a's cells could not have
+had them either. `plpgsql` is compiled into the server and stays. 344 MB becomes a 38 MB artifact
+with 46 extensions in it.
+
+#### Two things the rule caught before anything was published
+
+**EDB's own two archives disagree.** 18.6 ships `system_stats.control` on macOS and not on Windows —
+an extension of EDB's own, present in one cell of a version and absent from the other, inside a
+single publisher's release. It is removed from both rather than added to one, because a third route
+from Debian's packages could never have it.
+
+**P6 only compared extensions for PHP, and this is the row that says why that was the exception.**
+`parity.offered` took `static ∪ enabled` and ignored `shared`, for a reason the schema states: on
+Windows PHP's `shared` says the same word about `curl` and about a debugger. Nothing else here has
+that problem — a PostgreSQL extension is created in a database by whoever wants it, never switched on
+in configuration, so `shared` *is* what a cell offers. So it now counts for every kind but PHP, and
+the 46 extensions of this artifact are compared rather than skipped.
+
+#### What is not checked, and it is said out loud
+
+**EDB publishes no checksum.** Every other borrow here is checked against a digest its publisher
+states — nodejs.org's `SHASUMS256.txt`, Caddy's `checksums.txt`, MariaDB's REST API,
+python-build-standalone's `SHA256SUMS` — and `get.enterprisedb.com` answers 403 to `.sha256` and
+`.md5` beside every archive it serves. What is left is TLS to the publisher's own host with no mirror
+redirector between, which is strictly what `ruby.py` records when RubyInstaller publishes no checksum
+file. `upstream.verified_against` says *"HTTPS to get.enterprisedb.com; EDB publishes no checksum for
+these archives"*, in those words, because an artifact implying otherwise would be making the one
+claim its reader cannot check. The archive's own SHA-256 is still computed and published, so the next
+person to download it can compare with this one.
+
+The relocation check is a check and not a correction, for a related reason: EDB's `lib/` already
+carries OpenSSL, ICU, krb5, libxml2 and lz4, so the expected answer is that nothing reaches outside
+the tree. `relocate.bundle` would *make* that true by rewriting load commands — and a rewritten file
+is no longer the bytes EDB published, which is a difference the recipe would then have to declare.
+Asking first is how a recipe finds out whether it needs to.
+
+#### The proof
+
+MariaDB's shape, one database over: the tree is moved somewhere it has never been, `initdb`
+bootstraps a cluster whose superuser has a password and answers scram-sha-256, the server starts
+against a rendered `postgresql.conf` — passed with `--config-file`, never written into the data
+directory, so generated configuration stays disposable and the data directory stays sacred —
+`pg_isready` answers, a row is written and read back, and `pg_ctl stop -m fast` stops it with the
+clean-shutdown line looked for in the log afterwards.
+
+`CREATE EXTENSION hstore` and `pgcrypto` are the part that is about *this* recipe rather than about
+PostgreSQL. An extension needs a module in the library directory **and** a control file and SQL
+script in the share tree, the two live in different halves of the archive, and this recipe deletes
+from both — so a pruning that took one half would pass every other check here and fail on a user's
+first `CREATE EXTENSION`. `pgcrypto` earns its place twice: `digest()` is computed by the OpenSSL
+travelling inside the archive.
+
+**One finding that is invisible from a build log.** Run without a stated locale on a machine whose
+system locale is Vietnamese, `initdb` reports *could not find suitable text search configuration for
+locale "Vietnamese_Vietnam.1252"*, quietly sets the default text search configuration to `simple` —
+a cluster where full-text search does not stem — and **exits zero**. The same artifact on two
+developers' machines produces two databases that answer differently, and no packaging check could
+see it. The smoke test states `--locale=C -E UTF8` so that it is reproducible; what it teaches the
+daemon is that it has to *choose*, because the default is whatever the machine happens to be.
+
+#### Verified
+
+The Windows x86_64 cell was run end to end on a real Windows 11 machine before any of this was
+written down: 344 MB borrowed, 137 paths not shipped, `initdb` through `pg_ctl stop -m fast`, and a
+38 MB artifact out. `tools/parity.py` passes it on both halves — nothing matching the surplus
+patterns, and all 137 `upstream.removed` paths absent from the archive it actually produced.
+`mkindex.py` builds an index from it that dates the package 2030-11-14 out of the new `eol.json`
+block, and `verify.py` accepts that index, including its own new check that a database provides both
+a server and the first-run job that gives the server something to start against.
+
+Running `parity.py` over the whole published catalogue still reports exactly the 370 problems P6
+found, which is the answer wanted from the `shared` change: only PHP manifests carry that field
+today, and PHP is the kind it deliberately does not count for.
+
+The macOS legs are written and unrun — this machine is not a Mac — and two things there are
+predicted rather than proven. The first is arithmetic and can be checked now: both archives lose
+their procedural languages and EDB's two additions, 61 − 15 on Windows and 62 − 16 on macOS, and both
+land on **46**, which is what the Windows artifact actually shipped. The second cannot: whether
+`extract`'s permission bits and symlinks come out right, and whether a universal build's arm64 slice
+starts on an arm64 runner.
+
+### [ ] P7a — PostgreSQL on Linux, from apt.postgresql.org
+
+The cell P7's evaluation moved rather than filled. EDB's `linux-x64-binaries.tar.gz` answers 403 at
+every version, and the PostgreSQL project publishes source only — so the route is the one MariaDB's
+aarch64 cell already takes, and it is *better supported* here than it was there: `apt.postgresql.org`
+publishes `postgresql-<major>` for **amd64 and arm64 alike**, with a SHA256 per file in a `Packages`
+index signed by the repository's own key, which is a digest from the publisher that P7 does not have.
+
+Three things this owes beyond the rearrangement. The Debian layout puts the server under
+`lib/postgresql/<major>/bin` and the client tools in `bin`, which `postgres_smoke.LAYOUT` already
+expects and nothing has yet exercised. The packages split what EDB ships as one archive —
+`postgresql-<major>`, `postgresql-client-<major>`, `libpq5` and the contrib modules — so *which
+packages* make one artifact is the decision, and `parity.py` is what will say whether the answer
+matches the cells P7 packed. And the glibc floor is the runner's, as it is for `mariadb_deb.py`.
+
+### [ ] P7b — PostgreSQL: Windows on ARM, and the second slice of a universal build
+
+Two loose ends of P7, together because both are about an architecture that is carried rather than
+built.
+
+Nobody publishes a Windows-on-ARM PostgreSQL. The row is one `mariadb_build.py` already walks —
+compile natively on `windows-11-arm` — and PostgreSQL builds with meson and MSVC.
+
+The macOS cells are the other half. Both carry a universal binary, so the x86_64 artifact contains an
+arm64 slice nothing on that machine will ever execute and the reverse. `lipo -thin` is what removes
+it, and whether that is worth doing is a question about how much of the archive is machine code
+rather than an assumption — measure it before writing it, since a `lipo` over the tree also means
+re-signing every Mach-O on arm64 and declaring the whole tree in `upstream.changed`.
 
 ### [ ] P8 — Redis and Memcached
 

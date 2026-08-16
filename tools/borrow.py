@@ -249,18 +249,27 @@ def clean_path(*directories: Path) -> str:
     return os.pathsep.join([*(str(directory) for directory in directories), *system])
 
 
-def run(program: Path, *args: str, path: str, drop: tuple[str, ...] = (), timeout: int = 300) -> str:
+def run(
+    program: Path, *args: str, path: str, drop: tuple[str, ...] = (), timeout: int = 300,
+    environment: Mapping[str, str] | None = None,
+) -> str:
     """Run *program* with a ``PATH`` of exactly what the shim would give it, and return its output.
 
     *drop* names environment prefixes to remove — ``PYTHON``, ``RUBY``, ``GEM`` — because a runner
     that has set up its own interpreter has usually pointed one of those at its own library
     directory, and a borrowed runtime that only works because ``PYTHONHOME`` happens to be unset is
     a runtime that breaks on the first machine where it is not.
+
+    *environment* is what the program needs *set* rather than removed, and there is one caller: a
+    ``psql`` reaching a server that authenticates with scram-sha-256 takes its password from
+    ``PGPASSWORD``. The alternative is a ``.pgpass``, which lives in the home directory of whoever
+    is running the check and has to be mode 600 — a check must not write there, and a daemon holding
+    the secret in an OS keyring would not either.
     """
     environment = {
         key: value for key, value in os.environ.items()
         if not any(key.startswith(prefix) for prefix in drop)
-    }
+    } | dict(environment or {})
     environment["PATH"] = path
     result = subprocess.run(
         [str(program), *args], capture_output=True, text=True, timeout=timeout, env=environment

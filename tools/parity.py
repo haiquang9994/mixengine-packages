@@ -211,6 +211,15 @@ def offered(manifest: dict) -> dict[str, set[str]]:
     cheapest asymmetry there is and nothing was looking for it. ``extensions`` on top of that
     wherever a manifest carries them, in the spelling `php_parity` uses, since PHP answers `PDO` to
     `get_loaded_extensions()` and `pdo` to everything else.
+
+    **`shared` counts for every kind except PHP, and PHP is the exception rather than the rule.**
+    The reason `static ∪ enabled` is the PHP set is written in the schema: on Windows `shared` says
+    the same word about `curl` and about a debugger, so "available" there does not mean "part of
+    what this version does". Nothing else here has that problem — a PostgreSQL extension is created
+    in a database by whoever wants it, never switched on in configuration, so `shared` *is* the set
+    a cell offers and a cell missing one of them is a cell that cannot do something its siblings can.
+    That is the asymmetry most worth catching on this row: EDB's own two archives for 18.6 already
+    disagree by one, `system_stats` on macOS and not on Windows.
     """
     commands = set(manifest["provides"])
     if manifest["kind"] == "php" and commands & php_parity.SERVES:
@@ -219,8 +228,11 @@ def offered(manifest: dict) -> dict[str, set[str]]:
 
     extensions = manifest.get("extensions")
     if extensions is not None:
-        sets["extensions"] = (php_parity.reported(extensions.get("static", []))
-                              | php_parity.reported(extensions.get("enabled", [])))
+        offers = ["static", "enabled"] if manifest["kind"] == "php" \
+            else ["static", "shared", "enabled"]
+        sets["extensions"] = set().union(
+            *(php_parity.reported(extensions.get(where, [])) for where in offers)
+        )
     return sets
 
 
