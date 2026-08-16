@@ -15,6 +15,7 @@ Python 3 stdlib only, by policy: this runs on a GitHub runner with nothing insta
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
@@ -220,14 +221,48 @@ def unpack(archive: Path, into: Path, suffix: str, wrapped: bool = True) -> Path
     return entries[0]
 
 
+def long_name(path: Path) -> Path:
+    """*path* with every 8.3 short component expanded, on Windows. Elsewhere, *path*.
+
+    **A GitHub Windows runner hands out a temporary directory that is already a short name.** The
+    account is `runneradmin`, so `TEMP` is `C:\\Users\\RUNNER~1\\AppData\\Local\\Temp` and everything
+    :func:`tempfile.mkdtemp` returns is underneath it. Python opens such a path perfectly and so does
+    every Windows API; what does not is **nginx**, whose `CreateFile()` on a path holding a `~1`
+    component answers `(2: The system cannot find the file specified)` about a file that is provably
+    there — `Test-Path` and `Get-Content` on the same string both succeed. So the smoke test failed
+    on the one cell that reads a configuration file back out of the directory it was told to use,
+    for a reason that had nothing to do with the artifact.
+
+    Expanding it here rather than in that recipe, because the input is not nginx's: it is what
+    :func:`tempfile.mkdtemp` returns, every recipe gets the same one, and the next program to be
+    unhappy about a `~` would be found the same slow way. `GetLongPathNameW` is the only thing that
+    answers this — `Path.resolve()` does not expand short components — and `ctypes` is stdlib, which
+    the policy above requires.
+    """
+    if sys.platform != "win32":
+        return path
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetLongPathNameW(str(path), buffer, len(buffer))
+    # 0 is failure and anything past the buffer would have been truncated. Both mean "no better
+    # answer than what was passed in", which is what every caller can still use.
+    if length == 0 or length >= len(buffer):
+        return path
+    return Path(buffer.value)
+
+
 def moved(tree: Path) -> Path:
     """A copy of *tree* in a directory it has never seen, whose name contains a space.
 
     The space is not decoration. Windows generates an 8.3 short name behind every long one, a
     published PHP artifact once loaded no extensions at all because of a `~` in one, and a recipe
     that only ever ran from paths without spaces would find that out on a user's machine.
+
+    The 8.3 name a runner's `TEMP` *already* carries is a different problem with the same shape, and
+    :func:`long_name` is where it is answered — the space is the property this test is for, and a
+    `~1` inherited from the machine it runs on is noise that hides it.
     """
-    destination = Path(tempfile.mkdtemp(prefix="mixengine-smoke-")) / "moved here" / tree.name
+    root = long_name(Path(tempfile.mkdtemp(prefix="mixengine-smoke-")))
+    destination = root / "moved here" / tree.name
     destination.parent.mkdir(parents=True)
     shutil.copytree(tree, destination, symlinks=True)
     return destination
