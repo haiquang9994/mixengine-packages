@@ -19,7 +19,7 @@ What is *not* done is the rule itself.
 | PHP | 7.0 – newest, 6 targets | `php_windows`, `php_unix`, `php_legacy_unix` | yes — P2 |
 | Node.js | 16 – newest, 6 targets | `node` | yes — P3 |
 | Python | 3.10 – newest, 6 targets | `python` | yes — P4, P4a and P4b |
-| Ruby | 3.2 – newest, 6 targets | `ruby`, `ruby_unix` | yes — P5 and P5a, less P5b |
+| Ruby | 3.2 – newest, 6 targets | `ruby`, `ruby_unix` | yes — P5, P5a and P5b |
 | Caddy | 2.0 – newest, 6 targets | `caddy` | yes |
 | MariaDB | 10.6 – newest, 6 targets | `mariadb`, `mariadb_deb`, `mariadb_build` | yes — it is where the rule came from |
 
@@ -40,9 +40,11 @@ version number, which P4 closed by shipping neither; and Ruby 4.0.6 on Windows w
 Four times now a task has come out somewhere other than where it was pointed — P3 kept npm's manual
 pages after going and reading npm, P4a keeps 30 MiB of a shared library nothing in the archive
 loads, P4b found its own title wrong and two of its stated reasons for existing wrong with it, and
-P5a was written to close an asymmetry that a look at the six trees says is not there. That is what a rule is
-for, and it is the argument for measuring the artifacts rather than the release notes: every one of
-those four was written from what the publisher says and corrected by what the publisher ships.
+P5a was written to close an asymmetry that a look at the six trees says is not there. That is what a
+rule is for, and it is the argument for measuring the artifacts rather than the release notes: every
+one of those four was written from what the publisher says and corrected by what the publisher ships.
+P5b then said the same thing about a check rather than an artifact — the comparison it added was
+correct on paper and wrong on the first real archive it was pointed at.
 
 Nothing below is a rewrite. Every recipe already downloads, verifies, relocates, proves and packs
 correctly; what they do not do is *choose*, and choosing once is the whole of the rule.
@@ -684,30 +686,80 @@ was checked is the part P5a changed, against the published `ruby-3.4.10` artifac
 `declare` writes them, no `upstream` block appears on a built manifest, both validate, and a tree
 with no static libruby is refused.
 
-### [ ] P5b — Ruby: the four compiled cells ship their debug information **(rule)**
+### [x] P5b — Ruby: the four compiled cells ship their debug information **(rule)**
 
-Measured under P5a and left there. `bin/ruby` and `lib/libruby*-static.a` carry 37.8 MB of DWARF on
-a 106 MB Linux tree and 19.9 MB on an 81 MB macOS one; RubyInstaller ships none, having linked with
-`-s`. This is P4b's task on the Ruby row and the direction is the one P4b settled — level down to
-the cell that already has nothing — but two things differ and both are why it is separate.
+Measured under P5a and left there: `bin/ruby` and `lib/libruby*-static.a` carried 37.8 MB of DWARF
+on the Linux tree and 19.9 MB on the macOS one, where RubyInstaller ships none, having linked with
+`-s`. P4b's task on another row, settled in P4b's direction — level down to the cell whose publisher
+already did it — and separate from P5a for two reasons, of which the first turned out to be the easy
+half.
 
-*The strip has to be verified on a machine that can build.* P4b could prove its own operation on
-Windows because `python.py` borrows on every platform; `ruby_unix.py` compiles and runs nowhere but
-macOS and Linux. The proof P4b built — `mapped()` comparing every allocated section and program
-header across the operation, `countersigned()` recomputing the arm64 code signature — is what should
-be reached for, and lifting it out of `python.py` into something both recipes share is most of the
-work.
+#### The proof moved before it grew
 
-*One of the two files is an `ar` archive, not an executable*, and it is the one P5a has just written
-into `keeps` as needed. `strip --strip-debug` over a static library is a different claim from
-stripping a binary nothing links: what has to survive is every symbol an embedder resolves, so the
-check is the archive's symbol index and each member's `.symtab`, not a loader's view. Measured with
-`llvm-objcopy --strip-debug`, it would take the Linux archive from 41.4 MB to 15.3 MB and the macOS
-one from 28.3 MB to 9.3 MB.
+`mapped()` and `countersigned()` are now `tools/strip.py`, with the flag tables and the driver that
+runs the operation and refuses it. `python.strip_symbols` keeps its docstring and is four lines. The
+argument for hoisting is the one this repository makes about `php_parity` and `ruby_parity`: two
+recipes stripping their own binaries by their own rules are two opinions about one file, and nothing
+outside either recipe could notice them diverging.
 
-Do it with P6 or before it, not after — for the reason this task inherited from P5a: what P6 checks
-is that six cells agree, and a row where four of them carry 38 MB the other two do not is a row that
-check would have to be pointed at with an exception.
+#### An `ar` archive is not an image, and that difference is the rest of the task
+
+`strip --strip-debug` over a static library is a different claim from stripping a binary nothing
+links, and the wrong instruction is *silently* wrong. `--strip-all` over `libruby-static.a` takes it
+from 41.4 MB to 7.9 MB and leaves a file that resolves nothing — an artifact no test here would
+catch, because nothing inside the tree links against that file either. So `strip.ARCHIVES` is
+`--strip-debug` on Linux and `-S` on macOS, against `strip.IMAGES`'s `--strip-all` and `-x`, and the
+four are not interchangeable in either direction.
+
+`strip.resolvable()` is the check, and it compares what a linker resolves rather than what a loader
+maps: the archive's own symbol index, then per member the globals, the bytes of every section that
+will end up in somebody else's binary, and the relocations — **by name**. By name because a
+successful strip renumbers both tables underneath them, so comparing them as bytes would report
+every run that worked as a failure. Two things were learned by running it rather than by writing it:
+
+- **`-S` means opposite things to the two tools.** To macOS's `strip` it is `--strip-debug`, which
+  is why `strip.ARCHIVES` spells it that way; to `objcopy`, which is what stood in for the platform
+  tool here, it is `--strip-all`. The rehearsal refused the macOS archive on the first run,
+  correctly, for a reason that was about the rehearsal.
+- **`ARM64_RELOC_ADDEND` puts a literal where every other relocation type puts a symbol or a section
+  number**, so read alike, an addend of 12 becomes "the twelfth section" — and on 50 of the 116
+  members of `libruby.3.4-static.a` the twelfth section is one of the `__DWARF` ones being removed.
+  The check reported the strip it had just performed correctly as having damaged the archive.
+  Nothing short of a real archive would have shown it.
+
+One key is compared for loss rather than for equality, and it is the archive index. A common symbol
+— what `VALUE rb_cArray;` compiles to — is in every member and in none of the `__.SYMDEF SORTED`
+Apple's archiver wrote, and llvm's archiver puts all 165 of them back. Nothing that resolved stopped
+resolving, which is the whole of the question, so the direction is enforced and the growth is
+printed.
+
+#### What it weighs
+
+| | tree before | tree after | out | `bin/ruby` | static libruby |
+|---|---|---|---|---|---|
+| linux-x86_64 | 104.4 MB | 63.1 MB | 41.3 MB (40%) | 20.5 → 7.5 MB | 41.4 → 15.3 MB |
+| macos-aarch64 | 78.4 MB | 55.3 MB | 23.2 MB (30%) | 6.9 → 5.4 MB | 28.3 → 9.3 MB |
+
+More than P5a's DWARF figures because `--strip-all` takes the symbol tables of the images as well,
+across 106 files on Linux and 104 on macOS rather than the two big ones alone.
+
+#### Verified
+
+Rehearsed against the published `ruby-3.4.10` artifacts for both cells, with `llvm-objcopy` standing
+in for the platform `strip` this machine has not got, through `strip.symbols` itself rather than
+around it. Every one of the 107 Linux and 105 macOS files came through clean, `countersigned()`
+included, with one allowance stated: seven of the bundled Linux shared libraries differ in
+`p_offset` and in nothing else — same `p_vaddr`, `p_filesz`, `p_memsz`, same section bytes — because
+llvm-objcopy repacks an ELF where GNU strip leaves the hole. The recipe calls GNU strip, and P4b's
+CI runs are the evidence that the identical comparison passes there. The negative: `--strip-all`
+over the static library is refused on both cells, naming the symbols that stopped resolving.
+
+And unlike P4b, this row's own smoke test reaches the file being stripped. `smoke()` compiles
+`bigdecimal` from the relocated tree, and `rbconfig.rb` sends that link at `-lruby-static` — so the
+archive P5a declared in `keeps` is exercised by a compiler after the fact, on the machine that
+published it.
+
+The row has to be repacked for any of this to take effect, and only the four compiled cells change.
 
 ### [ ] P6 — Make the rule something CI can fail on **(rule)**
 

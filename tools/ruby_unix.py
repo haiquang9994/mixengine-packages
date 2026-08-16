@@ -69,6 +69,7 @@ import borrow  # noqa: E402  — siblings, and this directory is not importable 
 import relocate  # noqa: E402
 import ruby_parity  # noqa: E402
 import ruby_smoke  # noqa: E402
+import strip  # noqa: E402
 
 # Every Ruby release ruby-lang.org has ever published, with the SHA-256 it published beside it. One
 # file answers both questions this recipe has — *what exists* and *what it should hash to* — which is
@@ -777,6 +778,50 @@ def scrub(tree: Path, directories: list[Path]) -> list[str]:
     return changed
 
 
+def strip_symbols(tree: Path, operating_system: str) -> str:
+    """Take the debug information out of what this recipe compiled, and prove it took nothing else.
+
+    **This is the asymmetry P5a measured and did not fix**, and it is between the two halves of one
+    row: RubyInstaller links with `-s` — visible in the `DLDFLAGS` its own `ruby-3.4.pc` publishes —
+    so a Windows cell carries no DWARF at all, while these four ship 37.8 MB of it in a 106 MB Linux
+    tree and 19.9 MB in an 81 MB macOS one. That is one version meaning two things, in the same
+    direction and for the same reason as P4b's finding about CPython, and it is settled the same
+    way: level down to the cell whose publisher already did this.
+
+    Two calls rather than one, because this tree holds two kinds of file and *the instruction for
+    one would destroy the other* — see :data:`strip.IMAGES` and :data:`strip.ARCHIVES`. `bin/ruby`
+    and the compiled extension modules are loaded, and their symbol tables are dead weight.
+    `lib/libruby*-static.a` is **linked against**, by anything embedding Ruby, which is precisely
+    what P5a wrote into `keeps` — and `--strip-all` over it would produce a 7.9 MB file that
+    resolves nothing and passes every test in this repository, because nothing in the tree links
+    against it either. It gets `--strip-debug`, and :func:`strip.resolvable` checks the archive's
+    index and every member's symbols across the operation.
+
+    Done here rather than by configuring the build with `debugflags=`, which would be less work and
+    a weaker claim. A flag that suppresses debug information is proven by nothing: the artifact is
+    simply smaller, and whether it is otherwise the Ruby that Ruby's own build produces is a
+    question nobody can answer afterwards. Removing the sections and then comparing everything a
+    loader maps and everything a linker resolves is a claim a reader can check, on the same file, in
+    either direction. macOS is smaller here than Linux for a reason `assemble` already gave: the
+    `.dSYM` bundles are deleted there, which is where the compiler put each *executable's* debug
+    information and is not where it put the archive's.
+    """
+    images, libraries = relocate.machine_files(tree), strip.archives(tree)
+
+    def weigh() -> int:
+        return sum(path.stat().st_size for path in images + libraries)
+
+    was = weigh()
+    strip.symbols(tree, images, strip.IMAGES[operating_system], operating_system)
+    strip.symbols(tree, libraries, strip.ARCHIVES[operating_system], operating_system)
+    saved = was - weigh()
+    print(f"stripped {len(images)} binar{'y' if len(images) == 1 else 'ies'} and "
+          f"{len(libraries)} static librar{'y' if len(libraries) == 1 else 'ies'}: "
+          f"{saved:,} bytes out")
+    return (f"{len(images) + len(libraries)} compiled files stripped, {saved:,} bytes of debug "
+            f"information out")
+
+
 def collect_licences(tree: Path, source: Path, work: Path, bundled: dict[str, Path]) -> None:
     """Ship the licence of everything in the archive: Ruby's, the three compiled here, and the rest.
 
@@ -973,6 +1018,9 @@ def main() -> None:
     # Both spellings of the same directory: macOS hands out `/var/folders/…` and resolves it to
     # `/private/var/folders/…`, and a build system records whichever one it was given.
     scrub(tree, sorted({work, work.resolve()}))
+    # After `relocate.bundle`, which rewrites the load paths of these same files, and before the
+    # smoke test, which has to exercise the tree that ships rather than the one that was built.
+    stripped = strip_symbols(tree, operating_system)
 
     libraries = ", ".join(
         f"{name} {recipe['version']}" for name, recipe in SOURCE_LIBRARIES.items()
@@ -982,7 +1030,7 @@ def main() -> None:
         f"cache.ruby-lang.org/pub/ruby/index.txt); {libraries}, openssl resolving its default "
         f"certificate paths beside itself; YJIT with {rust or 'a rust toolchain'}; "
         f"{len(bundled)} bundled libraries; CA bundle from curl.se dated {bundle_date}, "
-        f"sha256 {bundle_digest[:12]}…"
+        f"sha256 {bundle_digest[:12]}…; {stripped}"
     )
     if rewritten:
         recipe += f"; {len(rewritten)} interpreter path(s) rewritten to be relative"

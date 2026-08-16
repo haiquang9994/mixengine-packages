@@ -27,9 +27,10 @@ four Unix ones: see :func:`keeps`, which states that in the artifact rather than
 :func:`strip_symbols` and is a decision Windows made for the other two cells: upstream's stripped
 variant ships no `.pdb` at all, while the Unix halves ship symbol tables the loader never maps.
 Because the file with the most of them is the one nothing in the archive loads, the argument that
-this is safe cannot be made by running anything — :func:`mapped` makes it by comparing the whole of
-what a loader and a linker see across the operation, and :func:`countersigned` recomputes the arm64
-code signature afterwards.
+this is safe cannot be made by running anything — :func:`strip.mapped` makes it by comparing the
+whole of what a loader and a linker see across the operation, and :func:`strip.countersigned`
+recomputes the arm64 code signature afterwards. Both moved to :mod:`strip` under P5b, when the Ruby
+row needed the same operation.
 
 Everything mechanical is in :mod:`borrow`, shared with the Node.js and Ruby recipes. What stays here
 is the resolution against upstream's release and the smoke test, which is a claim about Python and
@@ -46,8 +47,6 @@ import json
 import os
 import re
 import shutil
-import struct
-import subprocess
 import sys
 import tempfile
 import urllib.error
@@ -58,6 +57,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import borrow  # noqa: E402  — siblings, and this directory is not importable as a package
 import relocate  # noqa: E402
+import strip  # noqa: E402
 
 REPOSITORY = "https://github.com/astral-sh/python-build-standalone"
 
@@ -123,40 +123,6 @@ UNIX_LIB_KEEP = ("python3.*", "libpython3*", "pkgconfig")
 # `_socket.lib` and `_tkinter.lib` among them — which exist to link those modules *into* a Python
 # being built, and nothing installing a wheel or compiling an sdist has ever opened one.
 WINDOWS_IMPORT_KEEP = ("python3*.lib",)
-
-# What the platform's own `strip` is asked to do, and **it is deliberately not the same instruction
-# on the two Unix halves**, which is the finding this table exists to carry rather than a portability
-# wrinkle. ELF keeps two symbol tables and a linker only ever reads the allocated one: `.dynsym` has
-# `SHF_ALLOC`, `strip` may not touch it, so `--strip-all` takes `.symtab` and everything anyone links
-# against survives untouched. Mach-O keeps **one** — `LC_SYMTAB` holds the local, the exported and
-# the undefined symbols in three ranges that `LC_DYSYMTAB` indexes — and the same instruction there
-# empties the exported range: measured on `libpython3.13.dylib`, 1,755 exported symbols become 0 and
-# `_Py_Initialize` stops existing in the file, to save 66 KB more than `-x` saves. So `-x`, which
-# discards the local range and is what the exported one is defined against.
-#
-# Windows is absent because there is nothing there to do, and that absence is this task's argument:
-# `install_only_stripped` ships **no `.pdb` at all** — zero files, of 3,303 — so a Windows cell has
-# already had its symbols taken. Levelling the other two down to it is the same move `prune` made
-# with tkinter, in the same direction, for the same rule.
-STRIP = {"linux": ["--strip-all"], "macos": ["-x"]}
-
-# ELF's "the loader maps this" bit, and the section type that occupies address space without
-# occupying the file. Both are needed to say what a stripped binary must not have changed.
-SHF_ALLOC = 0x2
-SHT_NOBITS = 0x8
-
-# The load commands that point into `__LINKEDIT`, minus the two a strip is *meant* to rewrite. The
-# symbol table is what is being removed and the code signature has to be remade over the smaller
-# file, so those two are compared by other means below; everything else here — the export trie the
-# static linker reads, the chained fixups dyld applies, the function starts a profiler walks — is
-# load-bearing and has to come through byte for byte.
-LINKEDIT = {
-    0x80000022: 5,           # LC_DYLD_INFO_ONLY: rebase, bind, weak bind, lazy bind, export
-    0x80000033: 1,           # LC_DYLD_EXPORTS_TRIE
-    0x80000034: 1,           # LC_DYLD_CHAINED_FIXUPS
-    0x00000026: 1,           # LC_FUNCTION_STARTS
-    0x00000029: 1,           # LC_DATA_IN_CODE
-}
 
 # Imported from the relocated tree, and every one of them is a compiled extension module or the thing
 # that proves one works. A CPython missing any of these starts, answers `--version` correctly and
@@ -379,180 +345,6 @@ def strip_unportable(tree: Path, operating_system: str) -> list[str]:
     return removed
 
 
-def mapped(path: Path) -> dict[str, object]:
-    """Reduce a binary to everything a loader or a linker can see in it, and to nothing else.
-
-    This is what turns :func:`strip_symbols` from a gamble into arithmetic, and it is the piece the
-    roadmap said had to exist before anything was stripped. The usual way to justify modifying a
-    borrowed executable is to run it afterwards, and that proof does not reach here: the thing most
-    at risk is `lib/libpython3.X.so.1.0`, which — as :func:`keeps` records at length — **nothing in
-    this archive loads**. A smoke test can start the interpreter a thousand times without touching
-    it. So the claim is made structurally instead. If every byte the loader maps and every table the
-    linker reads is identical before and after, the two files cannot behave differently, and no
-    amount of running either one would say more than that.
-
-    On ELF the split is drawn by the hardware: `SHF_ALLOC` marks a section as part of the process
-    image, and `strip` removes only sections without it. `.dynsym`, `.dynstr`, `.gnu.hash`,
-    `.dynamic` and the `.rela.dyn`/`.rela.plt` a loader applies are all allocated; `.symtab`,
-    `.strtab` and the `.rela.text` a post-link optimiser wanted are not. Program headers are compared
-    whole and separately, because they are what the kernel actually reads and a section header could
-    in principle be tidy while a segment moved.
-
-    Mach-O has no such bit, so the line is drawn at `__LINKEDIT` — the one segment that legitimately
-    shrinks, since the symbol table is inside it. Everything else in there that a strip must not
-    disturb is named in :data:`LINKEDIT` and hashed by hand, and the exported symbols are compared as
-    *names* rather than as table offsets, which is the only comparison that survives the table being
-    rebuilt underneath them.
-    """
-    blob = path.read_bytes()
-    seen: dict[str, object] = {}
-
-    if blob[:4] == b"\x7fELF":
-        if blob[4] != 2:
-            raise SystemExit(f"{path.name} is a 32-bit ELF, and every cell in this table is 64-bit")
-        end = "<" if blob[5] == 1 else ">"
-        kind, machine = struct.unpack_from(end + "HH", blob, 0x10)
-        e_phoff, e_shoff = struct.unpack_from(end + "QQ", blob, 0x20)
-        e_phentsize, e_phnum = struct.unpack_from(end + "HH", blob, 0x36)
-        e_shentsize, e_shnum, e_shstrndx = struct.unpack_from(end + "HHH", blob, 0x3A)
-        seen["elf"] = (kind, machine, e_phnum)
-        for index in range(e_phnum):
-            seen[f"segment {index}"] = struct.unpack_from(
-                end + "IIQQQQQQ", blob, e_phoff + index * e_phentsize)
-
-        def header(index: int) -> tuple:
-            return struct.unpack_from(end + "IIQQQQ", blob, e_shoff + index * e_shentsize)
-
-        names_at = header(e_shstrndx)[4]
-        for index in range(e_shnum):
-            name, kind, flags, addr, offset, size = header(index)
-            if not flags & SHF_ALLOC:
-                continue
-            stop = blob.index(b"\0", names_at + name)
-            # `.bss` occupies address space and no file, so hashing at its offset would hash whatever
-            # section happens to be lying there and call a stripped file different for no reason.
-            body = b"" if kind == SHT_NOBITS else blob[offset:offset + size]
-            label = blob[names_at + name:stop].decode()
-            seen[f"section {label}"] = (kind, flags, addr, size, hashlib.sha256(body).hexdigest())
-        return seen
-
-    if blob[:4] != b"\xcf\xfa\xed\xfe":
-        raise SystemExit(f"{path.name} is neither a 64-bit ELF nor a thin 64-bit Mach-O")
-
-    cpu, ncmds = struct.unpack_from("<I", blob, 4)[0], struct.unpack_from("<I", blob, 16)[0]
-    seen["macho"] = (cpu, struct.unpack_from("<I", blob, 12)[0])
-    offset, symtab, dysymtab, dylibs, rpaths = 32, None, None, [], []
-    for _ in range(ncmds):
-        command, size = struct.unpack_from("<II", blob, offset)
-        if command == 0x19:                                          # LC_SEGMENT_64
-            label = blob[offset + 8:offset + 24].split(b"\0")[0].decode()
-            vmaddr, vmsize, fileoff, filesize = struct.unpack_from("<QQQQ", blob, offset + 24)
-            count, = struct.unpack_from("<I", blob, offset + 64)
-            if label == "__LINKEDIT":
-                offset += size
-                continue
-            seen[f"segment {label}"] = (vmaddr, vmsize, filesize, count)
-            # Sections rather than the segment's file range, and this is the correction the check
-            # made on its own first run rather than a nicety. `__TEXT` begins at file offset 0 on a
-            # Mach-O, so it contains the header and every load command — including the `LC_SYMTAB`
-            # and `LC_CODE_SIGNATURE` whose offsets a strip is *supposed* to move. Hashing the
-            # segment whole therefore reports `__TEXT` as different on every successful strip, which
-            # is the check calling its own subject a failure. Sections start after the load commands
-            # and are the same granularity the ELF branch above compares.
-            for index in range(count):
-                at = offset + 72 + index * 80
-                name = blob[at:at + 16].split(b"\0")[0].decode()
-                addr, length = struct.unpack_from("<QQ", blob, at + 32)
-                where, flags = struct.unpack_from("<I", blob, at + 48)[0], \
-                    struct.unpack_from("<I", blob, at + 64)[0]
-                # The zero-fill types occupy address space and no file, exactly as ELF's NOBITS
-                # does, and hashing at their offset would hash whatever is lying there.
-                body = b"" if flags & 0xFF in (0x1, 0xC, 0x12) else blob[where:where + length]
-                seen[f"section {label},{name}"] = (addr, length, flags,
-                                                   hashlib.sha256(body).hexdigest())
-        elif command == 0x02:                                        # LC_SYMTAB
-            symtab = struct.unpack_from("<IIIIII", blob, offset)
-        elif command == 0x0B:                                        # LC_DYSYMTAB
-            dysymtab = struct.unpack_from("<20I", blob, offset)
-        elif command == 0x0D:                                        # LC_ID_DYLIB
-            seen["install name"] = blob[offset + 24:offset + size].split(b"\0")[0].decode()
-        elif command in (0x0C, 0x8000001F, 0x18):                    # LC_LOAD*_DYLIB, LC_REEXPORT
-            dylibs.append(blob[offset + 24:offset + size].split(b"\0")[0].decode())
-        elif command == 0x8000001C:                                  # LC_RPATH
-            rpaths.append(blob[offset + 12:offset + size].split(b"\0")[0].decode())
-        elif command in LINKEDIT:
-            for pair in range(LINKEDIT[command]):
-                at, length = struct.unpack_from("<II", blob, offset + 8 + pair * 8)
-                seen[f"linkedit {command:#x}/{pair}"] = hashlib.sha256(
-                    blob[at:at + length]).hexdigest()
-        offset += size
-    seen["dylibs"], seen["rpaths"] = tuple(dylibs), tuple(rpaths)
-
-    # The exported symbols, by name. A strip rebuilds the table and renumbers everything in it, so
-    # comparing `LC_DYSYMTAB`'s indices would report a difference on every successful run; comparing
-    # the names it points at is the question actually being asked — can this still be linked?
-    if symtab and dysymtab:
-        _, _, symoff, _nsyms, stroff, _strsize = symtab
-        first, count = dysymtab[4], dysymtab[5]
-        exported = []
-        for index in range(first, first + count):
-            strx, = struct.unpack_from("<I", blob, symoff + index * 16)
-            exported.append(blob[stroff + strx:blob.index(b"\0", stroff + strx)].decode())
-        seen["exports"] = tuple(sorted(exported))
-    return seen
-
-
-def countersigned(path: Path) -> str | None:
-    """Recompute a Mach-O's ad-hoc signature, or say there is none. ``None`` means valid.
-
-    **The failure this exists for cannot be caught any other way.** The arm64 cells carry an ad-hoc
-    signature whose CodeDirectory holds a SHA-256 of each 4 KB page of the file — 4,230 of them in
-    `libpython3.13.dylib` — and the kernel refuses to map one whose pages no longer hash to what it
-    says: not with an error a caller can print, with `SIGKILL`. The `x86_64-apple-darwin` cell of the
-    same release carries no `LC_CODE_SIGNATURE` at all, which is why this answers ``None`` for a file
-    without one rather than treating its absence as a fault. A strip that resized the file and left
-    the signature behind would
-    therefore produce a dylib that is structurally perfect, passes every comparison in
-    :func:`mapped`, and kills any process that loads it. Nothing else here would notice, least of all
-    the smoke test: `libpython3.X.dylib` is the file this archive never opens.
-
-    So it is checked the way everything else in this repository is checked — by recomputing it. The
-    blobs inside a signature are big-endian inside a little-endian file, which is the one thing about
-    the format worth knowing before reading the `struct` calls below.
-    """
-    blob = path.read_bytes()
-    ncmds, offset, at = struct.unpack_from("<I", blob, 16)[0], 32, None
-    for _ in range(ncmds):
-        command, size = struct.unpack_from("<II", blob, offset)
-        if command == 0x1D:                                          # LC_CODE_SIGNATURE
-            at = struct.unpack_from("<I", blob, offset + 8)[0]
-            break
-        offset += size
-    if at is None:
-        return None
-
-    magic, _length, count = struct.unpack_from(">III", blob, at)
-    if magic != 0xFADE0CC0:
-        return f"{path.name} has a code signature that is not an embedded superblob ({magic:#x})"
-    for index in range(count):
-        _kind, relative = struct.unpack_from(">II", blob, at + 12 + index * 8)
-        directory = at + relative
-        if struct.unpack_from(">I", blob, directory)[0] != 0xFADE0C02:
-            continue
-        hashes, _ident, _special, slots, limit = struct.unpack_from(">IIIII", blob, directory + 16)
-        width, algorithm, _platform, page = struct.unpack_from(">BBBB", blob, directory + 36)
-        if algorithm != 2:
-            return f"{path.name} is signed with hash type {algorithm}, and this only knows SHA-256"
-        for slot in range(slots):
-            start = slot * (1 << page)
-            want = blob[directory + hashes + slot * width:directory + hashes + (slot + 1) * width]
-            if hashlib.sha256(blob[start:min(start + (1 << page), limit)]).digest()[:width] != want:
-                return (f"{path.name} carries a code signature that no longer matches its own "
-                        f"bytes at page {slot} — on arm64 the kernel answers that with SIGKILL")
-        return None
-    return f"{path.name} has a code signature with no CodeDirectory in it"
-
-
 def strip_symbols(tree: Path, operating_system: str) -> dict[str, str]:
     """Take the symbol tables out of every binary in the tree, and prove nothing else went with them.
 
@@ -586,48 +378,15 @@ def strip_symbols(tree: Path, operating_system: str) -> dict[str, str]:
     own: `lib/libpython3.X.so` points at the library about to be stripped, and reaching it twice
     through its two names would either strip a copy or report the saving twice, depending on how the
     archive was unpacked.
+
+    The operation and its proof moved to :mod:`strip` under P5b, where the Ruby row needed both and
+    a second copy of them would have been a second opinion about the same file. What stays here is
+    which files this recipe strips and what it asks for, because only the recipe knows.
     """
-    if operating_system not in STRIP:
+    if operating_system not in strip.IMAGES:
         return {}
-    flags = STRIP[operating_system]
-    tool = shutil.which("strip")
-    if tool is None:
-        # Where `mariadb.strip_debug` returns quietly on the same condition, because there the
-        # saving is the whole point and an unstripped bintar is merely large. Here the tree ships
-        # either way and the difference is what the manifest claims about it, so a missing tool has
-        # to stop the pack rather than silently publish the other artifact.
-        raise SystemExit(
-            "no `strip` on PATH, and this recipe modifies the binaries it ships — packing without "
-            "it would publish a tree that does not match the one every other run of this produces"
-        )
-
-    changed: dict[str, str] = {}
-    for path in relocate.machine_files(tree):
-        relative = path.relative_to(tree).as_posix()
-        before, was = mapped(path), path.stat().st_size
-        done = subprocess.run([tool, *flags, str(path)], capture_output=True, text=True)
-        if done.returncode != 0:
-            raise SystemExit(f"strip {' '.join(flags)} {relative} failed: {done.stderr.strip()}")
-
-        after = mapped(path)
-        differences = [key for key in sorted(set(before) | set(after))
-                       if before.get(key) != after.get(key)]
-        if differences:
-            raise SystemExit(
-                f"strip {' '.join(flags)} {relative} changed {len(differences)} thing(s) a loader "
-                f"or a linker can see — {', '.join(differences[:4])} — so this is not the symbol "
-                f"table coming out, and the artifact is not being published"
-            )
-        wrong = countersigned(path) if operating_system == "macos" else None
-        if wrong:
-            raise SystemExit(wrong)
-
-        now = path.stat().st_size
-        # The command rather than a sentence, because this field's reader is holding upstream's
-        # archive and ours and wants to know what was done to the file, not why it was a good idea.
-        changed[relative] = f"strip {' '.join(flags)}"
-        print(f"stripped {relative} ({was:,} -> {now:,}, {was - now:,} of symbol table)")
-    return changed
+    return strip.symbols(tree, relocate.machine_files(tree), strip.IMAGES[operating_system],
+                         operating_system)
 
 
 def prune(tree: Path, operating_system: str) -> list[str]:

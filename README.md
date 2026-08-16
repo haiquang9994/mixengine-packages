@@ -322,13 +322,25 @@ surplus after all. Both stay, with `include/` beside them, declared in `keeps` �
 cells too, where `lacks` has just said no compiler is present: `ridk install` adds one, and headers
 deleted here cannot be.
 
-What the same measurement did find is that **the Unix cells ship their debug information**. Of
-3.4.10's Linux tree, `bin/ruby` is 20.5 MB with 11.7 MB of DWARF in it and the static library is
-41.4 MB of which 26.1 MB is DWARF and its relocations — 37.8 MB of a 106 MB tree, against 19.9 MB of
-81 MB on macOS, where `.dSYM` bundles are already deleted and only the archive keeps any. Windows
-has none: RubyInstaller links with `-s`. That is P4b's finding on a different row, it is levelled in
-the same direction, and it is written up as its own task rather than folded in here, because it
-changes what a compiled cell contains and no machine here can compile one.
+What the same measurement did find is that **the Unix cells shipped their debug information**, which
+is P4b's finding on a different row and is levelled in the same direction. Of 3.4.10's Linux tree,
+`bin/ruby` was 20.5 MB with 11.7 MB of DWARF in it and the static library 41.4 MB of which 26.1 MB
+was DWARF and its relocations; Windows has none, RubyInstaller having linked with `-s`. Every
+compiled file is now stripped and every one of them is proven across the operation, which takes
+104.4 MB of Linux tree to 63.1 MB and 78.4 MB of macOS tree to 55.3 MB.
+
+**It takes two instructions, because the tree holds two kinds of file and either instruction would
+destroy the other kind.** `bin/ruby` and the extension modules are loaded, and their symbol tables
+are dead weight — those get `--strip-all` on Linux and `-x` on macOS, and are checked by comparing
+every byte a loader maps and every table a linker reads before and after. The static library is
+*linked against*, which is what `keeps` has just finished arguing, and its symbol table is the entire
+point: `--strip-all` over `libruby-static.a` takes it from 41.4 MB to 7.9 MB and leaves a file that
+resolves nothing, a broken artifact that no test here would catch because nothing inside the tree
+links against it either. So it gets `--strip-debug`, and it is checked by a different comparison —
+the archive's own symbol index, then every member's globals, its relocations resolved *by name*, and
+the bytes of every section that will end up in somebody else's binary. By name because a successful
+strip renumbers both tables underneath them; comparing the tables as bytes would report every
+working run as a failure.
 
 The CA store is the part that is not obvious. A Ruby linked against a distribution's OpenSSL
 inherits that distribution's `OPENSSLDIR` — `/etc/pki/tls` on the Red Hat family, `/etc/ssl` on the
