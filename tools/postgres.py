@@ -182,10 +182,20 @@ NOT_SHIPPED = (
     # `testplug` are checks upstream runs at build time.
     "test_decoding*", "test_cloexec*", "testplug*", "pg_regress*", "isolationtester*",
     "pg_isolation_regress*",
-    # wxWidgets, eight DLLs of it, which exist in this archive for StackBuilder's window and for
-    # nothing else. They are in `bin/` beside the server rather than inside the application that
-    # uses them, which is why removing StackBuilder alone leaves 14 MB of a GUI toolkit behind.
-    "wx*.dll", "wxbase*", "wxmsw*",
+    # **StackBuilder, and it takes two entries because it is scattered across three places.**
+    # `UNWANTED` keeps its own directory out at unpack time. What that leaves in `bin/` is wxWidgets
+    # — eight DLLs, there for StackBuilder's window and for nothing else, sitting beside the server
+    # rather than inside the application that uses them, so removing the directory alone leaves
+    # 14 MB of GUI toolkit behind.
+    #
+    # And `stackbuilder.exe`, which is the same oversight pointing the other way and which shipped.
+    # Removing the DLLs without it published **a binary that cannot load**: three unresolved wx
+    # imports in `postgres-18.6-windows-x86_64.zip`, found the first minute `relocate.verify` was
+    # allowed to look at a Windows tree, in an archive that had passed every check this repository
+    # had. Neither half was ever wanted — a downloader for more EDB software is not something a
+    # local development environment installs — and the pair is written on one entry now so that
+    # deleting one of them again means deleting the sentence that explains the other.
+    "stackbuilder*", "wx*.dll", "wxbase*", "wxmsw*",
 )
 
 # Debug information, by extension, wherever it sits — the same list `mariadb.DEBRIS` carries and for
@@ -680,23 +690,28 @@ def main() -> None:
         borrow.declare(tree, manifest, removed=removed, changed=changed)
 
     elsewhere = borrow.moved(tree)
-    if not windows:
-        # **Checked and not corrected, which is a decision.** EDB's archive carries its own OpenSSL,
-        # ICU, krb5, libxml2 and lz4 in `lib/` already, so the expected answer is that nothing
-        # reaches outside the tree. `relocate.bundle` would make that true by rewriting load
-        # commands, and a rewritten load command is a *modified* binary: the signature over it stops
-        # matching and every file has to be signed again by this repository rather than by the
-        # publisher. `thin` above changes which bytes ship without ever changing a byte, which is
-        # why it needs no signature of its own; bundling would be the other kind of change. Asking
-        # first is how a recipe finds out whether it needs to.
-        problems = relocate.verify(elsewhere)
-        for problem in problems:
-            print(f"error: {problem}", file=sys.stderr)
-        if problems:
-            raise SystemExit(
-                "the relocated tree reaches outside itself: EDB's archive is not self-contained "
-                "after all, and this recipe would have to bundle and re-sign it"
-            )
+    # **Checked and not corrected, which is a decision.** EDB's archive carries its own OpenSSL,
+    # ICU, krb5, libxml2 and lz4 in `lib/` already, so the expected answer is that nothing reaches
+    # outside the tree. `relocate.bundle` would make that true by rewriting load commands, and a
+    # rewritten load command is a *modified* binary: the signature over it stops matching and every
+    # file has to be signed again by this repository rather than by the publisher. `thin` above
+    # changes which bytes ship without ever changing a byte, which is why it needs no signature of
+    # its own; bundling would be the other kind of change. Asking first is how a recipe finds out
+    # whether it needs to.
+    #
+    # Windows was outside this until P6a, on the true-at-the-time grounds that `relocate` could not
+    # read a PE. The first run with the guard off failed, on `bin/stackbuilder.exe` — see
+    # `NOT_SHIPPED` — so the cell that was assumed to have nothing to say had been shipping an
+    # unloadable binary. The default `directories` is right here: this tree keeps its binaries in
+    # `bin` and `lib`, measured at 135 files either way against a root scan.
+    problems = relocate.verify(elsewhere)
+    for problem in problems:
+        print(f"error: {problem}", file=sys.stderr)
+    if problems:
+        raise SystemExit(
+            "the relocated tree reaches outside itself: EDB's archive is not self-contained "
+            "after all, and this recipe would have to bundle and re-sign it"
+        )
 
     manifest["smoke"] = {
         "relocated": True,
