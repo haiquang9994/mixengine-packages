@@ -106,6 +106,27 @@ zero and shipped something wrong rather than on code that failed to compile.
 [`docs/building-from-source.md`](docs/building-from-source.md) is what that was worth keeping — read
 it before opening any other **built** cell, because little of it is about PHP.
 
+**Three recipes, one extension set.** Borrowing the Windows build meant borrowing its publisher's
+idea of what PHP is for, and that idea is not this one: 8.3 arrived without `redis` and `mongodb`,
+the two the Unix legs *fail a build* over, and with an ODBC bridge, an Oracle client, a Firebird
+driver, and PHP's own `dl_test` and `zend_test`. So the set is chosen in
+[`tools/php_parity.py`](tools/php_parity.py) and the three recipes reach it three ways: compiled in
+by `static-php-cli`, `phpize`d on 7.x, downloaded from php.net's own PECL builds on Windows. What is
+surplus there is deleted, along with the libraries it was the only user of, and both directions are
+named in `upstream.added` and `upstream.removed`.
+
+Two of those differences could not be resolved by choosing, and are written down instead. Windows
+has never had `pcntl`, `posix`, `sysvmsg` or `sysvsem`, and its 7.0 build has no `readline` and no
+`dba` where every Unix cell of 7.0 does; 7.0 and 7.1 carry `mcrypt` compiled in, and 7.0 through 7.3
+carry `wddx`, which cannot be removed from a build nobody here compiles. Naming them is what lets a
+cross-cell check exist at all — everything it does *not* name is then a defect.
+
+One more field came out of this. `extensions.shared` says what an artifact can load and says nothing
+about what it will; on Windows nine extensions that are compiled into every Unix cell are loadable
+modules, because no Windows build exists with them static. `extensions.enabled` is the set the
+daemon is expected to switch on, so `static ∪ enabled` is what a cell actually does, and that is
+the thing six cells have to agree about.
+
 For Node.js there is nothing to evaluate and one recipe for every cell:
 
 | OS / arch | Range | How |

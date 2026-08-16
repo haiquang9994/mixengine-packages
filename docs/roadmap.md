@@ -16,7 +16,7 @@ What is *not* done is the rule itself.
 
 | Kind | Cells | Recipes | Conforms |
 | --- | --- | --- | --- |
-| PHP | 7.0 – newest, 6 targets | `php_windows`, `php_unix`, `php_legacy_unix` | **no** — P2 |
+| PHP | 7.0 – newest, 6 targets | `php_windows`, `php_unix`, `php_legacy_unix` | yes — P2 |
 | Node.js | 16 – newest, 6 targets | `node` | **no** — P3 |
 | Python | 3.10 – newest, 6 targets | `python` | partly — P4 |
 | Ruby | 3.2 – newest, 6 targets | `ruby`, `ruby_unix` | unknown — P5 |
@@ -32,8 +32,9 @@ no recipe knew it had, and closing those took seven further commits; what that a
 written down in [the README](../README.md#one-version-means-one-thing-and-no-more-than-is-needed),
 because it is the argument for P6. The rule has never been applied backwards to the four runtime
 rows that were packed before it existed, and P1–P6 are that work. Measured against upstream's own
-archives, the gaps are not marginal: **PHP 8.3 on Windows is missing two extensions this repository
-fails a Unix build over**, and one Node.js version is 106 MB on Windows and 198 MB on Linux.
+archives, the gaps were not marginal: PHP 8.3 on Windows was missing two extensions this repository
+fails a Unix build over, which P2 closed, and one Node.js version is still 106 MB on Windows and
+198 MB on Linux.
 
 Nothing below is a rewrite. Every recipe already downloads, verifies, relocates, proves and packs
 correctly; what they do not do is *choose*, and choosing once is the whole of the rule.
@@ -66,7 +67,7 @@ The MariaDB recipes are the remaining writers of `upstream.*` outside `declare`,
 `stripped`, which nothing else does — folding them in belongs with P6, where the check that reads
 these fields is written.
 
-### [ ] P2 — PHP: one extension set, chosen once **(rule)**
+### [x] P2 — PHP: one extension set, chosen once **(rule)**
 
 The widest gap here, and the only one that contradicts something this repository already enforces
 elsewhere.
@@ -96,6 +97,50 @@ the artifact saying that the set is *expected to be enabled* rather than merely 
 Resolve each difference in one direction for all six cells, and **say so beside the other recipe** —
 a deletion in the packer and a `--with-` in the compiler are one decision written twice, and the rule
 is explicit that each has to name the other.
+
+Closed, and not beside the other recipe but *inside* it: the set is `tools/php_parity.py` and all
+three recipes read it, because "say so beside" is a comment and comments do not fail a build. The
+extensions this repository adds are one list now, reached three ways — compiled in on 8.1+,
+`phpize`d on 7.x, downloaded from php.net's own PECL builds on Windows, where all six of them exist
+for every branch except `zstd` before 7.2, so 7.0 and 7.1 do without it on all six cells rather than
+on four.
+
+The surplus is thrown out by a **keep-list rather than a delete-list**, which is the one decision
+here worth arguing with. A delete-list is written against the archive somebody measured, 8.3's,
+and says nothing about 7.3's `php_interbase.dll` or about 8.6; the keep-list answered for all
+eleven branches without being told about any of them, dropping `xmlrpc`, `interbase`,
+`phpdbg_webhelper` and `oci8_12c` on the old ones as a matter of course. Two consequences came with
+it. `com_dotnet` goes too — P6 below expected it to stay as a named exemption, and "the platform
+has no equivalent" turned out to be a reason to look at the feature rather than to keep it. And
+4.7 MB left with it: `prune` deletes libraries **by reachability**, computed with the publisher's
+own `deplister.exe` and then deleting that too, so dropping `enchant` takes 3.0 MB of GLib with it on every branch without a
+table saying which library belongs to which extension.
+
+Three things the task found that reading could not:
+
+* **PHP 7.0 through 7.4 call GD `php_gd2.dll`**, and 8.0 renamed it. A keep-list matched on file
+  stems threw GD out of five branches *silently* — nothing loads what is no longer there — and it
+  was caught by running the recipe against 7.0. The file is renamed to the extension inside it
+  now, and `php_parity.check` reads the whole compiled-in set rather than only what this
+  repository adds, which is the check that would have failed.
+* **`oci8`, `pdo_oci` and `pdo_firebird` cannot load at all** in the archive as published: they want
+  client libraries the publisher does not ship. `snmp` loads and creates `C:\usr\snmp\persist` on
+  the way up. Three of the fifteen dropped extensions were never usable.
+* **Windows 7.0 has no `readline` and no `dba`**, and 7.0–7.1 carry `mcrypt` compiled in with
+  7.0–7.3 carrying `wddx`. None of the four is closeable by borrowing, so they are named in
+  `php_parity` beside `pcntl` and `posix` — the exemption list P6 needs, measured not guessed.
+
+`extensions.enabled` is the third half of this. `shared` said "available" about `curl` and about
+`odbc` alike, so nine extensions that are compiled into every Unix cell and are loadable modules on
+Windows had no way to be described as *expected*. `static ∪ enabled` is now what a cell does and
+`static ∪ shared` is what it could be asked to do, which is the comparison P6 wants. The Windows
+smoke test also stopped proving one extension and started proving all of them, which is both the
+drift `php_smoke` exists to name and the only thing standing between a reachability sweep and a
+library deleted in error.
+
+Proven on 7.0, 7.4 and 8.3 end to end, on Windows: every extension in each archive loads from a
+relocated tree, and the 8.3 artifact is *smaller* than upstream's zip while carrying six extensions
+it did not have.
 
 ### [ ] P3 — Node.js: decide what `include/node` is for **(rule)**
 
@@ -163,16 +208,24 @@ P2–P5 are one-time corrections; this is what keeps them. `verify.py` already v
 against the schema. What it cannot do is compare the artifacts of *one version to each other*, which
 is the whole of the rule's first half. This is not a hypothetical check: MariaDB's four asymmetries
 were found by doing precisely that by hand, on a run whose six cells had all passed their smoke
-tests. What this task automates has already caught something once.
+tests, and P2 then packed five branches of PHP without GD for the same reason — a file renamed
+between eras, invisible to every per-artifact check because what is missing cannot fail a load test.
+Twice now, and both times by comparing rather than by reading.
 
 Two checks, both cheap because every fact they need is already in `mixengine-artifact.json`:
 
 *Across cells* — for one `(kind, version)`, the feature sets must match. For PHP that is
-`extensions.static ∪ extensions.shared` modulo a small, **named** per-OS exemption list (`pcntl` and
-`posix` have no Windows build; `com_dotnet` has no Unix one); for the rest it is `provides`.
+`extensions.static ∪ extensions.enabled` — the set a cell actually runs with, which is what P2
+added `enabled` for; `shared` is only what it could be asked to do, and on Windows it says the same
+word about `curl` and about a debugger. The exemption list is no longer a guess: `php_parity` names
+the four extensions Windows has never had, the two its old builds gained late, and the two its 7.x
+builds compile in and cannot drop. Everything outside those names is a defect this check fails on.
+For the other kinds the comparison is `provides`.
 
 *Within one artifact* — no path matching what the second half of the rule forbids and the manifest
-does not declare: `.pdb`, `.dSYM`, `*.lib`/`*.a`, `include/`, `share/man`, `share/doc`, `test/`. A
+does not declare: `.pdb`, `.dSYM`, `*.lib`/`*.a`, `include/`, `share/man`, `share/doc`, `test/`. PHP
+on Windows is where to point it first, because P2 already deletes every one of those there: a check
+that finds nothing in the row that was just cleaned is a check that has been tested. A
 recipe that legitimately keeps one of them (P4's `python313.lib`) declares it, and the declaration is
 what the check reads — so "no more than is needed" becomes a list somebody wrote down rather than a
 habit somebody remembers.

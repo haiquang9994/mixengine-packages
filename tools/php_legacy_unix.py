@@ -66,6 +66,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import php_parity
 import php_smoke
 import relocate
 from php_smoke import loads
@@ -76,16 +77,19 @@ DISTRIBUTIONS = "https://www.php.net/distributions/{filename}"
 MUSEUM = "https://museum.php.net/php{major}/{filename}"
 
 # The newest branch this recipe is for. Anything at or above it is static-php-cli's, and running
-# both recipes over one version would publish two different artifacts for the same cell.
-CEILING = (8, 1)
+# both recipes over one version would publish two different artifacts for the same cell. It is
+# `php_parity`'s constant because the Windows recipe needs the same number to know which extension
+# set a branch owes, and a floor that moved in one file and not the other would be invisible.
+CEILING = php_parity.FLOOR
 
-# Built shared with `phpize`, in this order — `redis` links against `igbinary` when it is already
-# installed, and without it stores a serialisation nothing else can read.
+# What is built shared with `phpize` on these branches, in load order — `redis` links against
+# `igbinary` when it is already installed, and without it stores a serialisation nothing else can
+# read. The list itself is `php_parity.expected`, which is the same list static-php-cli compiles in
+# on 8.1+ and the same list the Windows recipe downloads from PECL: three mechanisms, one decision.
 #
-# `redis` and `mongodb` are the two MixEngine was told it must carry across the whole version range.
-# `xdebug` is here for the same reason it is shared on 8.1+: a debugger that could never be turned
-# off is not a debugger anybody wants.
-PECL = ["igbinary", "redis", "mongodb", "xdebug"]
+# It is asked per version rather than read once, because `yaml` and `zstd` are in it from 8.1 and
+# this recipe stops at 8.0 — so here it always answers with the same four, and asking anyway is what
+# keeps that a fact about the branch rather than a coincidence in a constant.
 
 # Libraries this recipe compiles rather than takes from the system, keyed by the name the configure
 # table below knows them as. `provides` is the key each one answers for there.
@@ -788,8 +792,9 @@ PECL_ATTEMPTS = 5
 
 # Missing either of these is a failed build, not a warning. They are the two extensions MixEngine
 # was told it must carry on every version, so an artifact without one is an artifact that lies about
-# what it can run.
-PECL_REQUIRED = {"redis", "mongodb"}
+# what it can run. Shared with the other two recipes for the obvious reason: a requirement one cell
+# enforces and another does not is not a requirement.
+PECL_REQUIRED = php_parity.REQUIRED
 
 # Which extensions need `zend_extension=`, what `extension_loaded()` answers to, and how to load one
 # through a generated ini all live in `php_smoke`, because the 8.1+ recipe has to get them right too.
@@ -876,7 +881,7 @@ def build_extensions(prefix: Path, version: str, work: Path,
     down costs a minute; not trying it costs an artifact quietly missing an extension.
     """
     chosen: dict[str, str] = {}
-    for package in PECL:
+    for package in php_parity.expected(parts(version)[:2]):
         attempts = 0
         for release_version, tarball in pecl_candidates(package, parts(version), work):
             attempts += 1
@@ -1191,6 +1196,8 @@ def main() -> None:
     if pecl_versions:
         recipe += "; " + ", ".join(f"{name} {value}" for name, value in sorted(pecl_versions.items()))
 
+    php_parity.check(branch, static, shared)
+
     manifest = {
         "schema": 1,
         "kind": "php",
@@ -1200,7 +1207,15 @@ def main() -> None:
         "source": "built",
         "recipe": recipe,
         "provides": provides,
-        "extensions": {"static": sorted(static), "shared": sorted(shared)},
+        "extensions": {
+            "static": sorted(static),
+            "shared": sorted(shared),
+            # `igbinary`, `redis` and `mongodb` — everything in `ext/` except the debugger. On 8.1+
+            # the same three are compiled in and this field is empty; on Windows it names them
+            # beside the nine that are static on Unix and loadable there. One field, three shapes,
+            # and it is the field a cross-cell check can compare.
+            "enabled": php_parity.enabled_by_default(shared),
+        },
         "smoke": proof,
     }
     if shared:

@@ -58,7 +58,7 @@
     },
     "recipe": {
       "type": "string",
-      "description": "For a built payload: the tool and version that produced it, e.g. \"static-php-cli 2.7.1\"."
+      "description": "For a built payload: the tool and version that produced it, e.g. \"static-php-cli 2.7.1\". Also set on a borrowed payload this repository added something compiled to — PHP on Windows names the PECL release of each extension it downloaded, because that is the same fact the Unix recipes record about the ones they compiled, and a reader comparing two cells of one version should find it spelled the same way on both."
     },
     "provides": {
       "type": "object",
@@ -72,7 +72,12 @@
       "additionalProperties": false,
       "properties": {
         "static": { "type": "array", "items": { "type": "string" } },
-        "shared": { "type": "array", "items": { "type": "string" } }
+        "shared": { "type": "array", "items": { "type": "string" } },
+        "enabled": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Which of `shared` the daemon is expected to switch on, as opposed to merely offer. It exists because one version has to mean one thing across six cells and the two systems cannot say it the same way: curl, openssl, mbstring, intl, gd, zip, sodium, sqlite3 and fileinfo are compiled into the Unix builds and are loadable modules on Windows, where no build with them static exists — so `shared` listed them beside `odbc` and said \"available\" about both. `static` ∪ `enabled` is what an artifact actually does, and it is the set that has to match across the cells of a version; `static` ∪ `shared` is only what it could be asked to do. Empty on the 8.1+ Unix builds, where everything is compiled in and the one loadable module is a debugger nobody wants running by default."
+        }
       }
     },
     "requires": { "type": "object" },
@@ -92,7 +97,7 @@
         },
         "loaded_extension": {
           "type": "string",
-          "description": "A shared extension that was loaded from extension_dir after relocation. Absent when the build has none to load."
+          "description": "A shared extension that was loaded from extension_dir after relocation. Written by no recipe since P2 — PHP on Windows was the last one proving a single extension, and it now proves all of them under `loaded_extensions` like the other two. Kept here because artifacts published before that carry it."
         },
         "loaded_extensions": {
           "type": "array",

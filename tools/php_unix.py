@@ -40,29 +40,42 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
+import php_parity
 import php_smoke
 import relocate
 
 SPC_VERSION = "2.8.5"
 SPC_URL = "https://github.com/crazywhalecc/static-php-cli/releases/download/{v}/spc-{target}.tar.gz"
 
-# Compiled in, and therefore always present. Chosen as the set a local development environment for
-# Laravel, Symfony or WordPress would otherwise have the user install by hand — including the two
-# MixEngine was told it must carry across the whole version range, redis and mongodb.
-STATIC_EXTENSIONS = [
-    "bcmath", "bz2", "calendar", "ctype", "curl", "dba", "dom", "exif", "fileinfo", "filter",
-    "ftp", "gd", "gmp", "iconv", "igbinary", "intl", "mbregex", "mbstring", "mongodb", "mysqli",
-    "mysqlnd", "opcache", "openssl", "pcntl", "pdo", "pdo_mysql", "pdo_pgsql", "pdo_sqlite",
-    "pgsql", "phar", "posix", "readline", "redis", "session", "shmop", "simplexml", "soap",
-    "sockets", "sodium", "sqlite3", "sysvmsg", "sysvsem", "sysvshm", "tokenizer", "xml",
-    "xmlreader", "xmlwriter", "xsl", "yaml", "zip", "zlib", "zstd",
-]
-
-# Built as loadable modules instead: a debugger nobody wants running by default is exactly the case
-# the compiled-in set cannot serve, because it could never be turned off again.
-SHARED_EXTENSIONS = ["xdebug"]
+# Built as loadable modules rather than compiled in: a debugger nobody wants running by default is
+# exactly the case the compiled-in set cannot serve, because it could never be turned off again.
+# `php_parity` holds that decision now, because the Windows recipe has to make the same one about a
+# DLL it downloads and the 7.x recipe about one it builds with `phpize`.
+SHARED_EXTENSIONS = sorted(php_parity.OFF_BY_DEFAULT)
 
 SAPIS = ["cli", "fpm"]
+
+
+def static_extensions(branch: str) -> list[str]:
+    """What is compiled in, and therefore always present.
+
+    Two lists in one, and the split is the whole of P2. :data:`php_parity.COMPILED_IN` is the set a
+    local development environment for Laravel, Symfony or WordPress would otherwise have the user
+    install by hand, and it is a set every cell of every version carries however it has to get it —
+    on Windows most of these are loadable modules, because no Windows build exists with them static.
+    :func:`php_parity.expected` is the handful this repository *adds* to what PHP ships, ``redis``
+    and ``mongodb`` among them, which are compiled in here, `phpize`d on 7.x and downloaded from
+    PECL on Windows.
+
+    Neither list lives in this file any more. The reason is not tidiness: this recipe used to name
+    ``redis``, ``mongodb``, ``igbinary``, ``yaml`` and ``zstd`` in a list of its own, the 7.x recipe
+    named four of them in a list of its own, and the Windows recipe named none of them anywhere —
+    which is exactly how a row ends up meaning three things.
+    """
+    parts = tuple(int(piece) for piece in branch.split("."))
+    return list(php_parity.COMPILED_IN) + [
+        name for name in php_parity.expected(parts) if name not in php_parity.OFF_BY_DEFAULT
+    ]
 
 
 def host() -> tuple[str, str, str]:
@@ -137,7 +150,8 @@ def run_spc(command: list[str], work: Path, env: dict) -> str:
 
 
 def build(spc: Path, work: Path, branch: str) -> Path:
-    extensions = ",".join(STATIC_EXTENSIONS)
+    static = static_extensions(branch)
+    extensions = ",".join(static)
     env = {**os.environ}
 
     if sys.platform.startswith("linux"):
@@ -170,7 +184,7 @@ def build(spc: Path, work: Path, branch: str) -> Path:
     # The download has to cover the shared extensions too. `--build-shared` does not fetch anything
     # of its own: it links what `download` already put in place, and refuses at the very end of a
     # build otherwise, which is the most expensive moment to find out.
-    everything = ",".join(STATIC_EXTENSIONS + SHARED_EXTENSIONS)
+    everything = ",".join(static + SHARED_EXTENSIONS)
     if not env.get("GITHUB_TOKEN"):
         print(
             "warning: no GITHUB_TOKEN. static-php-cli resolves two dozen libraries through "
@@ -305,7 +319,7 @@ def main() -> None:
     parser.add_argument("--out", default="dist", type=Path)
     args = parser.parse_args()
 
-    if tuple(int(part) for part in args.branch.split(".")) < (8, 1):
+    if tuple(int(part) for part in args.branch.split(".")) < php_parity.FLOOR:
         raise SystemExit(
             f"static-php-cli builds PHP 8.1 and newer; {args.branch} is php_legacy_unix.py's"
         )
@@ -322,6 +336,12 @@ def main() -> None:
         run(str(tree / "bin" / "php"), "-n", "-r", "echo json_encode(get_loaded_extensions());")
     )
 
+    # Measured, then checked against what the branch owes. The check is here rather than after the
+    # build because `--build-shared` can be given a name static-php-cli then quietly does not
+    # produce, and an artifact short of `redis` is one this repository has always said it would
+    # rather not publish — it just never said so on this half.
+    php_parity.check(tuple(int(piece) for piece in args.branch.split(".")), static, shared)
+
     manifest = {
         "schema": 1,
         "kind": "php",
@@ -331,7 +351,15 @@ def main() -> None:
         "source": "built",
         "recipe": f"static-php-cli {SPC_VERSION}",
         "provides": provides,
-        "extensions": {"static": sorted(static), "shared": sorted(shared)},
+        "extensions": {
+            "static": sorted(static),
+            "shared": sorted(shared),
+            # Empty here, and that is the answer rather than a missing one: everything this build
+            # carries is compiled in, and the only loadable module is the debugger. On Windows the
+            # same field names nine extensions, because that is where the same set is loadable
+            # rather than static. See `php_parity.enabled_by_default`.
+            "enabled": php_parity.enabled_by_default(shared),
+        },
         "smoke": proof,
     }
     if shared:
