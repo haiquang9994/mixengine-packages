@@ -355,20 +355,9 @@ def collect_licences(tree: Path, source_tree: Path, bundled: dict[str, Path]) ->
         if (source_tree / name).is_file():
             shutil.copy2(source_tree / name, licences / f"mariadb-{name}")
 
-    origins = []
-    for name, origin in sorted(bundled.items()):
-        origins.append(f"{name}\t{origin}")
-        real = origin.resolve()
-        if "/Cellar/" in str(real):
-            root = real
-            while root.parent.name != "Cellar" and root.parent != root:
-                root = root.parent
-            for text in sorted(root.glob("LICENSE*")) + sorted(root.glob("COPYING*")):
-                shutil.copy2(text, licences / f"{root.parent.name}-{text.name}")
-    if origins:
-        (licences / "BUNDLED.tsv").write_text(
-            "library\tbuilt from\n" + "\n".join(origins) + "\n", encoding="utf-8"
-        )
+    # The bundled half is `mariadb.bundled_licences`, shared with the two Linux recipes, because the
+    # walk that used to live here stopped one directory above the files and collected nothing.
+    mariadb.bundled_licences(tree, bundled)
 
 
 def main() -> None:
