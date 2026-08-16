@@ -52,7 +52,7 @@
         "removed": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Paths taken *out* of an otherwise borrowed archive, for the same reason `added` states the ones put in. Removal is reserved for a file that would make the archive work on some machines and not others: Linux CPython before 3.13 ships a `_crypt` module linked against a libxcrypt no archive here carries, which is present on Debian and Ubuntu and absent on a default Fedora. Deleting it is what lets `smoke.relocated` keep meaning that nothing in the tree reaches outside it."
+          "description": "Paths taken *out* of an otherwise borrowed archive, for the same reason `added` states the ones put in. Two things are removed. One is a file that would make the archive work on some machines and not others: Linux CPython before 3.13 ships a `_crypt` module linked against a libxcrypt no archive here carries, which is present on Debian and Ubuntu and absent on a default Fedora, and deleting it is what lets `smoke.relocated` keep meaning that nothing in the tree reaches outside it. The other is surplus one publisher shipped to one platform and not to another, which is how one version comes to mean two things: every Node.js tarball carries 59 MB of C++ headers that no Windows zip has ever carried and that `node-gyp` does not read. A directory removed whole is named by its root — `include`, rather than the 2,726 files under it — so that six cells of one version stay comparable field to field."
         }
       }
     },

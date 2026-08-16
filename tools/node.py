@@ -9,6 +9,11 @@ right one, prove it still runs after being moved, describe what is inside it, an
 a file name and where the executables sit inside the tree, so a second script would be the same
 script with a different table in it.
 
+**What it does choose is what the tree keeps**, which is the whole of :func:`prune` and the one
+decision this recipe makes rather than inherits. Upstream ships a different set of surplus to each
+platform — 59 MB of C++ headers to Unix, a Chocolatey installer to Windows — and taking whichever
+one the publisher happened to pick would make one version mean two things.
+
 Three things this deliberately does not do:
 
 *It does not rearrange the directory.* ``npm`` is a script that finds ``node`` relative to its own
@@ -102,6 +107,16 @@ LAYOUT = {
 # about that release rather than a broken pack.
 REQUIRED = ("node", "npm")
 
+# What survives at the root of the tree — everything else there is thrown out. The interpreter and
+# its libraries under whichever name this platform gives them, the launcher scripts derived from
+# `LAYOUT` below, and the licence, which travels with the binaries it covers because that is what a
+# licence is for.
+ROOT = {
+    "windows": ("node.exe", "node_modules"),
+    "unix": ("bin", "lib"),
+}
+LICENCE = "LICENSE"
+
 
 def resolve(spec: str, target: tuple[str, str]) -> str:
     """Turn ``22``, ``22.11``, ``lts`` or an exact version into a version upstream actually built.
@@ -168,18 +183,99 @@ def published_hash(version: str, name: str) -> str:
     raise SystemExit(f"{name} is not in SHASUMS256.txt for v{version}")
 
 
+def kept(operating_system: str) -> set[str]:
+    """The root entries this artifact is made of, per platform.
+
+    Derived from :data:`LAYOUT` rather than written out twice, because the launchers are already
+    named there and a second list of them would be a second thing to forget. ``npm.ps1`` and the
+    extension-less ``npm`` are in it without being in ``LAYOUT``: they are the PowerShell and the
+    Git-Bash entry points to the same package, they are the Windows counterpart of the ``bin/npm``
+    symlink Unix gets, and 6 KB is not a reason to make one shell work and another not.
+    """
+    flavour = "windows" if operating_system == "windows" else "unix"
+    names = {*ROOT[flavour], LICENCE}
+    if flavour == "windows":
+        for command in LAYOUT["windows"]:
+            names |= {command, f"{command}.cmd", f"{command}.ps1"}
+    return names
+
+
+def prune(tree: Path, operating_system: str) -> list[str]:
+    """Drop everything at the root that is not this runtime, and answer with what went.
+
+    **``include/node`` is what this exists to settle**, and it is settled by dropping it rather than
+    by fetching it for Windows too. It is 59.0 MB of the 198.5 MB Linux archive of 24.19.0 — 2,726
+    headers, byte for byte the publisher's own ``node-v24.19.0-headers.tar.gz`` — and the Windows
+    zip has never carried a single one of them.
+
+    The reading that says keep them is that ``node-gyp`` needs headers to build a native module, and
+    it does. What it does not do is read *these*. ``node-gyp`` only looks inside the runtime it is
+    running under when the build set ``use_prefix_to_find_headers``, which is a flag distributions
+    pass so their ``-dev`` package can be used offline; **every official build has it false**, read
+    here out of the ``process.config`` baked into the Linux 24.19.0 and 26.7.0 binaries rather than
+    assumed. With it false the path is not a choice: ``configure.js`` downloads
+    ``process.release.headersUrl`` into ``~/.node-gyp/<version>`` and compiles against that. Which
+    is why native modules have always built on Windows against an archive with no ``include`` at
+    all — the platform that already answers the question is the one this repository is copying.
+
+    The other half of the argument is that *keep them everywhere* is not reachable even if it were
+    wanted. Pointing ``node-gyp --nodedir`` at an installed tree on Windows makes it link against
+    ``<nodedir>/$(Configuration)/node.lib`` — a path out of a **build** tree, which the headers
+    tarball has never contained and which upstream publishes separately, per architecture. So the
+    symmetric option is not "add 59 MB to three cells", it is "add 59 MB and a fourth download, and
+    then still be told the two halves are not the same thing".
+
+    **A keep-list, for the reason ``php_parity`` gives**: a list of what to delete is written
+    against the one archive somebody measured. Measured across 16.20.2, 20.19.5, 24.19.0 and
+    26.7.0 on both platforms, a delete-list naming ``include`` and ``share/{doc,man}`` would have
+    shipped Node 16's ``share/systemtap`` and its ``node_etw_provider.man``, neither of which
+    anything here knew existed. The keep-list drops both without being told, and drops whatever
+    Node 28 invents.
+
+    What goes, then: ``include/`` and ``share/`` on Unix; ``install_tools.bat`` — which is not a
+    tool but a Chocolatey install of Python and the VC build tools onto the whole machine — and
+    ``nodevars.bat`` on Windows; ``README.md`` and ``CHANGELOG.md`` on both, the second of which is
+    also the only file whose *contents* differ between the two cells for a reason that is not line
+    endings (617 KB of release notes on Unix against 56 KB on Windows, in 24.19.0).
+
+    What stays, having been checked rather than assumed: npm's 2.7 MB of ``docs/`` and ``man/``,
+    which read like the obvious next thing to throw out and are not. ``npm help-search`` reads
+    ``docs/content``, ``npm help`` opens ``docs/output/*.html`` on Windows and runs ``man`` against
+    ``man/man[1-7]`` on Unix. All three are load-bearing for a documented command, both cells carry
+    all three already, and the rule asks for what is needed rather than for what is small.
+    """
+    keep = kept(operating_system)
+    removed: list[str] = []
+    freed = 0
+
+    for path in sorted(tree.iterdir()):
+        if path.name in keep:
+            continue
+        if path.is_dir() and not path.is_symlink():
+            freed += sum(child.stat().st_size for child in path.rglob("*") if child.is_file())
+            shutil.rmtree(path)
+        else:
+            freed += path.stat().st_size
+            path.unlink()
+        removed.append(path.name)
+
+    print(f"dropped {', '.join(removed) or 'nothing'} ({freed:,} bytes)")
+    return removed
+
+
 def describe(
     tree: Path, version: str, target: tuple[str, str], url: str, digest: str,
     added: list[str] | tuple[()] = (), removed: list[str] | tuple[()] = (),
 ) -> dict:
     """What is in the archive, as the daemon will read it.
 
-    *added* and *removed* are empty today and are arguments rather than a later edit because P3 is
-    the task that fills them: the six cells of one Node.js version differ by 92 MB of
-    ``include/node`` that upstream ships on Unix and not on Windows, and whichever way that is
-    settled — dropped everywhere or fetched for Windows too — the artifact has to say so. See
-    :func:`borrow.declare` for what the two fields promise and what is checked before they are
-    written.
+    *removed* is what :func:`prune` threw out, named by root entry rather than by file: a reader
+    holding this artifact and the publisher's own archive should be able to account for every
+    difference between the two, and ``include`` says that in one line where its 2,726 headers would
+    say it in 2,726. *added* stays an argument and stays empty — nothing is written into a Node
+    tree today, and a recipe that starts to should have somewhere to declare it that already
+    exists. See :func:`borrow.declare` for what the two fields promise and what is checked before
+    they are written.
     """
     operating_system, arch = target
     layout = LAYOUT["windows" if operating_system == "windows" else "unix"]
@@ -318,7 +414,12 @@ def main() -> None:
 
     tree = borrow.unpack(downloaded, work / "unpacked", suffix)
 
-    manifest = describe(tree, version, target, url, actual)
+    # Pruned before it is described and before it is proven, in that order: the manifest has to
+    # describe the tree that ships, and the smoke test is what stands between a keep-list and a
+    # runtime that was quietly cut in half.
+    removed = prune(tree, target[0])
+
+    manifest = describe(tree, version, target, url, actual, removed=removed)
     manifest["smoke"] = smoke(tree, version, manifest)
 
     # Measured off the archive rather than assumed from the runner: an official Linux build is not

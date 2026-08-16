@@ -17,7 +17,7 @@ What is *not* done is the rule itself.
 | Kind | Cells | Recipes | Conforms |
 | --- | --- | --- | --- |
 | PHP | 7.0 – newest, 6 targets | `php_windows`, `php_unix`, `php_legacy_unix` | yes — P2 |
-| Node.js | 16 – newest, 6 targets | `node` | **no** — P3 |
+| Node.js | 16 – newest, 6 targets | `node` | yes — P3 |
 | Python | 3.10 – newest, 6 targets | `python` | partly — P4 |
 | Ruby | 3.2 – newest, 6 targets | `ruby`, `ruby_unix` | unknown — P5 |
 | Caddy | 2.0 – newest, 6 targets | `caddy` | yes |
@@ -33,8 +33,8 @@ written down in [the README](../README.md#one-version-means-one-thing-and-no-mor
 because it is the argument for P6. The rule has never been applied backwards to the four runtime
 rows that were packed before it existed, and P1–P6 are that work. Measured against upstream's own
 archives, the gaps were not marginal: PHP 8.3 on Windows was missing two extensions this repository
-fails a Unix build over, which P2 closed, and one Node.js version is still 106 MB on Windows and
-198 MB on Linux.
+fails a Unix build over, which P2 closed, and Node.js 24.19.0 was 106 MB on Windows against 198 MB
+on Linux, which P3 closed.
 
 Nothing below is a rewrite. Every recipe already downloads, verifies, relocates, proves and packs
 correctly; what they do not do is *choose*, and choosing once is the whole of the rule.
@@ -142,7 +142,7 @@ Proven on 7.0, 7.4 and 8.3 end to end, on Windows: every extension in each archi
 relocated tree, and the 8.3 artifact is *smaller* than upstream's zip while carrying six extensions
 it did not have.
 
-### [ ] P3 — Node.js: decide what `include/node` is for **(rule)**
+### [x] P3 — Node.js: decide what `include/node` is for **(rule)**
 
 One recipe, six cells, and it chooses nothing — so the cells differ by whatever upstream happened to
 put in each archive. Node 24.19.0, measured:
@@ -162,6 +162,45 @@ either they are dropped everywhere and `node-gyp` keeps working over the network
 everywhere — which means *adding* them to the Windows cell, from upstream's own
 `node-v<version>-headers.tar.gz`. What is not allowed is the status quo, where the answer is
 whichever one the publisher chose per platform.
+
+Dropped, on all six cells, and the argument that settled it is not the one above. **`node-gyp` does
+not read those headers.** It looks inside the runtime it is running under only when the build set
+`use_prefix_to_find_headers` — a flag distributions pass so their `-dev` package can compile
+offline — and every official build has it false, read out of the `process.config` baked into the
+Linux 24.19.0 and 26.7.0 binaries rather than assumed. With it false there is no choice left to
+make: `configure.js` downloads `process.release.headersUrl` into `~/.node-gyp/<version>` and
+compiles against that. Which is why native modules have always built on Windows against an archive
+carrying no `include/` at all — the platform that already answers the question is the one this
+copies, and "dropped everywhere and `node-gyp` keeps working over the network" is not a trade so
+much as a description of what already happens on three of the six cells.
+
+*Keep them everywhere* was also not reachable, which the task did not know. `node-gyp --nodedir`
+pointed at an installed tree on Windows links against `<nodedir>/$(Configuration)/node.lib`, a path
+out of a **build** tree; the headers tarball has never contained one and upstream publishes it
+separately, per architecture. The symmetric option was never "add 59 MB to three cells" but "add
+59 MB and a fourth download, and still be told the two halves are not the same thing".
+
+**A keep-list again**, for the reason P2 gives, and it earned itself twice over on a row where a
+delete-list would have looked sufficient: measured across 16.20.2, 20.19.5, 24.19.0 and 26.7.0 on
+both platforms, one naming `include` and `share/{doc,man}` would have shipped Node 16's
+`share/systemtap` and its `node_etw_provider.man`. Neither had been seen by anything here. What
+`tools/node.py` keeps at the root is now the interpreter, its libraries, the launchers already
+named in `LAYOUT`, and `LICENSE`; everything else there goes, including `install_tools.bat` — which
+is not a tool but a Chocolatey install of Python and the VC build tools onto the whole machine —
+and `CHANGELOG.md`, the only file whose *contents* differed between the two cells for a reason that
+is not line endings.
+
+The one thing the task expected to delete and this kept: npm's 2.7 MB of `docs/` and `man/`. All
+three parts are read by a documented command — `npm help-search` reads `docs/content`, `npm help`
+opens `docs/output/*.html` on Windows and runs `man` against `man/man[1-7]` on Unix — and both
+cells already carried all three, so the rule's answer is keep. "No more than is needed" is a claim
+about need, and the way to settle it was to go and read npm rather than to weigh the directory.
+
+Proven on 16.20.2, 24.19.0 and 26.7.0: packed end to end on Windows, and `prune` run against the
+real Linux tarball of each, which is as far as a Windows machine can take the other half. Node
+24.19.0 on Linux goes from 4,708 files and 198.5 MB to 1,977 and 138.8 MB — and once both cells are
+pruned, **the entire remaining difference between the Windows and Linux trees is `node.exe` against
+`bin/node` and the per-shell launchers beside it.** Every other path matches.
 
 ### [ ] P4 — Python: tkinter, and the same two questions **(rule)**
 
@@ -225,7 +264,10 @@ For the other kinds the comparison is `provides`.
 *Within one artifact* — no path matching what the second half of the rule forbids and the manifest
 does not declare: `.pdb`, `.dSYM`, `*.lib`/`*.a`, `include/`, `share/man`, `share/doc`, `test/`. PHP
 on Windows is where to point it first, because P2 already deletes every one of those there: a check
-that finds nothing in the row that was just cleaned is a check that has been tested. A
+that finds nothing in the row that was just cleaned is a check that has been tested. Node.js is the
+second, and it is the row that shows the check has to read `upstream.removed` rather than only the
+tree — `include/`, `share/man` and `share/doc` are on that list because P3 named what it dropped,
+and a check reading the tree alone would say nothing about a cell that never had them. A
 recipe that legitimately keeps one of them (P4's `python313.lib`) declares it, and the declaration is
 what the check reads — so "no more than is needed" becomes a list somebody wrote down rather than a
 habit somebody remembers.
