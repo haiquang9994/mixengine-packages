@@ -203,15 +203,19 @@ jobs:
 
           $port = 16399
           $conf = "$data\redis.conf"
-          # **Forward slashes, and the previous run is why.** Handed `C:\spike moved here\data\
-          # redis.conf`, the Cygwin runtime read it as a *relative* path and prefixed the working
-          # directory, so the server died on
-          #   can't open config file '/cygdrive/d/a/.../C:\spike moved here\data\redis.conf'
-          # That is the one warning redis-windows's README gives, measured rather than taken on
-          # trust. `C:/...` is accepted, and it is also what `Path.as_posix()` already produces —
-          # the same spelling `redis.py` writes into the `dir` directive today, so a recipe has one
-          # rule for both rather than a special case.
-          $slashed = $conf -replace '\\','/'
+          # **The config file is named relatively, from a working directory, and two runs paid for
+          # that sentence.** `C:\...\redis.conf` failed, and so did `C:/.../redis.conf`:
+          #   can't open config file '/cygdrive/d/a/.../C:/spike moved here/data/redis.conf'
+          # The cause is not Cygwin's path handling but Redis's own. `getAbsolutePath()` in
+          # server.c decides a path is absolute with `if (relpath[0] == '/')` and otherwise joins it
+          # to `getcwd()` — and no Windows spelling begins with a slash, so every one of them is
+          # treated as relative and glued onto the working directory.
+          #
+          # A POSIX absolute path (`/cygdrive/c/...`) would satisfy that test, and is rejected here
+          # for a different reason: it would put the emulation layer's private spelling into the
+          # command line MixEngine's supervisor builds. Naming the file relatively and setting the
+          # working directory satisfies the same code path — `getcwd()` under Cygwin already answers
+          # in POSIX — and leaves every path MixEngine writes an ordinary Windows one.
           # An array rather than a here-string, and the reason is the two syntaxes cannot both be
           # satisfied: PowerShell requires the closing `"@` at column 0, and a line at column 0
           # ends a YAML block scalar. The first push of this file was unparseable for exactly that.
@@ -225,10 +229,9 @@ jobs:
           )
 
           Get-Content $conf
-          Write-Output "argument: $slashed"
           $server = Start-Process -PassThru -NoNewWindow -FilePath "$moved\redis-server.exe" `
-            -ArgumentList "`"$slashed`"" -RedirectStandardOutput "$data\redis.log" `
-            -RedirectStandardError "$data\redis.err"
+            -ArgumentList 'redis.conf' -WorkingDirectory $data `
+            -RedirectStandardOutput "$data\redis.log" -RedirectStandardError "$data\redis.err"
 
           $ok = $false
           foreach ($i in 1..40) {
@@ -242,6 +245,10 @@ jobs:
           if (-not $ok) { throw "redis-server never answered PING as a native process" }
 
           & "$moved\redis-cli.exe" -p $port info server
+          # What the emulation layer made of the Windows path inside the config file. `dir` is set
+          # to `C:/spike moved here/data`, and this is the answer a supervisor would have to reason
+          # about when it goes looking for a dump file.
+          Write-Output "CONFIG GET dir -> $(& "$moved\redis-cli.exe" -p $port config get dir)"
           & "$moved\redis-cli.exe" -p $port set mixengine:spike "hello from $moved"
           $value = & "$moved\redis-cli.exe" -p $port get mixengine:spike
           if ($value -ne "hello from $moved") { throw "GET answered '$value'" }
