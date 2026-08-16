@@ -1350,6 +1350,66 @@ across both Redis lines, and the refusal of an unnamed `deps/` directory were al
 the compile, the relocation check and the smoke tests need a `workflow_dispatch` on each of
 `build-redis.yml` and `build-memcached.yml` to be anything more than an intention.
 
+### [x] P8a — Redis on Windows, because P8 asked one word wrong
+
+**P8 concluded from "there is no Windows build system" that there is no Windows Redis, and those are
+different claims.** The first is true and was re-read on a runner rather than trusted: no tag of
+`redis/redis` between 2.6 and 8.10 has ever contained a `CMakeLists.txt`, a `win32/` or an `msvs/`,
+and the Windows support that once existed lived in `microsoftarchive/redis` — a separate fork with
+its own `src/Win32_Interop`, stopped at 3.0.504 in 2016. The second does not follow from it. Whether
+a program runs somewhere is a question about the interfaces it calls, and compiled *against* a POSIX
+runtime rather than ported to Win32, the unmodified upstream tarball builds and runs.
+
+That was not a theory to test: `redis-windows/redis-windows` has published exactly that for 6.2,
+7.2, 7.4, 8.2, 8.4, 8.6, 8.8 and 8.10 — every line offered here, the newest of them a fortnight old.
+What this task borrows from it is the **method** and not the binaries, which stay out for the reason
+every fork's binaries do: there is no digest published by anyone upstream to check them against, and
+the archive's permanence promise would come to rest on one person's repository.
+
+Settled by a throwaway workflow on a branch before any of it reached `tools/`, and the ledger is the
+argument for doing that: **eight runs, of which three findings were about Redis and the rest were
+about the spike's own harness.** They are written up in
+[building-from-source.md](building-from-source.md#windows-and-what-a-spike-is-for),
+because none of them is about Redis and all of them are about the next Windows cell.
+
+#### What landed
+
+*Cygwin, not MSYS2, and the reason is redistribution rather than which one compiles.* MSYS2's own
+documentation says its runtime is for its build tools rather than for programs to be shipped;
+Cygwin publishes `CYGWIN_LICENSE` and `COPYING` as documents, so an archive carrying `cygwin1.dll`
+under LGPLv3 can carry its terms. `cygwin_root()` proves which shell it has by asking `uname -s`
+rather than by finding a `bash.exe`, because every Windows runner here already has an MSYS2 one on
+`PATH` and the two would produce different artifacts from the same recipe.
+
+*Nothing in the source is patched.* Two compiler flags — `-D_GNU_SOURCE` for `dlfcn.h`, and
+`-Wno-char-subscripts` for hiredis's own `-Werror` meeting a newlib `isspace()` that does not cast.
+Goals are named instead of `all`, and `make install` is not called at all: both end in
+`module_tests`, which links a shared object against symbols an executable exports, and a PE image
+has no undefined symbol resolved at load time.
+
+*`relocate.py` learned PE*, read out of the import table in the file rather than asked of
+`cygcheck`, which exists only on a build machine and answers with what that machine's `PATH`
+offers. Bundling on Windows is a copy into `bin/`: the loader searches the image's own directory
+first, so the copy *is* the redirection — no rpath, no install name, no re-signing.
+
+*One constraint left this repository.* `getAbsolutePath()` in `server.c` decides a path is absolute
+with `relpath[0] == '/'`, so no Windows spelling of the config path survives. The supervisor has to
+set a working directory and name `redis.conf` relatively — which the smoke test now does on all five
+cells, so it is one rule rather than a Windows branch. **T35 has to honour it.**
+
+*What the cell is worth, stated in the release notes and the manifest rather than discovered later.*
+The event loop is `select`, `maxclients` settles near 3168, and Cygwin invents a POSIX root from
+wherever `cygwin1.dll` sits — so `CONFIG GET dir` answers in a namespace that moves with the
+artifact. Writing a path to Redis is fine; reading one back and treating it as a Windows path is not.
+
+*`windows/aarch64` stays empty*, and for a reason with no date on it: neither Cygwin nor MSYS2 has
+an ARM64 build. Running x86_64 under emulation would work and is refused, because an archive
+labelled `aarch64` may not hold binaries that are not.
+
+Memcached is untouched by this and its two Windows cells stay shut — the same route would compile
+it, and its privilege-dropping layer has a source file per Unix and none to write for Windows, which
+is a decision about what the artifact *is* rather than about whether it links.
+
 ### [x] P9 — nginx
 
 nginx publishes a Windows zip itself and nothing relocatable for macOS or Linux, so the shape is

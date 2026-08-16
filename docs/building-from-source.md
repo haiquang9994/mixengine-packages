@@ -353,3 +353,105 @@ what is in the file). The Python row learned the second half separately, by asse
   omission — which modules a version has — is one the publisher already made for the cell nobody
   compiles, and matching it is the only way the row means one thing. `php -i`, `ruby -e
   'RbConfig::CONFIG'` and `caddy build-info` are the same question asked of three other publishers.
+
+## Windows, and what a spike is for
+
+Opening the Windows cell for Redis began with a throwaway workflow on a branch rather than with a
+recipe, and the arithmetic argues for the habit better than the argument does: **eight runs and a
+dispatch that was refused before any of them, of which three findings were about Redis and the rest
+were about the spike's own harness.** Every one of the rest would otherwise have been a round of
+`build-redis.yml`, and more than one would have been "fixed" by adding permanent complexity to
+`tools/redis.py` for a cause that was never Redis's.
+
+### The harness fails before the thing being measured does
+
+*A PowerShell here-string cannot live in a YAML block scalar.* `@"` … `"@` requires its closing
+delimiter at column 0, and a line at column 0 ends a `run: |` node. The way GitHub reports that is
+worth knowing, because it names the wrong thing: it registers the workflow anyway with the **file
+path as its name** and no triggers, so `gh workflow run` answers `HTTP 422: Workflow does not have
+'workflow_dispatch' trigger` about a file whose `workflow_dispatch:` block is right there in the
+diff. A `gh workflow list` row showing a path where every other row shows a name is the tell. Build
+the file's content from an array of strings, which needs no column-0 delimiter — and validate the
+YAML locally before every push; it costs a second and catches the class.
+
+*`shell: bash` on a Windows runner is not one shell.* `cygwin/cygwin-install-action` puts Cygwin
+ahead of Git for Windows on `PATH`, so every later bash step is Cygwin's — and Actions writes each
+step's script file with CRLF endings. Git for Windows patches its bash to drop the trailing CR;
+Cygwin's does not, and passes it on as an argument, so a step whose first line is `uname -a` dies
+with `uname: unknown option --`. Cygwin's bash has `igncr` for exactly this.
+
+*And `env: SHELLOPTS: igncr` is the wrong way to ask for it.* This one cost the most, because its
+symptom was hundreds of steps away from its cause. A `SHELLOPTS` that is **already in the
+environment stays exported**, and bash writes every option it currently has back into it — so an
+ordinary `set -euo pipefail` at the top of a step leaked `nounset` into every child process,
+including the `sh -c './mkreleasehdr.sh'` that `redis/src/Makefile:19` runs at *parse* time.
+Upstream's script died on `SOURCE_DATE_EPOCH: unbound variable`, `release.h` was never generated,
+and the build stopped hundreds of objects later on `fatal error: release.h: No such file or
+directory` — which reads exactly like Redis not supporting the platform. Shell options belong in the
+shell's argument list: `shell: bash --noprofile --norc -o igncr -eo pipefail {0}`. The general form
+outlives Cygwin: **anything put in the environment to configure your own shell is also configuring
+every program that shell runs, including the build scripts of the thing being packaged.**
+
+*`| tail -40` on a build throws away the part that matters.* Piping make through `tail` reported the
+failure and showed none of the parse-time output the failure was about, and hid a second problem
+besides: `persist-settings` builds `deps/` with a leading `-`, so a dependency that fails to compile
+is announced as `Error 2 (ignored)` and the build carries on to a link that cannot work. Staging it
+— run the generator by hand, build `deps` *without* the `-`, then build the core — made each failure
+name itself in one run instead of four.
+
+### The old rule, in a dialect it had not been written in yet
+
+> A build machine is the one machine where a broken artifact works.
+
+**`cygcheck` answers in Windows paths, not POSIX ones**, so a filter written as `grep '^/'` matched
+nothing and bundled nothing — **and the run still started the server**, because the Cygwin bin
+directory was on `PATH` and the loader found the DLL there. A packing step that copied zero files
+reported success, and a smoke test that proved nothing agreed with it. Two consequences, both now
+enforced rather than remembered: a packing step that bundles nothing must **fail**, and the
+moved-tree test on Windows must cut `PATH` down to `%SystemRoot%\system32` — the exact analogue of
+running `ldd` from a directory the build has never named.
+
+The rule for *what* to bundle is by location and needs no list: anything under the Cygwin
+installation is ours to ship, anything else belongs to the operating system. That also disposes of
+the `api-ms-win-core-*.dll` rows, which are API sets the loader resolves from a schema rather than
+files — `cygcheck` prints them against whatever directory `PATH` happened to offer, in one run a
+Java toolcache, and copying one would ship a stranger's file to satisfy nothing.
+
+There is no `ldd` for PE and no `cygcheck` anywhere but a build machine, so `relocate.py` reads the
+import table out of the file itself. Sixty lines of offsets, depending on nothing. The measured
+answer, for the record: `redis-server.exe` imports `cygwin1.dll` and `cyggcc_s-seh-1.dll` and
+nothing else outside `C:\Windows` — a smaller set than any Linux artifact here.
+
+### Two platform differences that no reading of the source predicts
+
+*One was inside a macro.* `deps/hiredis/sds.c` failed with `array subscript has type 'char'
+[-Werror=char-subscripts]`, on a line nobody had touched. hiredis compiles with its own `-Werror`;
+glibc's `isspace()` expands to a form that casts its argument to `int` so the warning never fires,
+and Cygwin's newlib does not cast. The point is not the flag that silences it. It is that the
+difference lived in a header belonging to neither project.
+
+*The other was inside the program.* Handed `C:\…\redis.conf`, the server died with
+
+    Fatal error, can't open config file '/cygdrive/d/a/…/C:\spike moved here\data\redis.conf'
+
+The obvious reading — that the emulation layer wants its own path spelling — is wrong, and following
+it cost a whole round: `C:/…/redis.conf` fails identically. The cause is Redis's own code.
+`getAbsolutePath()` in `server.c` decides a path is absolute with `if (relpath[0] == '/')` and
+otherwise joins it to `getcwd()`, and no Windows spelling begins with a slash. A `/cygdrive/c/…`
+path would satisfy it, and is refused for a different reason: it would put the emulation layer's
+private spelling into a command line MixEngine's supervisor builds. Naming the config file
+relatively against a working directory satisfies the same line on every platform, so it is one rule
+rather than a Windows branch — and it is a constraint that leaves this repository and lands on the
+supervisor, which is the kind of finding a spike is worth most for.
+
+### What the artifact then is, including what it is not
+
+Redis 8.10.0, from the unmodified upstream tarball, started as a native Windows process out of a
+moved directory with a space in its name and `PATH` cut to the operating system; answered `ping`,
+reported its own version, round-tripped a key and stopped on `shutdown nosave`. Three properties
+come with the runtime and are written down rather than smoothed over: the event loop is `select`
+because Cygwin has no `epoll`; `maxclients` settles near 3168 because the runtime cannot raise the
+descriptor limit as far as the default asks; and Cygwin invents a POSIX root from wherever
+`cygwin1.dll` sits, so `CONFIG GET dir` answers `/data` for a directory really at `C:\…\data`. The
+last is the one with teeth: writing a path to Redis is fine, reading one back and treating it as a
+Windows path is not.

@@ -145,17 +145,19 @@ on any version offered here, and the cell opens when 19 ships.
 
 | Version | macOS aarch64 | macOS x86_64 | Linux x86_64 | Linux aarch64 | Windows x86_64 | Windows aarch64 |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **7.2** | ○ | ○ | ○ | ○ | — | — |
-| **7.4** | ○ | ○ | ○ | ○ | — | — |
-| **8.0** | ○ | ○ | ○ | ○ | — | — |
-| **8.2** | ○ | ○ | ○ | ○ | — | — |
-| **8.4** | ○ | ○ | ○ | ○ | — | — |
-| **8.6** | ○ | ○ | ○ | ○ | — | — |
-| **8.8** | ○ | ○ | ○ | ○ | — | — |
-| **8.10** | ○ | ○ | ○ | ○ | — | — |
+| **7.2** | ○ | ○ | ○ | ○ | ○ | — |
+| **7.4** | ○ | ○ | ○ | ○ | ○ | — |
+| **8.0** | ○ | ○ | ○ | ○ | ○ | — |
+| **8.2** | ○ | ○ | ○ | ○ | ○ | — |
+| **8.4** | ○ | ○ | ○ | ○ | ○ | — |
+| **8.6** | ○ | ○ | ○ | ○ | ○ | — |
+| **8.8** | ○ | ○ | ○ | ○ | ○ | — |
+| **8.10** | ○ | ○ | ○ | ○ | ○ | — |
 
 The floor is 7.2 because that is the oldest line upstream still patches *and* the last one under a
-BSD licence. Both Windows cells are empty because Redis has no Windows build system to compile.
+BSD licence. Windows x86_64 is the same source compiled against Cygwin rather than ported, with
+`cygwin1.dll` beside the binaries under LGPLv3; the ARM cell is empty because there is no Cygwin
+for it and an aarch64 archive may not hold x86_64 binaries.
 
 ### [Memcached](docs/packages/redis-memcached.md)
 

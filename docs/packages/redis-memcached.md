@@ -1,31 +1,62 @@
-# Redis and Memcached, where the evaluation had nothing to weigh
+# Redis and Memcached, and the question P8 asked one word wrong
 
 *Part of [mixengine-packages](../../README.md), which holds the table of what is packaged.*
 
 The table said "we build with MSVC, or ship Valkey" for Redis on Windows and "we build" for
 Memcached everywhere, and P8 was written to decide between compiling both natively on a Windows
-runner and declaring the cell empty. Asked rather than assumed, **there is no first option**. Redis
-8.10 has no `CMakeLists.txt`, no `win32/` directory and no project file of any kind: it is a
-`src/Makefile` around POSIX `fork()`, `epoll` and `kqueue`, and its own README lists Linux, OSX,
-OpenBSD, NetBSD and FreeBSD. memcached is autotools, with a privilege-dropping source file for each
-Unix — `linux_priv.c`, `darwin_priv.c`, `freebsd_priv.c`, `openbsd_priv.c`, `solaris_priv.c` — and
-none for Windows. Neither is a build that needs the right flags. Neither is a build that exists.
+runner and declaring the cell empty. It found no build system and closed both cells. The finding
+about the build system is right and was re-read on a runner rather than trusted: Redis 8.10 has no
+`CMakeLists.txt`, no `win32/` and no project file of any kind, no tag of `redis/redis` from 2.6 to
+8.10 ever had one, and the Windows support that existed lived in `microsoftarchive/redis` — a
+separate fork with its own `msvs/` and `src/Win32_Interop`, stopped at 3.0.504 in 2016. memcached is
+autotools with a privilege-dropping source file for each Unix — `linux_priv.c`, `darwin_priv.c`,
+`freebsd_priv.c`, `openbsd_priv.c`, `solaris_priv.c` — and none for Windows.
+
+**The conclusion did not follow.** "Has no Windows build system" and "cannot run on Windows" are
+different claims, and the second one is about the interfaces a program calls rather than about the
+files in its tarball. Compiled against a POSIX runtime instead of ported to Win32, Redis's
+unmodified source builds and runs — and it is not a theory: `redis-windows/redis-windows` has
+published exactly that for 6.2, 7.2, 7.4, 8.2, 8.4, 8.6, 8.8 and 8.10, every line offered here.
 
 | OS / arch | Range | How |
 | --- | --- | --- |
 | macOS aarch64, x86_64 | Redis **7.2 – newest**, memcached **1.6 – newest** | **built** — upstream publishes source only, for every platform |
 | Linux x86_64, aarch64 | ditto | ditto |
-| Windows x86_64, aarch64 | — | **upstream has no Windows build system**, and no fork of either project supplies one |
+| Windows x86_64 | Redis **7.2 – newest** | **built against Cygwin** — same tarball, same digest, unpatched |
+| Windows aarch64 | — | no Cygwin or MSYS2 for ARM64, and an aarch64 archive may not hold x86_64 binaries |
+| Windows, memcached | — | **upstream has no Windows build system**, and its privilege-dropping layer has no Windows file to replace the five it has |
 
-The three ways round it were each asked and each answers no. **Valkey**, which MixEngine's own table
-named as the alternative, is a fork of the same POSIX program and is not supported on Windows
-either; its installation page sends a Windows user to WSL, which [ADR
+Cygwin rather than MSYS2, and the choice is about redistribution rather than about which compiles.
+MSYS2's own documentation says its runtime is for its build tools rather than for programs to be
+shipped; Cygwin publishes `CYGWIN_LICENSE` and `COPYING` as documents, so an archive carrying
+`cygwin1.dll` under LGPLv3 can carry its terms too. Both DLLs that travel — `cygwin1.dll` and
+`cyggcc_s-seh-1.dll` — were read off the binary's own import table rather than copied from anyone's
+list, and they are the only two things outside `C:\Windows` the result loads.
+
+**What it costs, said plainly.** The event loop is `select` rather than `epoll`, because Cygwin has
+no `epoll` and `ae.c` falls through to it. `maxclients` settles at about 3168 instead of 10000,
+because the runtime cannot raise the descriptor limit as far as the default asks and Redis says so
+in its own log. Both are properties of one unreplicated development instance on a developer's
+machine, which is the only thing MixEngine ever runs — and both are visible in the artifact rather
+than discovered later.
+
+The three alternatives are still no, for the reasons P8 gave. **Valkey**, which MixEngine's own
+table named, is the same POSIX program forked and sends a Windows user to WSL, which [ADR
 0003](https://github.com/haiquang9994/MixEngine/blob/master/.claude/decisions/0003-no-container-isolation.md)
 excludes. **Memurai** is proprietary, and a repository that redistributes what it packs cannot pack
-one. **The community rebuilds** are the fork nobody maintains that the plan already refused. So both
-Windows cells are stated rather than filled — and the Windows legs of both workflows run anyway and
-exit 75, because an empty cell that says so in every run's log is worth a runner minute more than a
-row somebody has to remember is missing.
+one. **The community rebuilds** are the fork nobody maintains — and compiling here is precisely how
+their method is borrowed without their binaries: the tarball is upstream's, checked against
+upstream's own SHA-256, and nothing in it is patched. The two empty cells that remain still run and
+exit 75, because a cell that says so in every run's log is worth a runner minute more than a row
+somebody has to remember is missing.
+
+**One constraint leaves this repository and lands on MixEngine.** `getAbsolutePath()` in `server.c`
+decides a path is absolute with `if (relpath[0] == '/')` and otherwise joins it to `getcwd()`, so no
+Windows spelling of the config path survives — `C:\…` and `C:/…` both arrive glued onto the working
+directory. The supervisor has to set a working directory and name `redis.conf` relatively, which is
+what the smoke test does on every platform so that one rule covers all five cells. A `/cygdrive/c/…`
+path would also work and is refused: it would put the emulation layer's private spelling into a
+command line MixEngine builds.
 
 **Redis is the first row here that spans a licence change, and it is why the floor is 7.2.** Through
 7.2 Redis is BSD-3. 7.4 is RSALv2 or SSPLv1, neither of them OSI-approved; 8.0 added AGPLv3 as a
