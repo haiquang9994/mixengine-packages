@@ -283,24 +283,36 @@ def cygwin_root() -> Path:
     found = shutil.which("bash")
     if found:
         candidates.append(Path(found).resolve().parent.parent)
+    # The install action puts Cygwin on the *work* volume — `D:\cygwin` on a GitHub runner, not the
+    # `C:\cygwin64` a constant would guess — so the environment variable is what normally answers
+    # and these are only for a developer's own machine.
     candidates += [Path(r"C:\cygwin64"), Path(r"C:\cygwin"), Path(r"D:\cygwin")]
 
     tried: list[str] = []
+    seen: set[Path] = set()
     for root in candidates:
-        shell = root / "bin" / "bash.exe"
-        if not shell.is_file():
+        if root in seen:
+            continue
+        seen.add(root)
+        # **`uname.exe` by absolute path, not `bash -c "uname -s"`.** The first attempt asked through
+        # the shell and every candidate answered `MINGW64_NT` — including Cygwin's own bash, sitting
+        # in the directory the install action had just reported. It was running Git for Windows'
+        # `uname`, because `add-to-path: false` means Cygwin's `/usr/bin` is not on PATH and a shell
+        # resolves its commands through PATH like anything else. The question is which *installation*
+        # this is, so it is asked of a file in it.
+        stamp = root / "bin" / "uname.exe"
+        if not (root / "bin" / "bash.exe").is_file() or not stamp.is_file():
             continue
         try:
             answer = subprocess.run(
-                [str(shell), "--noprofile", "--norc", "-c", "uname -s"],
-                capture_output=True, text=True, timeout=120,
+                [str(stamp), "-s"], capture_output=True, text=True, timeout=120
             ).stdout.strip()
         except (OSError, subprocess.SubprocessError) as problem:
-            tried.append(f"{shell} ({problem})")
+            tried.append(f"{stamp} ({problem})")
             continue
         if answer.startswith("CYGWIN_NT"):
             return root
-        tried.append(f"{shell} says {answer!r}")
+        tried.append(f"{stamp} says {answer!r}")
 
     raise SystemExit(
         "no Cygwin on this machine, and Redis has no other way onto Windows: upstream's source is "
@@ -311,16 +323,28 @@ def cygwin_root() -> Path:
 
 
 def cygwin(root: Path, script: str, cwd: Path) -> None:
-    """Run *script* under Cygwin's shell, from *cwd*.
+    """Run *script* under Cygwin's shell, from *cwd*, with Cygwin's own tools on ``PATH``.
 
-    No `-o igncr` here, unlike the workflow that measured this: that option exists because GitHub
-    writes a step's script to a **file** with CRLF endings, and this passes the script as an
-    argument built in Python, where the only line endings are the ones written above.
+    **The `PATH` is built here rather than by the workflow, and that is the point.** Cygwin is
+    installed with `add-to-path: false`, because on `PATH` it changes what `shell: bash` means for
+    every step in the job — and then chokes on the CRLF Actions writes into each step script. Kept
+    off, nothing else in the run is affected and the one process that needs Cygwin's `make`, `gcc`
+    and `sed` is handed them explicitly. A shell resolves its commands through `PATH` like anything
+    else, so `--noprofile --norc` alone would have left this script running Git for Windows' tools
+    inside Cygwin's bash, which is exactly how the version check failed before it.
+
+    `borrow.clean_path` puts the operating system after them and nothing else on it at all, which is
+    the same cut-down environment every smoke test in this repository runs under.
+
+    No `-o igncr`, unlike the spike that measured all this: that option exists because GitHub writes
+    a step's script to a **file** with CRLF endings, and this passes the script as an argument built
+    in Python, where the only line endings are the ones written above.
     """
     print(f"$ {root / 'bin' / 'bash.exe'} -c <<\n{script.strip()}\n", flush=True)
     result = subprocess.run(
         [str(root / "bin" / "bash.exe"), "--noprofile", "--norc", "-c", script],
         cwd=str(cwd), timeout=3600,
+        env={**os.environ, "PATH": borrow.clean_path(root / "bin")},
     )
     if result.returncode != 0:
         raise SystemExit(f"the Cygwin build exited {result.returncode}")
