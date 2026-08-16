@@ -15,9 +15,15 @@ rather than read off a download page:
   is the one MariaDB's aarch64 cell already takes: the project's own ``.deb`` packages, published for
   amd64 **and** arm64 with a SHA256 per file in a ``Packages`` index whose own digest a ``Release``
   file states. That is :mod:`postgres_deb`, and it is a better-checked download than this one.
-* **Windows on ARM** — nothing, from anybody. An empty cell, and P7b.
+* **Windows on ARM** — nothing, from anybody, and P7b asked upstream *why* rather than stopping at
+  that. PostgreSQL does not compile there: ``src/tools/msvc_gendef.pl``, which generates the export
+  file the server's own extensions link against, accepts ``x86 | x86_64`` on every branch through
+  18 and rejects ``aarch64``, so the build stops at target 1206 of 2047 with 1205 objects already
+  compiled for ``/MACHINE:ARM64``. The list gained ``aarch64`` after 18 branched. The cell opens
+  with PostgreSQL 19 and is empty until then — which is a fact about upstream, not about this
+  repository, and it is stated in the index rather than left for a user to discover.
 
-Three decisions this recipe is answerable for.
+Four decisions this recipe is answerable for.
 
 *The download is not checked against a digest the publisher states, because EDB states none.* Every
 other borrow here has one — nodejs.org's ``SHASUMS256.txt``, Caddy's ``checksums.txt``, MariaDB's
@@ -48,15 +54,33 @@ extraction dies half way with ``FileNotFoundError`` on a file whose name is simp
 root skipped is still named in ``upstream.removed``: a reader holding EDB's archive and this one
 should find every difference stated, and "never unpacked" and "deleted" are the same difference.
 
+*And the macOS tree is written down three times over, which P7b measured rather than assumed.* What
+one universal archive saves on the download it spends on the disk: after the roots above are left
+out and :func:`prune` has run, the tree is **362 MB**, and 199 MB of that is the same bytes written
+more than once. 161 MB is machine code compiled twice, once per architecture, of which one copy is
+for a machine the cell cannot run on. The other 38 MB is upstream shipping a dylib's version chain
+as whole copies — ``libicudata.dylib``, ``libicudata.77.dylib`` and ``libicudata.77.1.dylib`` are
+three identical 64 MB files where an ordinary install has one file and two links, and the archive
+does know how to store a link: it holds 78 of them, all inside pgAdmin. So :func:`link_versions`
+puts the chain back and :func:`thin` keeps the slice this cell can execute, and **362 MB becomes
+82 MB** with nothing taken out that a database uses.
+
+That is the size half. The correctness half is quieter and matters more: ``otool`` reports a
+universal binary's load commands for *every* architecture in it, so ``relocate.verify`` and
+``relocate.floor`` were reading two machines at once and answering for the higher of them. Each
+cell now measures the binaries it actually ships.
+
 Python 3 stdlib only, by policy: this runs on a GitHub runner with nothing installed.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import stat
+import struct
 import sys
 import tempfile
 import urllib.error
@@ -68,13 +92,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import borrow  # noqa: E402  — siblings, and this directory is not importable as a package
 import postgres_smoke  # noqa: E402
 import relocate  # noqa: E402
+import strip  # noqa: E402
 
 CATALOGUE = "https://www.postgresql.org/versions.json"
 EDB = "https://get.enterprisedb.com/postgresql"
 
 # What this recipe can borrow, and what EDB calls it. macOS appears twice on purpose: one universal
 # archive is the build for both cells, which is measured — see the module docstring — rather than
-# hoped, and `postgres --version` on the arm64 runner is what keeps it measured.
+# hoped, and `postgres --version` on the arm64 runner is what keeps it measured. What each leg
+# *publishes* is not universal: `thin` keeps the slice that leg can run, so the two archives are
+# alike in every respect except the one that made them two cells.
 BORROWABLE = {
     ("windows", "x86_64"): "windows-x64",
     ("macos", "x86_64"): "osx",
@@ -165,6 +192,17 @@ NOT_SHIPPED = (
 # the same reason. EDB ships none today; a recipe that only removes what it has seen is a recipe that
 # ships the first `.pdb` upstream adds.
 DEBRIS = ("*.pdb", "*.dSYM")
+
+# The two headers a universal binary can begin with, mapped to the width of one entry in the table
+# that follows: the older 32-bit form and the `FAT_MAGIC_64` one, which differs only in that offsets
+# and lengths are eight bytes rather than four. Both are big-endian in a file whose slices are not.
+FAT_MAGICS = {0xCAFEBABE: 20, 0xCAFEBABF: 32}
+
+# Apple's CPU type numbers, and both spellings of what they mean: this repository's, which is what
+# the manifest's `arch` field holds and what a slice has to be matched against, and Apple's, which is
+# what `lipo -info` prints to somebody checking the declaration. One translation in one place, rather
+# than two vocabularies meeting at a call site.
+CPU_TYPES = {0x01000007: ("x86_64", "x86_64"), 0x0100000C: ("aarch64", "arm64")}
 
 
 def series() -> dict[tuple[int, ...], dict]:
@@ -366,6 +404,182 @@ def prune(tree: Path) -> list[str]:
     return removed
 
 
+def slices(path: Path) -> dict[str, tuple[int, int]] | None:
+    """``{architecture: (offset, length)}`` for a universal binary, ``None`` for anything else.
+
+    A fat file is a big-endian table of architectures glued to the front of several complete Mach-O
+    files, and **every offset inside a slice is relative to the slice**. That is the whole reason
+    :func:`thin` can be a byte-range copy rather than a rewrite: the slice does not know it was ever
+    part of a larger file, so lifting it out changes nothing in it — its code signature included.
+    """
+    with path.open("rb") as handle:
+        header = handle.read(8)
+        if len(header) < 8:
+            return None
+        magic, count = struct.unpack(">II", header)
+        if magic not in FAT_MAGICS:
+            return None
+        width = FAT_MAGICS[magic]
+        table = handle.read(count * width)
+
+    found: dict[str, tuple[int, int]] = {}
+    for index in range(count):
+        entry = table[index * width:(index + 1) * width]
+        if width == 32:
+            cpu, _subtype, offset, length = struct.unpack(">IIQQ", entry[:24])
+        else:
+            cpu, _subtype, offset, length = struct.unpack(">IIII", entry[:16])
+        name = CPU_TYPES.get(cpu, (f"cputype {cpu:#x}",))[0]
+        if name in found:
+            # Two slices of one architecture is legal — `arm64` and `arm64e` differ by subtype
+            # alone — and this recipe would have to be told which one a PostgreSQL server wants.
+            # It has never happened in an EDB archive; if it starts, that is a decision for a
+            # person rather than for `max`.
+            raise SystemExit(f"{path.name} carries two {name} slices, and nothing here can choose")
+        found[name] = (offset, length)
+    return found
+
+
+def link_versions(tree: Path, libdir: str = "lib") -> dict[str, str]:
+    """Put back the dylib version chains upstream shipped as whole copies. See the module docstring.
+
+    ``libicudata.dylib``, ``libicudata.77.dylib`` and ``libicudata.77.1.dylib`` are three identical
+    64 MB files in EDB's macOS archive, and an ordinary ICU install is one file and two links. All
+    23 groups this finds are that shape — a library, its major, and its full version — which is why
+    the most-versioned spelling is the one kept: it is the file, and the shorter names are what
+    something asks for. dyld follows a link like any other path, so nothing has to be rewritten.
+
+    **Identical bytes in one directory, and not across directories**, which is a narrower rule than
+    it could be and deliberately so. `share/postgresql/timezone` holds 175 files that are byte-equal
+    to another somewhere else in it — `Cuba` and `America/Havana` are one file — and those are
+    aliases rather than a chain, worth 0.1 MB, and linking them would put 175 lines into
+    ``upstream.changed`` for nothing anybody is going to check.
+    """
+    made: dict[str, str] = {}
+    root = tree / libdir
+    if not root.is_dir():
+        return made
+
+    directories: dict[Path, list[Path]] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_file() and not path.is_symlink():
+            directories.setdefault(path.parent, []).append(path)
+
+    for _parent, paths in sorted(directories.items()):
+        by_size: dict[int, list[Path]] = {}
+        for path in paths:
+            by_size.setdefault(path.stat().st_size, []).append(path)
+        for candidates in by_size.values():
+            if len(candidates) < 2:
+                continue        # a size nothing else shares cannot be a duplicate of anything
+            groups: dict[str, list[Path]] = {}
+            for path in candidates:
+                groups.setdefault(hashlib.sha256(path.read_bytes()).hexdigest(), []).append(path)
+            for group in groups.values():
+                if len(group) < 2:
+                    continue
+                keep = max(group, key=lambda path: (len(path.name), path.name))
+                for path in group:
+                    if path == keep:
+                        continue
+                    path.unlink()
+                    path.symlink_to(keep.name)
+                    made[path.relative_to(tree).as_posix()] = (
+                        f"a symlink to {keep.name}, which upstream ships as a second copy of the "
+                        f"same bytes"
+                    )
+    return made
+
+
+def signature(blob: bytes) -> bool:
+    """Whether this thin Mach-O carries an ``LC_CODE_SIGNATURE``, which decides what was proven.
+
+    :func:`strip.countersigned` answers ``None`` both for a signature that checks out and for a file
+    that has none, and those are not the same claim. Counted here so that the line this recipe
+    prints says how many extractions were actually verified rather than how many were looked at — an
+    archive whose publisher stops signing would otherwise go on reporting a check nobody made.
+    """
+    if blob[:4] != strip.MACHO_MAGIC:
+        # Not a 64-bit little-endian Mach-O, which is the only shape whose load commands begin
+        # where this reads them. Everything in these archives is one; answering False rather than
+        # walking a header this does not understand is the difference between an unproven file
+        # being counted as unproven and this function reading whatever lies at offset 16.
+        return False
+    ncmds, offset = struct.unpack_from("<I", blob, 16)[0], 32
+    for _ in range(ncmds):
+        command, size = struct.unpack_from("<II", blob, offset)
+        if command == 0x1D:
+            return True
+        offset += size
+    return False
+
+
+def thin(tree: Path, arch: str) -> dict[str, str]:
+    """Keep the slice this cell can execute, drop the other, and prove the copy was exact.
+
+    The proof is the file's own code signature, and it is a real one rather than a formality. Every
+    binary in this archive carries an ad-hoc signature whose CodeDirectory holds a SHA-256 of each
+    4 KB page — 173 of 173, measured — and :func:`strip.countersigned` recomputes every one of them
+    against the bytes now on disk. An extraction off by a byte fails there, and on arm64 a file that
+    failed there is one the kernel answers with ``SIGKILL`` rather than an error anything can print.
+    So the operation is a byte-range copy taken from the file's own header, and the check is
+    arithmetic that had to agree with a publisher who signed the slice before it was ever fat.
+
+    Nothing is run afterwards to establish this, because for once nothing needs to be: the shipped
+    file is a byte-for-byte extract of something EDB compiled and signed. What *is* run afterwards
+    is the server, from a directory the tree was moved to, as on every other cell.
+    """
+    apple = next(names[1] for names in CPU_TYPES.values() if names[0] == arch)
+    changed: dict[str, str] = {}
+    countersigned = 0
+    for path in relocate.machine_files(tree):
+        found = slices(path)
+        if found is None:
+            continue            # already thin: a slice of one, and nothing to choose between
+        if arch not in found:
+            raise SystemExit(
+                f"{path.relative_to(tree).as_posix()} carries {', '.join(sorted(found))} and not "
+                f"{arch}, so this archive is not the universal build both Apple cells are packed "
+                f"from"
+            )
+        offset, length = found[arch]
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            body = handle.read(length)
+        if len(body) != length:
+            raise SystemExit(f"{path.name} ends before its own {arch} slice does")
+
+        # The permission bits alone: `st_mode` also carries the file type, and `chmod` is only
+        # specified for the twelve bits below it. Rewriting in place keeps the mode anyway; this is
+        # here so that the file's being executable does not depend on that staying true.
+        mode = stat.S_IMODE(path.stat().st_mode)
+        path.write_bytes(body)
+        path.chmod(mode)
+
+        wrong = strip.countersigned(path)
+        if wrong:
+            raise SystemExit(wrong)
+        countersigned += signature(body)
+        changed[path.relative_to(tree).as_posix()] = (
+            f"the {apple} slice of upstream's universal binary, extracted whole"
+        )
+
+    # Nothing universal may survive this, anywhere — not only under the directories
+    # `relocate.machine_files` looks in. A fat file left behind is one architecture of dead weight
+    # that every measurement in `relocate` would go on reading as though it were this machine's.
+    left = [path.relative_to(tree).as_posix() for path in sorted(tree.rglob("*"))
+            if path.is_file() and not path.is_symlink() and slices(path) is not None]
+    if left:
+        raise SystemExit(
+            f"{len(left)} universal binar{'y' if len(left) == 1 else 'ies'} outside the "
+            f"directories this looked in — {', '.join(left[:4])} — so the artifact still carries "
+            f"an architecture it cannot run"
+        )
+    print(f"thinned {len(changed)} binaries to {arch}, {countersigned} of them re-checked against "
+          f"their own code signature")
+    return changed
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -418,6 +632,18 @@ def main() -> None:
     removed = left_out + prune(tree)
     print(f"not shipping {len(removed)} paths")
 
+    # **Before anything measures this tree**, which is the order rather than a preference: `otool`
+    # reports a universal binary's load commands once per architecture, so `relocate.verify` and
+    # `relocate.floor` below would otherwise be answering for two machines and reporting the higher
+    # of them as this cell's. De-duplicating first means the 35 links are skipped by
+    # `relocate.machine_files`, which does not follow one, and the slice is lifted out once per
+    # distinct file rather than once per spelling of its name.
+    changed: dict[str, str] = {}
+    if target[0] == "macos":
+        changed.update(link_versions(tree))
+        print(f"linked {len(changed)} name(s) onto the file upstream copied them from")
+        changed.update(thin(tree, target[1]))
+
     provides = postgres_smoke.describe(tree, windows)
     available = postgres_smoke.extensions(tree)
     modules = postgres_smoke.where(tree, postgres_smoke.MODULES)
@@ -450,17 +676,19 @@ def main() -> None:
     }
     if modules:
         manifest["extension_dir"] = modules.relative_to(tree).as_posix()
-    if removed:
-        borrow.declare(tree, manifest, removed=removed)
+    if removed or changed:
+        borrow.declare(tree, manifest, removed=removed, changed=changed)
 
     elsewhere = borrow.moved(tree)
     if not windows:
         # **Checked and not corrected, which is a decision.** EDB's archive carries its own OpenSSL,
         # ICU, krb5, libxml2 and lz4 in `lib/` already, so the expected answer is that nothing
         # reaches outside the tree. `relocate.bundle` would make that true by rewriting load
-        # commands — and rewriting them means the shipped files are no longer the bytes EDB
-        # published, which is a difference this recipe would then have to declare. Asking first is
-        # how a recipe finds out whether it needs to.
+        # commands, and a rewritten load command is a *modified* binary: the signature over it stops
+        # matching and every file has to be signed again by this repository rather than by the
+        # publisher. `thin` above changes which bytes ship without ever changing a byte, which is
+        # why it needs no signature of its own; bundling would be the other kind of change. Asking
+        # first is how a recipe finds out whether it needs to.
         problems = relocate.verify(elsewhere)
         for problem in problems:
             print(f"error: {problem}", file=sys.stderr)

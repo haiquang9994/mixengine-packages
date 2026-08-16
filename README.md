@@ -470,9 +470,9 @@ installer's payload rather than a server.
 | OS / arch | Range | How |
 | --- | --- | --- |
 | Windows x86_64 | **14 – newest** | **borrowed** — EDB's `postgresql-<version>-<n>-windows-x64-binaries.zip` |
-| macOS aarch64, x86_64 | **14 – newest** | **borrowed** — one `osx-binaries.zip`, a **universal** build serving both cells |
+| macOS aarch64, x86_64 | **14 – newest** | **borrowed, thinned** — one **universal** `osx-binaries.zip` serving both cells, each keeping its own slice |
 | Linux x86_64, aarch64 | **14 – newest** | **borrowed, rearranged** — the project's own `.deb` packages from `apt-archive.postgresql.org` |
-| Windows aarch64 | — | nobody publishes one |
+| Windows aarch64 | — | **upstream does not compile there** before PostgreSQL 19 |
 
 **The floor is where the archive changes shape.** EDB's macOS zip for 13 is a thin x86_64 Mach-O and
 from 14 on it is universal, so a 13 packed here would mean *Intel* on a row where every other version
@@ -529,6 +529,34 @@ does not stem — **and exits zero**. The same artifact on two developers' machi
 databases that answer differently. The check states `--locale=C -E UTF8` so it is reproducible; what
 that teaches the daemon is that it has to choose, because the default is whatever the machine is.
 
+#### The macOS cells, where one archive is written down three times
+
+A universal build saves a download and spends it on the disk. After the roots above are skipped and
+the pruning has run, the macOS tree is **362 MB** — nine times the Windows artifact of the same
+version — and 199 MB of that is the same bytes written more than once.
+
+Two different duplications, and only one of them is inherent. 161 MB is machine code compiled twice,
+once per architecture, of which each cell can execute one copy; that is what a universal binary is.
+The other 38 MB is a packaging accident: EDB ships each dylib's version chain as whole copies, so
+`libicudata.dylib`, `libicudata.77.dylib` and `libicudata.77.1.dylib` are three identical 64 MB files
+where an ordinary ICU install is one file and two links — and the archive does know how to store a
+link, it holds 78 of them, all inside pgAdmin. So the chain is put back and the slice this cell cannot
+run is dropped: **362 MB becomes 82 MB**, with nothing taken out that a database opens.
+
+The slice is lifted out as a byte range read from the file's own fat header, and **the proof that the
+copy was exact is the signature EDB already put on it**. Every one of the 173 binaries carries an
+ad-hoc code signature whose CodeDirectory holds a SHA-256 of each 4 KB page, `tools/strip.py`
+recomputes all of them against the bytes now on disk, and an extraction off by one byte fails there —
+on arm64 it would otherwise fail at run time as a `SIGKILL` with nothing printed. That is why no
+re-signing is needed and none is done: the shipped file is bytes EDB compiled and signed, and
+`upstream.changed` names all 173 paths and which of the two things happened to each.
+
+The quieter half is a correctness one. `otool` reports a universal binary's load commands **once per
+architecture**, so `relocate.verify` and `relocate.floor` had been reading two machines at once and
+answering with the stricter of them: the macOS floor a user saw was the higher of the two builds'
+minimums, whichever cell they installed. Thinning first means each cell measures the binaries it
+actually ships.
+
 #### The Linux cells, where the publisher is the project and the layout may not be touched
 
 EDB never built the Linux tarball the runtime table promised, so both Linux cells come from
@@ -567,6 +595,26 @@ And one thing this cell needs that its siblings carry: Debian builds `--with-sys
 `/usr/share/zoneinfo` is the one path PostgreSQL never relocates. It is named in `requires` beside
 the glibc floor, because a dependency a user already has is a fact to state rather than a reason to
 refuse.
+
+#### The empty cell, which is upstream's answer and not this repository's
+
+Nobody publishes a Windows-on-ARM PostgreSQL, and the plan was to do what `mariadb_build.py` already
+does for three cells nobody publishes: compile it natively. Asked instead of assumed, **PostgreSQL
+does not build there** on any version MixEngine offers.
+
+The evidence is upstream's own. The buildfarm has two Windows/ARM64 MSVC machines, approved in
+December 2025 and March 2026; the newer reports on `master` only, and the older tried the stable
+branches once. On 18 and 17 the build stops at target **1206 of 2047**, with 1205 objects already
+compiled for `/MACHINE:ARM64` — not at a compiler, an intrinsic or an atomic, but at
+`src/tools/msvc_gendef.pl`, the Perl script that generates the export file the server's extensions
+link against, whose usage line reads `arch: x86 | x86_64` and which exits rather than accept
+`aarch64`. That list gained `aarch64` after 18 branched; `master` and `REL_19_STABLE` have it.
+
+Backporting two lines of Perl would be the wrong move, and for a reason the failure itself gives:
+nobody knows what target 1207 does, because upstream has never got past 1206 on those branches. A
+patch carried here would be this repository claiming a platform its publisher does not test, on
+evidence that stops exactly where the evidence stops. So the cell stays empty, the index says so,
+and it opens when PostgreSQL 19 ships.
 
 ## Repack, do not rearrange
 

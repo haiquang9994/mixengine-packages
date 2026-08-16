@@ -15,9 +15,11 @@ Every row of the runtime table is packed, and every service row that has been ev
 Every recipe now conforms to the rule and there is a program that says so. What is *not* done is the
 **repack**: the artifacts on the releases page were packed before P2–P5, and `tools/parity.py` names
 every one of those differences on every run. P6 below is what it says and what it does not.
-PostgreSQL is the first row packed *after* it, and the difference shows twice: the rule caught an
-asymmetry inside EDB's own release before anything was published, and when a second publisher was
-added for the same version it had something to be checked against rather than only a recipe's word.
+PostgreSQL is the first row packed *after* it, and the difference shows three times: the rule caught
+an asymmetry inside EDB's own release before anything was published; when a second publisher was
+added for the same version it had something to be checked against rather than only a recipe's word;
+and when the macOS cells were cut from 362 MB to 82 MB it was the rule that said what the smaller
+tree still had to offer, so a saving of that size cost nothing anybody could argue about.
 
 | Kind | Cells | Recipes | Conforms |
 | --- | --- | --- | --- |
@@ -27,7 +29,7 @@ added for the same version it had something to be checked against rather than on
 | Ruby | 3.2 – newest, 6 targets | `ruby`, `ruby_unix` | yes — P5, P5a and P5b |
 | Caddy | 2.0 – newest, 6 targets | `caddy` | yes |
 | MariaDB | 10.6 – newest, 6 targets | `mariadb`, `mariadb_deb`, `mariadb_build` | yes — it is where the rule came from |
-| PostgreSQL | 14 – newest, 5 of 6 targets | `postgres`, `postgres_deb` | yes — P7 and P7a, and it is the first row packed under the rule |
+| PostgreSQL | 14 – newest, 5 of 6 targets | `postgres`, `postgres_deb` | yes — P7, P7a and P7b, and it is the first row packed under the rule |
 
 The rule was written **after** MariaDB, because MariaDB is what taught it: three routes to one
 version produced three different feature sets, and fixing that is what
@@ -919,10 +921,11 @@ would have been wrong about most of it.
 * **macOS** — one `osx-binaries.zip`, and `bin/postgres` inside it is a **fat Mach-O carrying x86_64
   and arm64**. One download is the build for two cells, which nothing else in this repository can
   say. Read out of the file's own header, four bytes at a time, over an HTTP range request — the
-  archive is 445 MB and this cost 64 KB.
+  archive is 445 MB and this cost 64 KB. What each cell *ships* is one slice of it, which is P7b.
 * **Linux** — `…-linux-x64-binaries.tar.gz` answers 403 for every version tried. EDB stopped. That
   became P7a, which packs both Linux cells from the project's own `.deb` packages instead.
-* **Windows on ARM** — nothing, from anybody. P7b.
+* **Windows on ARM** — nothing, from anybody, and P7b found out why: PostgreSQL does not compile
+  there before 19. The cell is empty until it does, and P7c is what opens it.
 * **The version catalogue and the end-of-life dates are one document**, `versions.json`, which states
   every major, its newest minor, whether it is supported and the day support ends. The same trade
   `mariadb.py` makes with the MariaDB REST API — and `data/eol.json` gets a `postgres` block all the
@@ -1146,19 +1149,91 @@ to put them beside `relocate.bundle` — the function that creates the obligatio
 answers with *where each library came from* for no other purpose than this. Three call sites moved
 with them and nothing else changed.
 
-### [ ] P7b — PostgreSQL: Windows on ARM, and the second slice of a universal build
+### [x] P7b — PostgreSQL: Windows on ARM, and the second slice of a universal build
 
 Two loose ends of P7, together because both are about an architecture that is carried rather than
-built.
+built. Both were to be measured before being written, and the measurements answered the two halves
+in opposite directions: one was worth more than the task expected, and the other cannot be done at
+all — by upstream, not by this repository.
 
-Nobody publishes a Windows-on-ARM PostgreSQL. The row is one `mariadb_build.py` already walks —
-compile natively on `windows-11-arm` — and PostgreSQL builds with meson and MSVC.
+#### The archive is written down three times, and only one of the copies is inherent
 
-The macOS cells are the other half. Both carry a universal binary, so the x86_64 artifact contains an
-arm64 slice nothing on that machine will ever execute and the reverse. `lipo -thin` is what removes
-it, and whether that is worth doing is a question about how much of the archive is machine code
-rather than an assumption — measure it before writing it, since a `lipo` over the tree also means
-re-signing every Mach-O on arm64 and declaring the whole tree in `upstream.changed`.
+The task asked how much of the macOS archive is machine code. The answer is **essentially all of
+it**, and the measuring turned up a second duplication nobody had gone looking for.
+
+After the unwanted roots are skipped and `prune` has run, the macOS tree is **362 MB** — nine times
+the Windows artifact of the same version, which nothing in P7 had remarked on. 199 MB of that is the
+same bytes written more than once, in two different ways:
+
+* **161 MB is the universal build**, x86_64 and arm64 in one file, of which each cell can execute
+  one. That is what the task was about.
+* **38 MB is EDB shipping each dylib's version chain as whole copies.** `libicudata.dylib`,
+  `libicudata.77.dylib` and `libicudata.77.1.dylib` are three identical 64 MB files where an ordinary
+  ICU install is one file and two links, and 23 groups in `lib/` are that shape. The archive is not
+  incapable of storing a link — it holds 78 of them, every one inside pgAdmin.
+
+So `link_versions` puts the chains back and `thin` keeps the slice the cell can run: **362 MB
+becomes 82 MB on arm64 and 80 MB on x86_64**, with 15 provides, 46 extensions and
+`extension_dir` unchanged, which is the whole of what `parity.py` compares. The three cells that
+exist offline agree on both fields with nothing on either side of the difference.
+
+#### Re-signing is what the task expected and what the finding removed
+
+The task assumed a `lipo` over the tree means re-signing every Mach-O on arm64. It does not, and the
+reason is worth writing down: **a fat file's slices are complete Mach-O files whose internal offsets
+are slice-relative**, so lifting one out changes nothing inside it, its `LC_CODE_SIGNATURE`
+included. The operation is therefore a byte-range copy read from the file's own header, in Python,
+with no `lipo` involved.
+
+Which turns the signature from an obstacle into the proof. All 173 binaries carry an ad-hoc
+signature whose CodeDirectory holds a SHA-256 of each 4 KB page; `strip.countersigned` — written for
+P4b, where a strip *did* resize the file — recomputes every page against the bytes now on disk, and
+all 173 verify. An extraction off by one byte fails there rather than on a user's machine, where
+arm64 answers a bad signature with `SIGKILL` and nothing printed. `upstream.changed` names all 173
+paths: 35 links and 138 slices.
+
+#### Every macOS measurement had been made about two machines at once
+
+The quieter half, and the reason this belongs before anything else in `main` rather than at the end.
+`otool` reports a universal binary's load commands **once per architecture**, so `relocate.verify`
+was reading both dependency lists and `relocate.floor` was taking the higher of the two builds'
+minimum macOS versions and calling it this cell's. Neither was wrong to do; both were being handed a
+file that answers for two machines. Thinning first means each cell measures what it ships.
+`relocate.loadable`'s note that "nothing in this table ships one" was a fact about the archives when
+it was written and is now a fact this repository keeps.
+
+#### Windows on ARM is upstream's empty cell, and the reason is six lines of Perl
+
+The task's premise was that the row is one `mariadb_build.py` already walks — compile natively,
+PostgreSQL builds with meson and MSVC. Asked instead of assumed, **PostgreSQL does not build on
+Windows/ARM64 on any version MixEngine offers**, and the evidence is upstream's own buildfarm.
+
+Two Windows/ARM64 MSVC animals exist, approved 2025-12-12 and 2026-03-16. The newer reports on
+`master` only. The older tried the stable branches once each: on 18 and 17 the build stops at
+**target 1206 of 2047**, with 1205 objects already compiled for `/MACHINE:ARM64`, at
+`src/tools/msvc_gendef.pl` — the Perl script that generates the export file the server's own
+extensions link against — whose usage line reads `arch: x86 | x86_64` and which exits rather than
+accept `aarch64`. `master` and `REL_19_STABLE` accept it. 16's single run failed at configure for an
+unrelated reason in the owner's own settings, and 14 and 15 have no meson build at all.
+
+Carrying the two-line patch was considered and refused, on the evidence's own terms: **nobody knows
+what target 1207 does**, because upstream has never got past 1206 on those branches. A patch here
+would be this repository claiming a platform its publisher does not test, on evidence that stops
+precisely where the evidence stops — and the first user to find the next blocker would find it as a
+broken artifact rather than as an empty cell. The cell stays empty and the index says why.
+
+### [ ] P7c — PostgreSQL on Windows/ARM64, when 19 makes it possible
+
+Blocked on upstream rather than on anything here, and unblocked by a release: PostgreSQL 19 accepts
+`aarch64` where 18 does not. When `versions.json` lists it, this is `postgres_build.py` — meson and
+MSVC on `windows-11-arm`, the shape `mariadb_build.py` already has, with vcpkg for the ICU, OpenSSL,
+libxml2, lz4 and zstd the borrowed cells carry — and the row it has to match is not a matter of
+taste: 15 provides and 46 extensions, which `parity.py` will check against the other five cells.
+
+Two conditions before it starts, and they are cheap to re-ask. The buildfarm animal has to be green
+on the branch, not merely past target 1206 — the last run on `REL_19_STABLE` failed in
+`pg_amcheckCheck`. And EDB has to still not publish one, because a borrow beats a build here as
+everywhere else.
 
 ### [ ] P8 — Redis and Memcached
 

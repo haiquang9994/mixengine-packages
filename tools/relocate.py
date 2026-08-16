@@ -115,7 +115,11 @@ def loadable(path: Path) -> bool:
 
     See ELF_TYPES and MACHO_TYPES for what that excludes and why. A universal binary is taken as
     loadable without looking further: its header is a table of architectures rather than a Mach-O
-    header, and nothing in this table ships one.
+    header, and nothing in this table ships one. That last clause was a fact about the archives
+    when it was written and is now a fact this repository keeps: EDB's macOS build *is* universal,
+    and `postgres.thin` reduces it to the architecture of the cell being packed before anything
+    here reads it — because `otool` answers for every architecture in a fat file, and `verify` and
+    `floor` would otherwise be measuring two machines and reporting the stricter of them.
     """
     try:
         with path.open("rb") as handle:

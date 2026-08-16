@@ -11,9 +11,10 @@ name: build postgres
 # one universal macOS zip that serves both Apple cells; it stopped publishing Linux tarballs, and the
 # PostgreSQL project itself publishes source only, so both Linux cells come from the project's own
 # `.deb` packages instead. Which recipe a cell uses is written down once, in the matrix, rather than
-# decided in an `if:` — the same shape `build-mariadb.yml` has and for the same reason. Nobody
-# publishes a Windows-on-ARM PostgreSQL at all (P7b); an unlisted cell is an empty cell of the index,
-# which is a real answer as long as the index says so.
+# decided in an `if:` — the same shape `build-mariadb.yml` has and for the same reason. Windows on ARM
+# is missing because **upstream does not compile there** before PostgreSQL 19, which P7b established
+# from the buildfarm rather than from the absence of a download; an unlisted cell is an empty cell of
+# the index, which is a real answer as long as the index says so.
 on:
   workflow_dispatch:
     inputs:
@@ -64,7 +65,8 @@ jobs:
     # holds both slices, so a single leg could produce both artifacts — and neither could then be run
     # on the architecture it is for. What each leg proves is that *this* Mach-O slice starts and
     # serves on *this* machine, which is the only thing that makes a universal build a fact rather
-    # than a claim about a header.
+    # than a claim about a header. Each leg then keeps its own slice and drops the other, so what is
+    # downloaded twice is published once per cell: 362 MB of tree becomes 82 MB.
     #
     # Linux on 22.04 rather than the newest image, for the reason the MariaDB matrix states at
     # length: the glibc floor of the artifact is the floor of the runner, because `postgres_deb.py`
@@ -152,7 +154,7 @@ jobs:
             if ! gh release view "$tag" >/dev/null 2>&1; then
               gh release create "$tag" \
                 --title "PostgreSQL $version" \
-                --notes "Relocatable PostgreSQL $version for MixEngine, repacked from two publishers because no one of them covers the table. Windows and macOS come from EnterpriseDB's binary archives — one Windows x86_64 zip and one universal macOS zip, which is why both Apple cells carry the same build proven separately on each; EDB publishes no checksum for those, and upstream.verified_against says so in those words. Both Linux cells come from the PostgreSQL project's own apt repository, where a signed Release file states the digest of the package index and the index states the digest of every package, and where every minor ever published is still kept. pgAdmin, StackBuilder, the headers, the static and import libraries, PGXS, the LLVM JIT that only one publisher offers, and the procedural languages that need an interpreter nobody installed are not shipped; every one of them is named in upstream.removed. All five cells offer the same commands and the same extensions, which tools/parity.py checks rather than assumes. Every artifact was run as a database from a directory it had been moved to before being published — a cluster bootstrapped with initdb, the server started against a rendered postgresql.conf, pg_isready answered, a row written and read back, hstore and pgcrypto created and used, and the server stopped with pg_ctl stop -m fast — see mixengine-artifact.json inside each one for what was proven, and its requires field for what it expects the machine to have."
+                --notes "Relocatable PostgreSQL $version for MixEngine, repacked from two publishers because no one of them covers the table. Windows and macOS come from EnterpriseDB's binary archives — one Windows x86_64 zip and one universal macOS zip, which is why both Apple cells carry the same build proven separately on each; EDB publishes no checksum for those, and upstream.verified_against says so in those words. Each macOS artifact holds only the slice it can execute, lifted out of the universal binary as a byte range and re-checked against the code signature EDB had already put on that slice, and the dylib version chains upstream shipped as whole copies are links again — 362 MB of tree becomes 82 MB, with every one of the 173 files this touched named in upstream.changed. Both Linux cells come from the PostgreSQL project's own apt repository, where a signed Release file states the digest of the package index and the index states the digest of every package, and where every minor ever published is still kept. pgAdmin, StackBuilder, the headers, the static and import libraries, PGXS, the LLVM JIT that only one publisher offers, and the procedural languages that need an interpreter nobody installed are not shipped; every one of them is named in upstream.removed. All five cells offer the same commands and the same extensions, which tools/parity.py checks rather than assumes. Every artifact was run as a database from a directory it had been moved to before being published — a cluster bootstrapped with initdb, the server started against a rendered postgresql.conf, pg_isready answered, a row written and read back, hstore and pgcrypto created and used, and the server stopped with pg_ctl stop -m fast — see mixengine-artifact.json inside each one for what was proven, and its requires field for what it expects the machine to have."
             fi
             gh release upload "$tag" "${assets[@]}" --clobber
           done
