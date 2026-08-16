@@ -26,11 +26,14 @@ What is *not* done is the rule itself.
 The rule was written **after** MariaDB, because MariaDB is what taught it: three routes to one
 version produced three different feature sets, and fixing that is what
 [`10d4e81`](https://github.com/haiquang9994/mixengine-packages/commit/10d4e81) and
-[`6c344d0`](https://github.com/haiquang9994/mixengine-packages/commit/6c344d0) are. It has never been
-applied backwards to the four runtime rows that were packed before it existed, and P1–P6 are that
-work. Measured against upstream's own archives, the gaps are not marginal: **PHP 8.3 on Windows is
-missing two extensions this repository fails a Unix build over**, and one Node.js version is 106 MB
-on Windows and 198 MB on Linux.
+[`6c344d0`](https://github.com/haiquang9994/mixengine-packages/commit/6c344d0) began. They did not
+finish it: a later audit of the six *finished* artifacts of a green run found four more asymmetries
+no recipe knew it had, and closing those took seven further commits; what that audit found is
+written down in [the README](../README.md#one-version-means-one-thing-and-no-more-than-is-needed),
+because it is the argument for P6. The rule has never been applied backwards to the four runtime
+rows that were packed before it existed, and P1–P6 are that work. Measured against upstream's own
+archives, the gaps are not marginal: **PHP 8.3 on Windows is missing two extensions this repository
+fails a Unix build over**, and one Node.js version is 106 MB on Windows and 198 MB on Linux.
 
 Nothing below is a rewrite. Every recipe already downloads, verifies, relocates, proves and packs
 correctly; what they do not do is *choose*, and choosing once is the whole of the rule.
@@ -42,7 +45,8 @@ correctly; what they do not do is *choose*, and choosing once is the whole of th
 ### [ ] P1 — Give the borrowed recipes somewhere to say what they took out **(rule)**
 
 `upstream.removed`, `upstream.added` and `upstream.stripped` are what keep "borrowed" checkable
-against what the publisher shipped. Only `tools/python.py` writes any of them; `node.py`,
+against what the publisher shipped. `tools/python.py`, `tools/mariadb.py` and `tools/mariadb_deb.py`
+write them — the three recipes written against the rule, or corrected under it. `node.py`,
 `php_windows.py` and `ruby.py` have no parameter for it at all, so even a correct decision made in
 P2–P5 would have nowhere to be declared. `borrow.publish` already carries whatever the manifest
 holds, so this is a `describe(…, added, removed)` signature in three recipes and nothing more.
@@ -146,7 +150,9 @@ prune, a note, or nothing.
 
 P2–P5 are one-time corrections; this is what keeps them. `verify.py` already validates each artifact
 against the schema. What it cannot do is compare the artifacts of *one version to each other*, which
-is the whole of the rule's first half.
+is the whole of the rule's first half. This is not a hypothetical check: MariaDB's four asymmetries
+were found by doing precisely that by hand, on a run whose six cells had all passed their smoke
+tests. What this task automates has already caught something once.
 
 Two checks, both cheap because every fact they need is already in `mixengine-artifact.json`:
 
