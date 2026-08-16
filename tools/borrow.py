@@ -313,7 +313,12 @@ def declare(
     somebody holding both archives wants to know what was done to the file, and the reasoning lives
     where all the other reasoning lives.
     """
-    declared = manifest.setdefault("upstream", {})
+    # Not `setdefault`: `keeps` is the one claim here that a **built** artifact makes too, and
+    # ruby_unix.py became the first caller with nothing borrowed to declare. An `upstream` block
+    # conjured for that call would be empty, and the schema requires `url` and `sha256` in any that
+    # exists — so the manifest would fail validation for having been described. An existing block is
+    # still edited in place; a new one is attached at the end only if something went into it.
+    declared = manifest.get("upstream", {})
 
     if added:
         added = sorted(dict.fromkeys(added))
@@ -363,6 +368,8 @@ def declare(
             )
         manifest["keeps"] = dict(sorted(keeps.items()))
 
+    if declared:
+        manifest["upstream"] = declared
     return manifest
 
 

@@ -1004,6 +1004,14 @@ def main() -> None:
     absent = ruby_parity.lacks(operating_system)
     if absent:
         manifest["lacks"] = absent
+    # The first *built* artifact in this repository to go through `borrow.declare`, and it is here
+    # for the one claim that is not about a publisher: `keeps` states a difference from this
+    # repository's own rule, which a compiled cell can be as far from as a borrowed one. Nothing is
+    # added or removed relative to an upstream archive because there is no upstream archive — what
+    # is declared is `lib/libruby*-static.a`, 41.4 MB on Linux and the largest file in the tree,
+    # which `--disable-shared` produces and `rbconfig.rb` sends every embedder to. See
+    # `ruby_parity.keeps`; it checks the file is there before the claim is written.
+    borrow.declare(tree, manifest, keeps=ruby_parity.keeps(tree, operating_system))
     measured = relocate.floor(tree)
     if measured:
         manifest["requires"] = {measured[0]: measured[1]}

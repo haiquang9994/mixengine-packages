@@ -306,6 +306,30 @@ that warns, and a blueprint asking for a native gem can fail where it is written
 somebody's machine. It is the only field here that is an admission, and an absence nothing states is
 an absence a reader has to discover.
 
+**A second asymmetry was written down and then measured, and it was not there.**
+`RbConfig::CONFIG['ENABLE_SHARED']` is `yes` on the two borrowed cells and `no` on the four compiled
+ones, which reads as *two cells can be embedded in a program and four cannot* — the question P4a
+answered for CPython, apparently coming out the other way. `--disable-shared` does not mean no
+libruby. It means libruby is a **static archive**: `lib/libruby-static.a` on Linux and
+`lib/libruby.3.4-static.a` on macOS, 41.4 MB and 28.3 MB on 3.4.10 and the largest file in either
+tree. And each half names its own copy from a record that survives the move — `rbconfig.rb` begins
+by deriving its prefix from its own location, which is `--enable-load-relative` again, so
+`CONFIG['LIBRUBYARG']` reads `-Wl,-rpath,$(libdir) -lruby-static $(MAINLIBS)` on the compiled cells
+and `-lx64-ucrt-ruby340` on the borrowed ones, which is what the 2.4 MB
+`lib/libx64-ucrt-ruby340.dll.a` resolves. So all six hand an embedder a link line naming a file
+inside the artifact, the difference is linkage and not capability, and the import library is not
+surplus after all. Both stay, with `include/` beside them, declared in `keeps` — on the Windows
+cells too, where `lacks` has just said no compiler is present: `ridk install` adds one, and headers
+deleted here cannot be.
+
+What the same measurement did find is that **the Unix cells ship their debug information**. Of
+3.4.10's Linux tree, `bin/ruby` is 20.5 MB with 11.7 MB of DWARF in it and the static library is
+41.4 MB of which 26.1 MB is DWARF and its relocations — 37.8 MB of a 106 MB tree, against 19.9 MB of
+81 MB on macOS, where `.dSYM` bundles are already deleted and only the archive keeps any. Windows
+has none: RubyInstaller links with `-s`. That is P4b's finding on a different row, it is levelled in
+the same direction, and it is written up as its own task rather than folded in here, because it
+changes what a compiled cell contains and no machine here can compile one.
+
 The CA store is the part that is not obvious. A Ruby linked against a distribution's OpenSSL
 inherits that distribution's `OPENSSLDIR` — `/etc/pki/tls` on the Red Hat family, `/etc/ssl` on the
 Debian one — so an artifact built on one verifies certificates perfectly on the build machine and

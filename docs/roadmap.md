@@ -19,7 +19,7 @@ What is *not* done is the rule itself.
 | PHP | 7.0 – newest, 6 targets | `php_windows`, `php_unix`, `php_legacy_unix` | yes — P2 |
 | Node.js | 16 – newest, 6 targets | `node` | yes — P3 |
 | Python | 3.10 – newest, 6 targets | `python` | yes — P4, P4a and P4b |
-| Ruby | 3.2 – newest, 6 targets | `ruby`, `ruby_unix` | yes — P5, less P5a |
+| Ruby | 3.2 – newest, 6 targets | `ruby`, `ruby_unix` | yes — P5 and P5a, less P5b |
 | Caddy | 2.0 – newest, 6 targets | `caddy` | yes |
 | MariaDB | 10.6 – newest, 6 targets | `mariadb`, `mariadb_deb`, `mariadb_build` | yes — it is where the rule came from |
 
@@ -36,12 +36,13 @@ archives, the gaps were not marginal: PHP 8.3 on Windows was missing two extensi
 fails a Unix build over, which P2 closed; Node.js 24.19.0 was 106 MB on Windows against 198 MB on
 Linux, which P3 closed; CPython 3.13.15 shipped Tk 8.6 to Windows and Tk 9.0 to Unix under one
 version number, which P4 closed by shipping neither; and Ruby 4.0.6 on Windows was 276 MB of which
-225 MB was documentation the four compiled cells are configured never to build, which P5 closed. Three times now a task has come out somewhere
-other than where it was pointed — P3 kept npm's manual pages after going and reading npm, P4a keeps
-30 MiB of a shared library nothing in the archive loads, and P4b found its own title wrong and two of
-its stated reasons for existing wrong with it. That is what a rule is for, and it is the argument for
-measuring the artifacts rather than the release notes: every one of those three was written from what
-the publisher says and corrected by what the publisher ships.
+225 MB was documentation the four compiled cells are configured never to build, which P5 closed.
+Four times now a task has come out somewhere other than where it was pointed — P3 kept npm's manual
+pages after going and reading npm, P4a keeps 30 MiB of a shared library nothing in the archive
+loads, P4b found its own title wrong and two of its stated reasons for existing wrong with it, and
+P5a was written to close an asymmetry that a look at the six trees says is not there. That is what a rule is
+for, and it is the argument for measuring the artifacts rather than the release notes: every one of
+those four was written from what the publisher says and corrected by what the publisher ships.
 
 Nothing below is a rewrite. Every recipe already downloads, verifies, relocates, proves and packs
 correctly; what they do not do is *choose*, and choosing once is the whole of the rule.
@@ -597,35 +598,116 @@ same as never having asked.
 
 Packed end to end on Windows for all three lines, every manifest validating against the schema with
 `upstream.removed` naming both directories and `lacks` naming both capabilities. What is left is
-P5a, which is a question this audit raised rather than one it was sent to answer.
+P5a, which is a question this audit raised rather than one it was sent to answer — and which, on
+being asked properly, turned out to be two answers already in the trees and one task nobody had
+written down.
 
-### [ ] P5a — Ruby: the shared library, and the linker's half of the archive **(rule)**
+### [x] P5a — Ruby: the shared library, and the linker's half of the archive **(rule)**
 
-Two things the P5 audit measured and deliberately did not act on, because both need the *compiled*
-half changed and this machine cannot build it.
+Two questions P5 raised and did not answer, both written down as *needs the compiled half changed,
+and this machine cannot build one*. Neither did. The first was a misreading, the second follows from
+correcting it, and what actually needs a rebuild is a third thing the measurement turned up.
 
-**`--disable-shared` on four cells, a DLL on two.** RubyInstaller's Ruby answers
-`RbConfig::CONFIG['ENABLE_SHARED']` with `yes` and ships `bin/ruby.exe` beside
-`bin/x64-ucrt-ruby340.dll`; `ruby_unix.py` passes `--disable-shared`, so there is no `libruby.so` on
-any Unix cell at all. That is the same question P4a answered for CPython and the answer came out the
-other way round there: Windows cannot help shipping `python3XX.dll`, so the Unix cells keep
-`libpython` to match, and an embedder can link a MixEngine Python on all six. Here two cells can
-embed Ruby and four cannot. Deciding it means either dropping `--disable-shared` — which changes
-what four artifacts contain and how they relocate — or arguing that embedding Ruby is not something
-MixEngine offers, in which case the Windows DLL is not surplus either, because there it *is* the
-interpreter.
+#### The asymmetry was read off a config variable and is not in the trees
 
-**A 2.4 MB import library for a compiler the manifest now says is absent.**
-`lib/libx64-ucrt-ruby340.dll.a` is 14% of the pruned Windows archive and is what `-lx64-ucrt-ruby340`
-resolves to when a native extension links. P5 has just declared that this cell cannot compile one.
-The two readings are both defensible and they contradict each other: it is dead weight, or it is
-what makes the cell work after a user runs `ridk install`, which is the same argument P4 used to
-*keep* `libs/python3XX.lib` on a Windows that ships no compiler either. Whichever it is, `include/`
-— 1.6 MB of Ruby headers on both halves — travels with it and neither recipe declares either in
-`keeps` today, so the decision is one entry or two in a field that already exists.
+`RbConfig::CONFIG['ENABLE_SHARED']` is `yes` on the two borrowed cells and `no` on the four compiled
+ones, and P5a was written from that: *two cells can be embedded in a program and four cannot*. What
+this repository is supposed to do at that point is go and look, and looking says `--disable-shared`
+does not mean no libruby — it means libruby is a **static archive**. `lib/libruby-static.a` is
+41.4 MB on Linux and `lib/libruby.3.4-static.a` is 28.3 MB on macOS, on 3.4.10; either is the
+largest file in its tree, larger than the `bin/ruby` that already contains it linked.
 
-Do it with P6 or before it, not after: the check P6 writes reads `keeps`, and a row whose linker
-story is undecided is a row that check cannot be pointed at.
+The half that decides it is what names them. `rbconfig.rb` opens with
+
+```ruby
+TOPDIR = File.dirname(__FILE__).chomp!("/lib/ruby/3.4.0/x86_64-linux")
+```
+
+— that is `--enable-load-relative`, the flag this whole row turns on, so `libdir` follows the tree
+wherever it is put — and then publishes `CONFIG["LIBRUBYARG"]` as `-Wl,-rpath,$(libdir)
+-lruby-static $(MAINLIBS)` on the compiled cells and `-l$(RUBY_SO_NAME)` on the borrowed ones, which
+is what `lib/libx64-ucrt-ruby340.dll.a` resolves. `lib/pkgconfig/ruby-3.4.pc` restates it with
+`prefix=${pcfiledir}/../..`. So every one of the six hands an embedder a link line naming a file
+inside the artifact, and deleting either file leaves the artifact describing something it does not
+carry — the failure P4a kept CPython's unloaded `libpython` to avoid, here applying to six cells
+rather than four. `--disable-shared` stays, and its comment is right for a better reason than it
+gives: a static libruby is one fewer file for `bin/ruby` to find after the move, and the embedder is
+still served.
+
+The one thing that *is* uneven is smaller than the question. Windows' `LIBRUBYARG_STATIC` names a
+`lib…-static.a` RubyInstaller does not ship, so the other of the two spellings is the empty one
+there. Nothing follows it unless an embedder asks for it by name, and there would be nothing to ship
+that answered.
+
+#### So the second question answers itself, and it is two entries in `keeps`
+
+The import library is not dead weight, and `include/` — 2.0 MB, the same on all six — is what a gem
+with a C extension is compiled against. Both stay on the Windows cells although `lacks` has just
+said no compiler is present, for the reason P4 kept `libs/python3XX.lib` on a Windows shipping no
+compiler either: *cannot today* and *cannot ever* are different artifacts, `ridk install` is the
+supported way a user closes the gap, and headers deleted here cannot be.
+
+`ruby_parity.keeps(tree, os)` reads both off the finished tree — a glob, because the middle of the
+name is the build's `RUBY_SO_NAME` and it is spelled three ways — and **refuses to describe a tree
+that has neither**, since a build that stopped installing the static library is the decision
+changing under the recipe rather than a file to shrug at. `ruby_unix.py` is the first *built*
+artifact in this repository to go through `borrow.declare`, which took one fix: `declare` used
+`setdefault` and would have hung an empty `upstream` on a manifest with nothing borrowed, and the
+schema requires `url` and `sha256` in any `upstream` that exists.
+
+#### What actually needs a rebuild is the thing neither question asked about
+
+Weighing the static archive to argue about it is how this turned up: **63% of `libruby-static.a` is
+debug information.** By ELF section, on 3.4.10 for Linux — 9.6 MB of `.rela.debug_info`, 4.3 MB of
+`.debug_str`, 4.2 MB of `.debug_info`, against 3.9 MB of `.text`. And the binaries beside it are in
+the same state, which is the part P4b would recognise:
+
+| | tree | `bin/ruby` | its DWARF | static libruby | its DWARF |
+|---|---|---|---|---|---|
+| linux-x86_64 | 106 MB | 20.5 MB | 11.7 MB | 41.4 MB | 26.1 MB |
+| macos-aarch64 | 81 MB | 6.9 MB | 0.9 MB | 28.3 MB | 19.0 MB |
+
+macOS is lighter only because `assemble` already deletes the `.dSYM` bundles, which is where the
+compiler put the executable's debug information and is not where it put the archive's. Windows has
+none of this: RubyInstaller links with `-s`, visible in the `DLDFLAGS` its own `.pc` publishes. That
+is P4b's finding on another row — Windows already stripped, the other four levelled down to it — and
+it is **P5b**, not this task, because it changes what a compiled cell contains and nothing here can
+compile one.
+
+#### Verified
+
+All three Windows lines packed end to end (14,717,349 / 17,177,020 / 18,833,034 bytes — the manifest
+grew by its `keeps` block and nothing else did), each manifest validating with
+`keeps: ['include', 'lib/libx64-ucrt-ruby3X0.dll.a']`. The Unix half cannot be built here, so what
+was checked is the part P5a changed, against the published `ruby-3.4.10` artifacts for
+`linux-x86_64` and `macos-aarch64`: `keeps` finds `include` and the right static library in each,
+`declare` writes them, no `upstream` block appears on a built manifest, both validate, and a tree
+with no static libruby is refused.
+
+### [ ] P5b — Ruby: the four compiled cells ship their debug information **(rule)**
+
+Measured under P5a and left there. `bin/ruby` and `lib/libruby*-static.a` carry 37.8 MB of DWARF on
+a 106 MB Linux tree and 19.9 MB on an 81 MB macOS one; RubyInstaller ships none, having linked with
+`-s`. This is P4b's task on the Ruby row and the direction is the one P4b settled — level down to
+the cell that already has nothing — but two things differ and both are why it is separate.
+
+*The strip has to be verified on a machine that can build.* P4b could prove its own operation on
+Windows because `python.py` borrows on every platform; `ruby_unix.py` compiles and runs nowhere but
+macOS and Linux. The proof P4b built — `mapped()` comparing every allocated section and program
+header across the operation, `countersigned()` recomputing the arm64 code signature — is what should
+be reached for, and lifting it out of `python.py` into something both recipes share is most of the
+work.
+
+*One of the two files is an `ar` archive, not an executable*, and it is the one P5a has just written
+into `keeps` as needed. `strip --strip-debug` over a static library is a different claim from
+stripping a binary nothing links: what has to survive is every symbol an embedder resolves, so the
+check is the archive's symbol index and each member's `.symtab`, not a loader's view. Measured with
+`llvm-objcopy --strip-debug`, it would take the Linux archive from 41.4 MB to 15.3 MB and the macOS
+one from 28.3 MB to 9.3 MB.
+
+Do it with P6 or before it, not after — for the reason this task inherited from P5a: what P6 checks
+is that six cells agree, and a row where four of them carry 38 MB the other two do not is a row that
+check would have to be pointed at with an exception.
 
 ### [ ] P6 — Make the rule something CI can fail on **(rule)**
 
@@ -658,8 +740,12 @@ recipe that legitimately keeps one of them declares it, and the declaration is w
 — so "no more than is needed" becomes a list somebody wrote down rather than a habit somebody
 remembers. That field now exists: P4 added a top-level `keeps`, a mapping of path to reason rather
 than a list, because a check reading a bare path can only report *declared* and the argument is the
-part worth keeping. CPython is its only writer so far — `include/` on six cells, `libs/` on two and
-the shared interpreter on four — and this check is what stops it from being the only reader as well.
+part worth keeping. CPython was its first writer — `include/` on six cells, `libs/` on two and the
+shared interpreter on four — and P5a made Ruby the second, on all six at once and from both recipes,
+which is the case that matters most here: `libx64-ucrt-ruby340.dll.a` and `libruby-static.a` are
+what this check would otherwise read as two rows disagreeing, and they are one decision spelled by
+two toolchains. Ruby is also the first *built* artifact to write the field, so the check cannot
+assume a `keeps` implies an `upstream` beside it.
 The Unix entries are also the reminder that this check will never be the whole of the field: no
 pattern above would flag a `.so` in `lib/`, and P4a declared 30 MiB of one anyway, because the
 reason it is kept is not reconstructable from the file. What the check enforces is that everything

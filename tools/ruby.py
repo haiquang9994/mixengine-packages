@@ -255,7 +255,10 @@ def describe(tree: Path, version: str, arch: str, tag: str, url: str, digest: st
     absent = ruby_parity.lacks("windows")
     if absent:
         manifest["lacks"] = absent
-    return borrow.declare(tree, manifest, added, removed)
+    # And what it keeps that the rule would otherwise throw out — the headers and the import
+    # library, on a cell whose `lacks` above has just said it ships no compiler. The two are not in
+    # tension: see :func:`ruby_parity.keeps`, which reads both off the tree and states why.
+    return borrow.declare(tree, manifest, added, removed, ruby_parity.keeps(tree, "windows"))
 
 
 def smoke(tree: Path, version: str, manifest: dict) -> dict:
