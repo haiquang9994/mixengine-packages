@@ -386,7 +386,8 @@ def inside(path: Path, tree: Path) -> bool:
         return False
 
 
-def bundle(tree: Path, libdir: str = "lib", search: Sequence[Path] = ()) -> dict[str, Path]:
+def bundle(tree: Path, libdir: str = "lib", search: Sequence[Path] = (),
+           directories: Sequence[str] = BINARY_DIRECTORIES) -> dict[str, Path]:
     """Copy every non-system dependency into ``tree/libdir`` and rewrite the tree to use it.
 
     Returns ``{name: where it came from}`` — the origin matters to the caller, which has to collect
@@ -400,12 +401,16 @@ def bundle(tree: Path, libdir: str = "lib", search: Sequence[Path] = ()) -> dict
     ``libssl.so.3`` perfectly, and ``libssl.so.3`` then names ``libcrypto.so.3`` with no path of its
     own — so asking *it* what it needs answers "not on this machine" about a library sitting beside
     it. Left out, the bundling stops on a dependency that was never missing.
+
+    *directories* is where the payload is, and it exists here for the reason it exists on
+    :func:`machine_files` and :func:`verify`: a tree whose binary sits at its own root has to say so
+    or this walks nothing and bundles nothing, which reads exactly like a tree that needed nothing.
     """
     library_directory = tree / libdir
     executable_dir = tree / "bin"
     bundled: dict[str, Path] = {}
 
-    queue = deque(machine_files(tree))
+    queue = deque(machine_files(tree, directories))
     seen: set[Path] = set()
     while queue:
         current = queue.popleft()
@@ -444,7 +449,7 @@ def bundle(tree: Path, libdir: str = "lib", search: Sequence[Path] = ()) -> dict
             # missing from the machine rather than as one not copied over yet.
             queue.append(resolved)
 
-    rewrite(tree, libdir, set(bundled), executable_dir)
+    rewrite(tree, libdir, set(bundled), executable_dir, directories)
     return dict(sorted(bundled.items()))
 
 
@@ -456,10 +461,11 @@ def dependencies(
     return elf_dependencies(path, search)
 
 
-def rewrite(tree: Path, libdir: str, bundled: set[str], executable_dir: Path) -> None:
+def rewrite(tree: Path, libdir: str, bundled: set[str], executable_dir: Path,
+            directories: Sequence[str] = BINARY_DIRECTORIES) -> None:
     """Point every load at the copy beside it, relative to whoever is doing the loading."""
     library_directory = tree / libdir
-    for path in machine_files(tree):
+    for path in machine_files(tree, directories):
         relative = os.path.relpath(library_directory, path.parent).replace(os.sep, "/")
         if sys.platform == "darwin":
             anchor = "@loader_path" if relative == "." else f"@loader_path/{relative}"

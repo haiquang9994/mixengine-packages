@@ -1008,6 +1008,29 @@ def main() -> None:
     if upstream:
         borrow.declare(tree, manifest, added=upstream["added"], removed=upstream["removed"])
 
+    if operating_system == "linux":
+        # **The one library nginx cannot be talked out of, and it is not the C runtime.** Everything
+        # else this row needs is compiled in statically — PCRE2, zlib, OpenSSL — but `auth_basic`
+        # calls `crypt_r`, and on Debian and Ubuntu that is libxcrypt's `libcrypt.so.1` rather than
+        # glibc, where it used to live. Fedora and RHEL offer it as `libxcrypt-compat` and do not
+        # install it by default, so an archive naming it is one that starts on some glibc
+        # distributions and not others — exactly what `relocate.verify` exists to catch, and it did:
+        # `nginx: libcrypt.so.1 resolves outside the tree`, on both Linux cells.
+        #
+        # `python.py` met this same library and answered by deleting the module that wanted it. There
+        # is no such answer here: the module set is upstream's own Windows configure line and a
+        # version of nginx has to mean one set of directives on all six cells. So it travels inside
+        # the archive instead. What is *not* done is an allowance in `SYSTEM_SONAMES` —
+        # `strip_unportable` already wrote down why the first exception is the expensive one.
+        #
+        # macOS is left alone deliberately: `crypt` is in libSystem there, both cells already
+        # verified clean, and `rewrite` would re-sign two binaries to bundle nothing.
+        bundled = relocate.bundle(tree, directories=BINARIES)
+        if bundled:
+            print(f"bundled {len(bundled)} librar{'y' if len(bundled) == 1 else 'ies'}: "
+                  f"{', '.join(sorted(bundled))}")
+            relocate.bundled_licences(tree, bundled)
+
     measured = relocate.floor(tree, directories=BINARIES) if operating_system != "windows" else None
     if measured:
         manifest["requires"] = {measured[0]: measured[1]}
