@@ -1,26 +1,59 @@
 #!/usr/bin/env python3
-"""Compile memcached from upstream source for the four cells that can run it, and say so about two.
+"""Compile memcached from upstream source for the five cells that can run it, and say so about one.
 
-**The Windows cells are empty for the same reason Redis's are, and the reason is not a hard build.**
-memcached is autotools and POSIX: ``configure.ac`` and ``Makefile.am``, no ``CMakeLists.txt``, no
-``win32/`` directory and no project file, with a privilege-dropping source file per Unix —
-``linux_priv.c``, ``darwin_priv.c``, ``freebsd_priv.c``, ``openbsd_priv.c``, ``solaris_priv.c`` — and
-none for Windows. Its own download page offers a source tarball and points Linux users at their
-distribution's packages; it offers nothing for Windows and never has. So P8's question, *compile
-natively on a Windows runner or declare the cell empty*, has no first option to weigh. The cell is
-stated rather than filled, and the Windows leg of the workflow runs and exits 75 so that it is
-stated on every run.
+**The reason this recipe used to give for the Windows cells was wrong, and it was measured wrong
+rather than argued wrong.** What it said was that memcached has "a privilege-dropping source file
+for every Unix and none for Windows" — which describes the source tree accurately and then draws a
+conclusion the source tree does not support. Every ``*_priv.c`` sits behind an ``AM_CONDITIONAL``
+(``Makefile.am:39-57``, ``configure.ac:841-845``) and is **off by default**: optional hardening
+reached through ``--enable-seccomp`` or a platform probe, not a component the program needs. Built
+under Cygwin the generated ``config.h`` carries ``/* #undef HAVE_DROP_PRIVILEGES */`` and the build
+completes anyway. ``eventfd``, ``accept4`` and ``mlockall`` are each an ``AC_CHECK_FUNCS`` with a
+fallback and are undefined there too, with the same result.
 
-What the four remaining cells get:
+So the true statement is **no native Win32 build system** — no ``CMakeLists.txt``, no ``win32/``,
+no project file — which is a statement about what upstream ships, not about what the program can
+be. Under Cygwin it builds on this recipe's own ``configure`` line with no flag added and no file
+in either tarball patched, and the result runs as an ordinary Windows process: started from a
+directory the build never named, on a trimmed ``PATH``, answering the text protocol and stopping on
+a terminate.
+
+*What that cell costs, said here rather than found in a tree.* A Cygwin binary links
+``cygwin1.dll``, so the Windows archive is **two files rather than one** and the second is
+**LGPLv3** — a licence text to ship and a source route to offer, both of which :func:`licences`
+does, and a "this imports nothing outside the C runtime" claim that holds for the four Unix cells
+and not for this one.
+
+*And ``windows``/``aarch64`` stays empty*, for the reason ``nginx.py`` states about its own: Cygwin
+has no aarch64 port — the toolchain and runtime are not upstream and package porting has not begun
+— so the only thing that could fill that cell is this x86_64 image under emulation, and publishing
+it in an archive whose manifest says ``arch: aarch64`` would be a lie in the index.
+``docs/building-from-source.md`` already refuses that for the whole repository: *nothing here
+cross-compiles and nothing runs under emulation*. Whether MixEngine should install the x86_64
+archive on a Windows ARM machine and say so is a question for the daemon, where the user can see
+the answer.
+
+What the five cells get:
 
 *A static libevent, pinned here rather than taken from the machine.* memcached is a thin layer over
 an event loop and links nothing else. Taking the runner's libevent would make each artifact carry
 whatever that image happened to have — the thing this repository levels out everywhere else — and
 would leave a shared object to bundle and re-point afterwards. Compiled static into the binary
-instead, the artifact is one file that imports nothing outside the C runtime, and ``relocate.verify``
-is what says so rather than this paragraph. The version is written down with its SHA-256 and checked,
-which is one better than :mod:`ruby_unix` does for the three libraries it pins, and it costs three
-lines.
+instead, the Unix artifact is one file that imports nothing outside the C runtime, and
+``relocate.verify`` is what says so rather than this paragraph. The version is written down with its
+SHA-256 and checked, which is one better than :mod:`ruby_unix` does for the three libraries it pins,
+and it costs three lines.
+
+*On Windows nothing in :mod:`relocate` says anything, and that is worth knowing rather than
+assuming.* ``relocate.kind`` decides what a file is from its first four bytes and answers ``None``
+for a PE, so ``machine_files`` finds nothing in a Windows tree and ``verify`` inspects nothing —
+the call does not fail, it *passes without looking*. What replaces it here is two checks that are
+not a model of the loader: :func:`imports` reads the import table with ``cygcheck`` at pack time and
+refuses anything that is neither in the Cygwin tree nor under ``%SystemRoot%``, and :func:`smoke`
+then starts the binary with :func:`borrow.clean_path`, which is the loader's own verdict. Teaching
+:mod:`relocate` to read PE would turn a no-op into a real check inside seven other recipes at once —
+Caddy, Node, Python, nginx, MariaDB and PostgreSQL all call ``verify`` unconditionally on Windows —
+so it is left alone here deliberately, and that is the whole reason ``cygcheck`` lives in this file.
 
 *No TLS, no SASL, no proxy.* Each is a ``configure`` flag, a dependency and a feature of a cache
 somebody else operates. MixEngine supervises one instance on loopback for one developer.
@@ -50,6 +83,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -87,8 +121,24 @@ LIBEVENT = {
     "sha256": "f7e9383b8c0baa81b687e5b5eecc01beefaf1b19b64151d95ed61647fe7a315c",
 }
 
+WINDOWS = sys.platform == "win32"
+
+# Where the toolchain is on the one cell that needs one that is not the machine's own. The workflow
+# installs Cygwin with `add-to-path: false` and every program here is reached by absolute path, for a
+# reason worth stating: putting Cygwin on PATH makes `shell: bash` in a step resolve to *Cygwin's*
+# bash, which hands the trailing CR of a CRLF step script to the command — answered with
+# `SHELLOPTS: igncr`, which is an exported, readonly, self-updating variable, so `set -euo pipefail`
+# in that step then writes `errexit:nounset` into the environment of everything it starts. An
+# autoconf `configure` is safe under neither, and the spike that measured this cell died at
+# `_as_can_reexec: unbound variable` before testing one thing. Kept off PATH, none of that starts.
+#
+# `or` rather than a default argument: the workflow sets this from the install action's own `root`
+# output rather than pinning a directory, and a step that skipped the install passes an *empty*
+# string rather than nothing at all — which `os.environ.get` would hand back as a valid path.
+CYGWIN_ROOT = Path(os.environ.get("CYGWIN_ROOT") or r"C:\cygwin64")
+
 # One binary, which is the whole of what memcached installs into `bin/`: `bin_PROGRAMS = memcached`.
-LAYOUT = {"memcached": "bin/memcached"}
+LAYOUT = {"memcached": "bin/memcached.exe" if WINDOWS else "bin/memcached"}
 
 # Installed by upstream and then thrown away, because the second half of *One version means one
 # thing, and no more than is needed* names both outright. `include/memcached/` is
@@ -103,10 +153,72 @@ PRUNE = ("include", "share/man")
 OWN_LICENCES = ("COPYING", "LICENSE", "LICENSE.bipbuffer", "LICENSE.itoa_ljust")
 LIBEVENT_LICENCES = ("LICENSE",)
 
+# Where Cygwin publishes the source of what it ships. Named in the tree rather than only here,
+# because LGPLv3 asks the recipient to be able to get it and a reader holding the archive has this
+# file and not this recipe. Only the Windows cell ever reaches it.
+CYGWIN_SOURCE = "https://cygwin.com/pub/cygwin/x86_64/release"
+
+
+def cygwin(script: str, capture: bool = False, stdin: str | None = None,
+           timeout: int = 3600) -> str:
+    """Run *script* in Cygwin's own bash, reached by absolute path rather than through ``PATH``.
+
+    A **login** shell, so that ``/etc/profile`` composes the POSIX ``PATH`` the toolchain expects —
+    which is what makes ``configure``, ``make`` and ``cygcheck`` resolvable without Cygwin appearing
+    on the ``PATH`` of whatever started this recipe. See :data:`CYGWIN_ROOT` for why that matters.
+
+    ``SHELLOPTS`` is removed from the environment rather than merely left unset by the workflow. A
+    recipe run by hand out of a Cygwin shell inherits it the same way a step would, and what it
+    causes is an autoconf ``configure`` dying on ``_as_can_reexec: unbound variable`` — a message
+    that names a line in a generated script and says nothing about the variable that caused it.
+    """
+    bash = CYGWIN_ROOT / "bin" / "bash.exe"
+    if not bash.is_file():
+        raise SystemExit(
+            f"there is no Cygwin at {CYGWIN_ROOT}: {bash} does not exist. The Windows cell is built "
+            f"with Cygwin's toolchain — set CYGWIN_ROOT if it is installed somewhere else."
+        )
+    environment = dict(os.environ)
+    environment.pop("SHELLOPTS", None)
+    result = subprocess.run(
+        [str(bash), "-lc", script], timeout=timeout, env=environment, text=True,
+        input=stdin, capture_output=capture or stdin is not None,
+    )
+    if result.returncode != 0:
+        raise SystemExit(
+            f"cygwin bash exited {result.returncode} running: {script}\n"
+            f"{(result.stdout or '').strip()}\n{(result.stderr or '').strip()}"
+        )
+    return result.stdout or ""
+
+
+def posix(path: Path) -> str:
+    r"""*path* as Cygwin sees it: ``C:\x\y`` becomes ``/cygdrive/c/x/y``.
+
+    Through ``cygpath`` rather than through string surgery, because the answer is the *mount table*
+    and not a rule: ``/usr/bin`` is not ``<root>/usr/bin``, and a drive letter is not always
+    ``/cygdrive``.
+    """
+    return cygwin(f"cygpath -u {shlex.quote(str(path))}", capture=True).strip()
+
+
+def install(prefix: Path) -> str:
+    """A prefix spelled the way the build system has to be told it, on this cell."""
+    return posix(prefix) if WINDOWS else str(prefix)
+
 
 def run(*command: str, cwd: Path | None = None, env: dict | None = None,
         timeout: int = 3600) -> None:
     print("$ " + " ".join(str(part) for part in command), flush=True)
+    if WINDOWS:
+        # Through Cygwin's bash rather than through `subprocess` directly, because `./configure` is
+        # a shell script and `make` is Cygwin's own: both want the POSIX view of the directory they
+        # are run in, which is what `cwd` becomes here rather than a `subprocess` argument.
+        script = " ".join(shlex.quote(str(part)) for part in command)
+        if cwd is not None:
+            script = f"cd {shlex.quote(posix(cwd))} && {script}"
+        cygwin(script, timeout=timeout)
+        return
     result = subprocess.run([str(part) for part in command], cwd=cwd, env=env, timeout=timeout)
     if result.returncode != 0:
         raise SystemExit(f"{command[0]} exited {result.returncode}")
@@ -244,7 +356,7 @@ def build_libevent(work: Path, prefix: Path) -> Path:
     unpacked = directory / f"libevent-{LIBEVENT['version']}"
 
     run(
-        "./configure", f"--prefix={prefix}", "--disable-shared", "--enable-static",
+        "./configure", f"--prefix={install(prefix)}", "--disable-shared", "--enable-static",
         # Off because none of it is linked into memcached and each is either a dependency or a
         # build this artifact would be waiting on: `openssl` is the TLS the docstring declines,
         # `samples` and `libevent-regress` are demonstration programs and a test suite.
@@ -258,19 +370,190 @@ def build_libevent(work: Path, prefix: Path) -> Path:
 
 def build(source_tree: Path, prefix: Path, libevent_prefix: Path) -> list[str]:
     """Configure, compile and install memcached against the libevent just built."""
-    asked = ["./configure", f"--prefix={prefix}", f"--with-libevent={libevent_prefix}"]
+    # Not one flag added for Cygwin, and not one file patched in either tarball: the spike that
+    # measured this cell ran exactly this line and the build completed. If that ever stops being
+    # true, the failure belongs in the log rather than pre-empted by a `#ifdef` of flags here.
+    asked = [
+        "./configure", f"--prefix={install(prefix)}",
+        f"--with-libevent={install(libevent_prefix)}",
+    ]
     run(*asked, cwd=source_tree, env=os.environ.copy())
     run("make", f"-j{jobs()}", cwd=source_tree)
     run("make", "install", cwd=source_tree)
     return [f"./configure --prefix=… --with-libevent=… (libevent {LIBEVENT['version']}, static)"]
 
 
-def licences(tree: Path, source_tree: Path, libevent_source: Path) -> None:
-    """Ship the licence of memcached and of the library compiled into it.
+# ---------------------------------------------------------------------------- the Windows cell ---
+#
+# What follows does for one cell what :mod:`relocate` does for the other four, and lives here rather
+# than there for the reason the module docstring gives: `relocate.verify` is a no-op on Windows
+# inside seven other recipes, and making it stop being one is a change to all seven.
 
-    Both require their text to travel with the binary, so this is a condition of redistributing the
+
+def imports(binary: Path) -> list[tuple[Path, str]]:
+    r"""Everything *binary* loads, transitively, as ``(the Windows path, the same path POSIX)``.
+
+    ``cygcheck`` is Cygwin's ``ldd`` and walks the PE import table. It prints **Windows** paths —
+    ``C:\cygwin64\bin\cygwin1.dll``, never ``/usr/bin/cygwin1.dll`` — which is the detail that cost
+    the spike a run: a filter written as ``grep '^/'`` matched nothing, the tree was packed with no
+    DLL in it at all, and it still passed on the runner that had Cygwin on ``PATH``.
+
+    Both spellings are answered because both are needed: the Windows one is what :func:`shutil.copy2`
+    takes, and the POSIX one is what decides whether a file is *inside the Cygwin tree* — which is
+    the mount table's answer (``/usr/bin/…`` for inside, ``/cygdrive/…`` for out) rather than a
+    string comparison's. An earlier attempt compared against ``cygpath -w /`` through ``awk -v``,
+    which expands escape sequences in the value it is handed: ``C:\cygwin64`` arrived as
+    ``C:cygwin64`` and matched nothing.
+    """
+    # `|| true` because `cygcheck` reports a DLL it cannot resolve by exiting non-zero as well as by
+    # printing it, and an unresolvable import is a finding this should read rather than a reason to
+    # stop reading. Nothing is swallowed: the two checks below are on the *content* of the answer.
+    printed = cygwin(f"cygcheck {shlex.quote(posix(binary))} || true", capture=True)
+    windows: list[str] = []
+    for line in printed.splitlines():
+        entry = line.strip()
+        if re.match(r"^[A-Za-z]:\\", entry) and entry not in windows:
+            windows.append(entry)
+    if not windows:
+        raise SystemExit(
+            f"cygcheck named no import at all for {binary.name}, which cannot be true of a PE. Its "
+            f"output was:\n{printed}"
+        )
+
+    converted = cygwin("cygpath -u -f -", capture=True, stdin="\n".join(windows) + "\n")
+    posix_paths = [line.strip() for line in converted.splitlines() if line.strip()]
+    if len(posix_paths) != len(windows):
+        raise SystemExit(
+            f"cygpath answered for {len(posix_paths)} path(s) and cygcheck named {len(windows)}; "
+            f"the two lists cannot be paired up"
+        )
+    return list(zip((Path(entry) for entry in windows), posix_paths))
+
+
+def bundle(binary: Path) -> list[tuple[Path, str]]:
+    """Copy every DLL that came out of the Cygwin tree in beside *binary*.
+
+    **Beside the ``.exe`` is the whole of the rewrite on Windows.** The PE loader searches the
+    directory of the image being loaded first, so a DLL copied there needs no rpath, no install name
+    and no re-signing — what ``$ORIGIN`` emulates on ELF is already the default, and there is nothing
+    for :func:`relocate.rewrite` to have an opinion about.
+    """
+    carried = [(path, where) for path, where in imports(binary) if not where.startswith("/cygdrive/")]
+    if not carried:
+        # The failure the spike hid for a whole run, made loud here instead of three steps later: a
+        # Cygwin binary links `cygwin1.dll` by definition, so an empty list is a parse that went
+        # wrong and never a tree that needed nothing.
+        raise SystemExit(
+            f"cygcheck found nothing from the Cygwin tree in {binary.name}. A Cygwin binary links "
+            f"cygwin1.dll by definition, so this is an import list that was not parsed."
+        )
+    for source_path, where in carried:
+        destination = binary.parent / source_path.name
+        shutil.copy2(source_path, destination)
+        print(f"bundling {where} ({source_path.stat().st_size:,} bytes)")
+    return carried
+
+
+def strays(binary: Path) -> list[str]:
+    """Anything *binary* loads that is neither this tree's nor the operating system's.
+
+    Not a proof that the tree is closed — :func:`smoke` gets that from the loader itself, by starting
+    the binary on a :func:`borrow.clean_path` that has no build environment on it, which is the only
+    thing that would have caught the spike's first false pass. This catches the different hazard:
+    a DLL picked up from *somewhere else on the build machine*, which would be copied nowhere and
+    found nowhere.
+
+    A match on the file name rather than on the path, because ``cygcheck`` resolves a name the way
+    its own environment does and this tree is not on it — so the copy it names may be Cygwin's while
+    the copy the loader will use is the one sitting beside the ``.exe``.
+    """
+    system = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    beside = {path.name.lower() for path in binary.parent.iterdir() if path.is_file()}
+    problems = []
+    for path, where in imports(binary):
+        if path.name.lower() in beside:
+            continue
+        try:
+            path.resolve().relative_to(system.resolve())
+        except (ValueError, OSError):
+            problems.append(f"{binary.name}: {where} is neither in the tree nor under {system}")
+    return problems
+
+
+def cygwin_licences(carried: list[tuple[Path, str]], into: Path) -> list[str]:
+    """Ship the licence of every DLL bundled out of the Cygwin tree, and a route to its source.
+
+    **``cygwin1.dll`` is LGPLv3, which is not the shape of any other licence in this archive.** It
+    asks for the text, and it asks that whoever receives the binary can obtain the library's source
+    and relink against a modified one. The second half answers itself here — the DLL is a separate
+    file beside the ``.exe`` and can be replaced with another — so what is left is the text and a
+    place to get the source, and both are written into the tree rather than promised in a README.
+
+    A bundled file whose licence cannot be found is a failure and not a warning, which is the rule
+    :func:`relocate.bundled_licences` already sets for every library bundled on the Unix cells.
+    """
+    doc, licences_dir = (
+        Path(line.strip()) for line in
+        cygwin("cygpath -w /usr/share/doc; cygpath -w /usr/share/licenses", capture=True).splitlines()
+    )
+
+    shipped, unlicensed, rows = [], [], []
+    for source_path, where in carried:
+        # `cygcheck -f` answers with the package a file was installed by, which is the only thing
+        # that can be asked — a DLL carries no licence of its own and Cygwin files them per package.
+        package = cygwin(f"cygcheck -f {shlex.quote(where)} || true", capture=True).strip().splitlines()
+        package = package[0].strip() if package else ""
+        if not package:
+            raise SystemExit(f"cygcheck cannot say which package installed {where}")
+        bare = re.sub(r"-\d[\w.]*-\d+$", "", package)
+        rows.append(f"{source_path.name}\t{where}\t{package}")
+
+        found = []
+        for place in (doc / bare, doc / bare.capitalize(), doc / "Cygwin", licences_dir / bare):
+            if not place.is_dir():
+                continue
+            for pattern in ("LICENSE*", "LICENCE*", "COPYING*", "COPYRIGHT*", "CYGWIN_LICENSE*"):
+                found += [text for text in sorted(place.glob(pattern)) if text.is_file()]
+        if not found:
+            unlicensed.append(f"{source_path.name} (from {package}; looked in {doc / bare} and beside it)")
+            continue
+        for text in found:
+            shutil.copy2(text, into / f"{bare}-{text.name}")
+            shipped.append(f"{bare} {text.name}")
+
+    if unlicensed:
+        raise SystemExit(
+            "no licence text was found for a bundled DLL, and this archive may not be redistributed "
+            "without one: " + "; ".join(unlicensed)
+        )
+
+    (into / "CYGWIN-SOURCE.txt").write_text(
+        "The Windows archive links the Cygwin runtime, which is LGPLv3. Nothing in it is patched: "
+        "each DLL below is the file the named Cygwin package installs, copied beside the binary "
+        "unmodified.\n\n"
+        "file\tinstalled from\tpackage\n" + "\n".join(rows) + "\n\n"
+        "The corresponding source for each package is published by Cygwin at\n"
+        f"  {CYGWIN_SOURCE}/<package>/\n"
+        "as a <package>-<version>-src.tar.xz beside the binary package, and can also be fetched "
+        "with Cygwin's own setup program using --download --include-source. The runtime's history "
+        "is at\n"
+        "  https://sourceware.org/git/?p=newlib-cygwin.git\n",
+        encoding="utf-8",
+    )
+    return shipped
+
+
+def licences(tree: Path, source_tree: Path, libevent_source: Path,
+             carried: list[tuple[Path, str]] = ()) -> None:
+    """Ship the licence of memcached, of the library compiled into it, and of anything bundled.
+
+    Each requires its text to travel with the binary, so this is a condition of redistributing the
     archive rather than tidiness — and libevent is the half a walk over the *tree* would miss
     entirely, because after a static link there is no file in the archive that came from it.
+
+    *carried* is what :func:`bundle` copied in on the Windows cell and is empty everywhere else. It
+    is the opposite half of the same problem: a file that **is** in the tree, under its own licence
+    rather than memcached's, and the one licence here that asks for more than its text.
     """
     into = tree / "licenses"
     into.mkdir(exist_ok=True)
@@ -292,6 +575,10 @@ def licences(tree: Path, source_tree: Path, libevent_source: Path) -> None:
             )
         shutil.copy2(text, into / f"libevent-{name}")
         shipped.append(f"libevent {name}")
+
+    if carried:
+        shipped += cygwin_licences(list(carried), into)
+
     print(f"shipping {len(shipped)} licence file(s): {', '.join(shipped)}")
 
 
@@ -400,15 +687,18 @@ def smoke(tree: Path, version: str, provides: dict[str, str]) -> dict:
     and a bounded wait is not a shortcut in the check but the mechanism itself.
     """
     elsewhere = borrow.moved(tree)
+    memcached = elsewhere / provides["memcached"]
+    # Exactly what the shim composes: the tree's own directory, then the system's. Nothing of the
+    # build environment is on it, which on Windows is not hygiene but *the* check — the spike passed
+    # once with a tree holding no DLL at all, because Cygwin's own bin was on PATH and the loader
+    # found cygwin1.dll there. `--version` below is where that comes out, as 0xC0000135.
+    path = borrow.clean_path(memcached.parent)
 
-    problems = relocate.verify(elsewhere)
+    problems = strays(memcached) if WINDOWS else relocate.verify(elsewhere)
     for problem in problems:
         print(f"error: {problem}", file=sys.stderr)
     if problems:
         raise SystemExit("the relocated tree reaches outside itself")
-
-    memcached = elsewhere / provides["memcached"]
-    path = borrow.clean_path(memcached.parent)
 
     banner = borrow.run(memcached, "--version", path=path)
     if banner.split()[:2] != ["memcached", version]:
@@ -481,12 +771,18 @@ def main() -> None:
     arguments = parser.parse_args()
 
     operating_system, arch = borrow.host("memcached")
-    if operating_system == "windows":
+    if operating_system == "windows" and arch != "x86_64":
         borrow.unavailable(
-            "memcached has no Windows build: autotools and POSIX, no CMakeLists.txt, no win32 "
-            "directory, and a privilege-dropping source file for every Unix and none for Windows. "
-            "Its download page offers source and distribution packages and has never offered a "
-            "Windows binary. This cell is empty and the index says so."
+            "Cygwin has no aarch64 port, and that is the whole of the reason this cell is empty. "
+            "The toolchain and the runtime are not upstream — aarch64-pc-cygwin is waiting on GCC "
+            "— and porting the packages has not begun, so nothing can build memcached natively for "
+            "Windows on ARM today. The x86_64 archive does run here under emulation, and was "
+            "measured doing it, but publishing that payload in an archive whose manifest says "
+            "arch: aarch64 would be a lie in the index — the same refusal nginx.py makes about its "
+            "own 32-bit payload, and the rule docs/building-from-source.md sets for the whole "
+            "repository: nothing here cross-compiles and nothing runs under emulation. Whether to "
+            "install the x86_64 archive on a Windows ARM machine is the daemon's decision to make "
+            "in front of the user. This cell is empty and the index says so."
         )
 
     work = Path(tempfile.mkdtemp(prefix="mixengine-memcached-"))
@@ -503,7 +799,20 @@ def main() -> None:
 
     asked = build(source_tree, prefix, libevent_prefix=prefix)
     tree, provides = assemble(prefix, work)
-    licences(tree, source_tree, libevent_source)
+
+    # The Windows cell is the only one where anything outside the payload has to travel with it, and
+    # the difference from the Unix cells is not the bundling but *what is left over*: after a static
+    # libevent those archives are one file, and this one is two.
+    carried: list[tuple[Path, str]] = []
+    if WINDOWS:
+        carried = bundle(tree / provides["memcached"])
+        asked.append(
+            "built with Cygwin's toolchain; "
+            + ", ".join(sorted(path.name for path, _ in carried))
+            + " copied in beside the binary (LGPLv3 — see licenses/CYGWIN-SOURCE.txt)"
+        )
+
+    licences(tree, source_tree, libevent_source, carried)
 
     manifest = {
         "schema": 1,

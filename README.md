@@ -163,10 +163,14 @@ for it and an aarch64 archive may not hold x86_64 binaries.
 
 | Version | macOS aarch64 | macOS x86_64 | Linux x86_64 | Linux aarch64 | Windows x86_64 | Windows aarch64 |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **1.6** | ○ | ○ | ○ | ○ | — | — |
+| **1.6** | ○ | ○ | ○ | ○ | ○ | — |
 
-One line, because 1.6 is the only one upstream still tags — and the same empty Windows column, for
-the same reason: a privilege-dropping source file per Unix and none for Windows.
+One line, because 1.6 is the only one upstream still tags. Windows x86_64 is **not** the same empty
+cell as Redis's, and the reason once given for it — a privilege-dropping source file per Unix and
+none for Windows — was a correct reading of the source tree and a wrong conclusion: those files are
+optional and the build completes without them. Upstream has no native Win32 build system, so the
+cell is compiled under Cygwin on the same configure line with nothing patched, and `cygwin1.dll`
+(LGPLv3) travels beside the binary. Windows aarch64 stays empty because Cygwin has no aarch64 port.
 
 ### [nginx](docs/packages/nginx.md)
 
