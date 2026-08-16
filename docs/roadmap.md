@@ -57,6 +57,11 @@ turning the audit that started it into a program, and its first run says the sam
 time: every difference it reports is real, and every one is against an archive packed before the
 task that already closes it.
 
+*Packed* above means the recipe is written and runs, which is not the same as published, and the two
+had quietly come apart: the releases page holds PHP, Node.js, Python, Ruby, Caddy and MariaDB, while
+PostgreSQL, Redis, Memcached and nginx have recipes and nothing to install. P12 is that gap, found by
+P11 while counting the archive.
+
 Nothing below is a rewrite. Every recipe already downloads, verifies, relocates, proves and packs
 correctly; what they do not do is *choose*, and choosing once is the whole of the rule.
 
@@ -1498,7 +1503,7 @@ against all six live publishers from a developer machine — it found the Ruby e
 fixed them, a second `--check` came back clean and a third `--update` was a no-op — so the tool is
 known good and only the workflow around it is not. The first scheduled Monday will say.
 
-### [ ] P11 — Prove the archive is permanent
+### [x] P11 — Prove the archive is permanent
 
 The index promises that a blueprint pinning PHP 8.1.29 keeps working forever, which makes every
 release asset load-bearing and an accidental deletion unrecoverable. Nothing states that today: no
@@ -1507,6 +1512,125 @@ no line in the README saying which assets may never be deleted. A scheduled work
 every artifact the current index names is the smallest thing that would notice — and P10 left one to
 copy the shape from: `check-eol.yml` is a weekly job whose whole output is a pass or a failure with
 instructions attached, which is what this wants to be too.
+
+#### One of the three gaps cannot be closed, and saying so is the deliverable
+
+"No protection on the releases" was written as work. It is not: **GitHub has no way to protect a
+release asset.** Tag protection exists, has to be turned on by hand in the repository settings, and
+guards the wrong thing — a protected tag does not stop the release under it, or one asset of that
+release, from being deleted, which is exactly the accident this task is about. So prevention was
+never available and the task is honestly two thirds of what it says: a rule written down, and a job
+that notices it has been broken. The README says which assets may never be deleted; the enforcement
+is `check-archive.yml`, weekly, running `tools/permanence.py`.
+
+That makes *how fast* the only variable, and the reason is worth being precise about because it also
+decides what the failure message has to say. A lost artifact can be rebuilt from the recipe that made
+it — and not to the same bytes. These are compressed archives packed at a different minute by a
+different runner from sources that may themselves have moved, so the sha256 in the index will never
+match again, and the index is signed. Recovery means publishing a *different* artifact under the same
+version and re-signing an index that describes it differently, which anyone who pinned the old hash
+is entitled to read as tampering. There is no quiet repair, only a week's worth of not knowing.
+
+#### Half the archive is not in the index
+
+The plan says "`HEAD`s every artifact the current index names", and following it literally would have
+left the more insidious deletion invisible. The index names 194 archives; the releases hold 388
+assets, because every archive has a `<archive>.json` manifest beside it — and `publish-index.yml`
+does not rebuild the index from anything in this repository, it downloads every release asset and
+reads the manifest next to each archive. **A deleted sidecar leaves the archive perfectly intact and
+quietly drops that cell out of every index generated afterwards.** Nothing before this named those
+files as load-bearing. They are not in the index, so their URLs are derived rather than read, and all
+that can be asked of them is whether they are there — which is the only question they fail at.
+
+#### A fraction of the hashes, not a number of them
+
+Presence is a `HEAD`: 388 requests, fourteen to thirty seconds from a home connection at eight at a
+time, no bandwidth. The bytes are a different order
+of cost — 6.13 GiB today, and one more version of one more runtime adds six cells to that. Hashing
+everything weekly is affordable *now*, which is the trap: it is the reading that quietly stops being
+true. So a fixed **fraction** is hashed each run rather than a fixed count. A count keeps the weekly
+bill flat and lets coverage rot as the archive grows; a fraction keeps coverage flat and lets the
+bill grow with the thing it insures. The promise is about coverage, so coverage is what is held: at
+the default of eight slices every asset is hashed within eight weeks however many there are, which
+measured out at 21–32 archives and 0.57–0.99 GiB per week across the current 194.
+
+Which slice an asset falls in is a digest of its URL, not its position in the index. Position would
+mean a version published mid-cycle reshuffles every other asset into a different week, so "hashed
+within eight weeks" would stop being true exactly when the archive is growing. It is `hashlib` and
+not `hash()` for the same kind of reason: the built-in is salted per process, so a rotation built on
+it would pick a different set every run and could leave an asset unhashed for years while the log
+claimed a complete cycle.
+
+The `Content-Length` a `HEAD` answers with is compared against the size the index recorded, because
+it is free and it is the difference between "this URL answers" and "this URL answers with what we
+published". It catches the second-likeliest accident after deletion: a build workflow re-run against
+an existing tag, uploading a rebuilt archive over the old one with `--clobber`. Same URL, same name,
+a different file — and the length almost never lands on the byte the index wrote down.
+
+#### The trap that would have made the cheap check expensive and silent
+
+Every asset URL is a redirect: `github.com/.../releases/download/…` answers 302 and the bytes come
+from a signed `release-assets.githubusercontent.com` URL. `urllib` does not forward the original
+request across that, it builds a new one — and whether the method survives is a property of the
+interpreter rather than of the calling code. Recent CPython carries `HEAD` across; older ones rebuild
+it as a `GET`. On this archive that is the difference between 388 free requests and a 6 GiB download,
+**reporting exactly the same result either way**. The redirect handler reasserts the method, which is
+a no-op where it was already right and the whole of the check where it was not.
+
+#### What the first run found
+
+388 of 388 present, and the twenty-two archives of this week's slice all hashed to what the index
+says — a whole weekly run, end to end, in 86 seconds from a home connection. The published index's
+signature is from the key in the tree
+(`9439248f2eebafe0`, matching `minisign.pub`) — which is checked in the workflow before the archive
+is, since checking an archive against an index nobody can show was ours is checking a stranger's
+list. Every refusal was exercised against the live releases: an asset deleted from a release that
+still exists, a release deleted whole, a manifest deleted with its archive left alone, a length that
+moved, a hash that disagrees, and an index that names nothing at all. The rotation was checked to
+cover all 194 archives across its eight weeks with no asset in two slices and none in none, and to
+pick the same slice in three separate processes.
+
+Two things the run said that were not the question:
+
+- **The published index still carries the three wrong Ruby dates.** P10 fixed `data/eol.json` and
+  `mkindex.py` now re-dates every package, but neither reaches anybody until `publish-index.yml` runs
+  — the live index says ruby 3.2.11 ends 2026-03-31 and gives 3.4.10 and 4.0.6 the two invented
+  dates. The correction is a workflow run away, and nothing will do it on its own.
+- **The archive is six kinds, not ten.** PHP, Node.js, Python, Ruby, Caddy and MariaDB are published;
+  PostgreSQL, Redis, Memcached and nginx have recipes, green tables in this file and *no releases*.
+  So P7–P9 are done as recipes and undone as artifacts, and the 6.13 GiB above is somewhere under
+  half of what this job will eventually be watching.
+
+Left for whoever runs it: **`check-archive.yml` has never fired**, the same gap P10 left. The tool
+underneath it was run repeatedly against the live releases from a developer machine, including the
+hash path, so what is unproven is the workflow — the `minisign -V` step and the summary — and not the
+check.
+
+### [ ] P12 — Four kinds exist as recipes and not as artifacts
+
+Found by P11 while counting what the archive holds, and it is a gap in the *releases* rather than in
+any code here. PostgreSQL, Redis, Memcached and nginx have finished recipes, green sections in this
+file and **no release at all** — the published index is PHP, Node.js, Python, Ruby, Caddy and
+MariaDB, 35 packages and 194 archives, and nothing else. P7, P7a, P7b, P8 and P9 are done in the
+sense they were written to be: the recipe conforms, the smoke test passes on the runner, the empty
+cells are stated. They are not done in the sense a user cares about, because there is nothing to
+install.
+
+So this is running the four `workflow_dispatch` builds and then `publish-index.yml`, not designing
+anything — but it is worth a line here because everything about the way this file is written hides
+it. A section is ticked when the recipe is right, the table above counts cells a recipe covers, and
+`tools/parity.py` and `tools/permanence.py` both only ever look at artifacts that exist. Nothing in
+the repository can tell the difference between a kind that was never built and a kind whose build
+was never run.
+
+Two things to do while running them, both of which get easier the fewer versions exist:
+
+- **`publish-index.yml` afterwards, once.** It regenerates from every release that exists, so one run
+  picks up all four kinds *and* carries P10's corrected Ruby dates into the published index, which is
+  otherwise still wrong there.
+- **Then `check-archive.yml` by hand with `slices: 1`**, which hashes the whole archive including
+  everything just published. It is the one moment when a full sweep is cheap and the one time the
+  artifacts have never been read back from the releases page by anything.
 
 ---
 

@@ -893,14 +893,19 @@ minisign -Sm dist/index.json -s minisign.key
 # And, when a publisher moves a support schedule, transcribe it again rather than editing a date
 python tools/eol.py            # compare every written date against its publisher
 python tools/eol.py --update   # rewrite them from it, and commit the diff
+
+# Ask whether the archive the published index promises is still there
+python tools/permanence.py               # HEAD every asset, hash this week's eighth of them
+python tools/permanence.py --slices 1    # hash all of it, which is a six-gigabyte download
 ```
 
 In practice none of that is run by hand: `.github/workflows/build-php.yml` takes a version, picks the
 recipe from it and produces every target; `build-node.yml`, `build-python.yml`, `build-caddy.yml`,
 `build-redis.yml`, `build-memcached.yml` and `build-nginx.yml` do the same with one recipe and six;
 `build-ruby.yml` runs six legs across two recipes; and `publish-index.yml` regenerates and signs the
-index from every release that exists. `check-eol.yml` is the only one that runs on a clock, for the
-reason the next section gives.
+index from every release that exists. Two run on a clock rather than on a request — `check-eol.yml`
+and `check-archive.yml` — and the next two sections are why: both watch something that can go wrong
+while nothing in this repository is touched.
 
 Three of those keep legs in the matrix that produce nothing by design — both Windows legs for Redis
 and Memcached, the ARM64 one for nginx. An empty cell stated in every run's log is worth a runner
@@ -978,6 +983,54 @@ the check an equality, and `mkindex.py` reads the lines it needs and ignores the
 could never have reached the package already published — the file would have been right and the
 index would have stayed wrong. It re-dates every package on every run, and **removes** a date the
 file no longer states, because un-saying something is as much a part of a correction as saying it.
+
+## Nothing that has been published may be deleted
+
+The index is cumulative by promise: a blueprint pinning PHP 8.1.29 has to keep installing years after
+8.1 stopped being built. That promise is not a property of the code, it is a property of the
+**releases**, and it makes every asset ever uploaded here load-bearing rather than historical. In
+full, and there are two kinds of them:
+
+- **Every archive.** `php-8.1.29-linux-x86_64.tar.zst` and its two hundred siblings. One deleted is
+  one version that stops installing on one platform, silently, for everybody who pinned it.
+- **Every `<archive>.json` beside it.** These are easy to mistake for debris and they are the input
+  the index is *made from*: `publish-index.yml` does not rebuild the index from anything in this
+  repository, it downloads every release asset and reads the manifest next to each archive. A
+  deleted sidecar leaves the archive perfectly intact and quietly drops that cell out of every index
+  generated afterwards.
+
+The **`index` tag is the single exception**, and by design: it holds the newest `index.json` and its
+signature, nothing else, and each publish moves it. That is why the URL MixEngine reads never
+changes and why nothing accumulates there.
+
+**A deletion cannot be undone, which is the part that is easy to get wrong.** The instinct is that a
+lost artifact can be rebuilt from the recipe that made it — and it can, but not to the same bytes.
+These are compressed archives packed at a different minute by a different runner from sources that
+may themselves have moved, so the sha256 in the index will not match, and the index is signed.
+Recovering means publishing a *different* artifact under the same version and re-signing an index
+that now describes it differently, which anyone who pinned the old hash is entitled to read as
+tampering. There is no quiet repair for this. There is only how long it takes to find out.
+
+GitHub cannot be told any of the above. Tag protection, if you turn it on in the repository settings,
+stops a tag being deleted and does not stop a release or an individual asset being deleted under it,
+which is the failure mode this section is about. So the rule is written here and the enforcement is
+detection: `check-archive.yml` runs `tools/permanence.py` every Wednesday against the published,
+signature-verified index, and asks two questions of it.
+
+*Is every asset still there* — one `HEAD` for each of the 388 URLs the current index implies, which
+costs seconds and no bandwidth. The `Content-Length` that comes back for free is compared to the size
+the index recorded, and that catches the second-most-likely accident after deletion: a build workflow
+re-run against an existing tag, uploading a rebuilt archive over the old one with `--clobber`. Same
+URL, same name, different file.
+
+*Is it still the bytes we signed* — which cannot be answered without downloading the whole thing, six
+gigabytes today and growing with every version published. So a fixed **fraction** is hashed each run
+rather than a fixed count, and the difference matters: a count keeps the weekly bill flat and lets
+coverage rot as the archive grows, a fraction keeps coverage flat and lets the bill grow with the
+thing it is insuring. At the default of eight slices every asset is hashed within eight weeks however
+many there are. Which slice an asset is in comes from a digest of its URL, so a version published
+mid-cycle joins one fixed slice and is hashed inside the cycle instead of reshuffling everything
+else out of the week it was in.
 
 ## The signing key
 

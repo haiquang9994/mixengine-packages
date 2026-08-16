@@ -1,0 +1,91 @@
+name: check the archive is still there
+
+# The index promises that a blueprint pinning PHP 8.1.29 keeps installing forever. Every release
+# asset is therefore load-bearing and none of them may ever be deleted — and GitHub has no way to be
+# told that. A release goes away in two clicks, and before this job the first thing that would have
+# noticed was somebody's install failing.
+#
+# A deletion cannot be undone, either. The recipe can be run again, but a rebuilt archive is not the
+# same bytes, so the sha256 in the *signed* index can never be matched again; restoring means
+# publishing a different artifact under the same version and re-signing an index that describes it
+# differently. There is no repair here, only how long it takes to find out. See P11 in
+# docs/roadmap.md, and the archive section of the README for what may never be deleted.
+on:
+  schedule:
+    # Wednesday, and weekly for the same reason `check-eol.yml` is: the failure being looked for is
+    # rare and manual, and a job that reports more often than the thing it watches changes is a job
+    # people stop reading. A different day from the dates check so two red mails are two subjects.
+    - cron: '41 5 * * 3'
+  workflow_dispatch:
+    inputs:
+      slices:
+        description: 'How many runs a full pass over the hashes takes. 1 sweeps the whole archive now; 0 only checks the assets are there.'
+        required: false
+        default: '8'
+        type: string
+  # The checker itself is the one thing in the tree that can change the answer.
+  push:
+    paths:
+      - 'tools/permanence.py'
+
+jobs:
+  archive:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+
+      # Fetched once and checked from disk, rather than letting the tool fetch it again: a signature
+      # verified against a *different* download of the same URL proves nothing about the file the
+      # rest of the job then reads.
+      - name: fetch the published index and prove it is the one we signed
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=https://github.com/${{ github.repository }}/releases/download/index
+          # -f so a missing index is this job's loudest possible failure rather than an empty file
+          # every later step happily agrees with.
+          curl -fsSL -o index.json "$base/index.json"
+          curl -fsSL -o index.json.minisig "$base/index.json.minisig"
+          sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+          # Against the key in the tree, which is the key compiled into MixEngine. Checking the
+          # archive against an index nobody can show was ours would be checking a stranger's list.
+          minisign -V -m index.json -p minisign.pub
+
+      - name: account for every asset the index names
+        id: account
+        # `shell: bash` for pipefail, as in check-eol.yml: the default `bash -e` has none, and piping
+        # into tee would hand the step tee's exit code and let a deleted asset pass.
+        shell: bash
+        run: |
+          python tools/permanence.py \
+            --index index.json \
+            --slices "${{ inputs.slices || '8' }}" | tee archive.log
+
+      - name: say what to do about it
+        if: failure() && steps.account.outcome == 'failure'
+        run: |
+          {
+            echo '## The archive no longer matches the index'
+            echo
+            echo 'One of two things happened, and they need opposite responses.'
+            echo
+            echo '**An asset is missing.** A release or one of its assets was deleted. It cannot be'
+            echo 'restored: a rebuild produces different bytes and the index that names this one is'
+            echo 'signed. Check the audit log for who deleted what, and if it is really gone,'
+            echo 'rebuild the version, publish it, and regenerate the index — every client that'
+            echo 'pinned the old hash will see the artifact change, so say so in the release notes.'
+            echo
+            echo '**An asset is there and hashes wrong.** Almost always a build workflow re-run'
+            echo 'against an existing tag, uploading over the old archive with `--clobber`. The'
+            echo 'bytes in the release are now newer than the bytes in the index; republish the'
+            echo 'index so it describes what is actually there.'
+            echo
+            echo '<details><summary>what the check saw</summary>'
+            echo
+            echo '```'
+            tail -c 60000 archive.log || true
+            echo '```'
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
