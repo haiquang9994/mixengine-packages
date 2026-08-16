@@ -51,6 +51,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import borrow  # noqa: E402  — siblings, and this directory is not importable as a package
+import eol  # noqa: E402
 import relocate  # noqa: E402
 
 DIST = "https://nodejs.org/dist"
@@ -394,6 +395,7 @@ def main() -> None:
     version = resolve(args.version, target)
     if version != args.version:
         print(f"{args.version} resolved to {version}")
+    eol.announce("node", version)
 
     name = f"node-v{version}-{upstream_name}"
     url = f"{DIST}/v{version}/{name}.{suffix}"

@@ -24,6 +24,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import eol  # noqa: E402  — siblings, and this directory is not importable as a package
+
 SCHEMA = 1
 ARCHIVE_SUFFIXES = (".zip", ".tar.zst", ".tar.gz")
 
@@ -99,7 +103,7 @@ def collect(directory: Path, base_url: str) -> list[dict]:
     return found
 
 
-def merge(index: dict, found: list, eol: dict, channel: str) -> dict:
+def merge(index: dict, found: list, dates: dict, channel: str) -> dict:
     """Add the new artifacts, replacing an artifact of the same kind/version/os/arch in place.
 
     Replacing is allowed — a rebuild of the same version is how a broken artifact gets fixed.
@@ -111,22 +115,29 @@ def merge(index: dict, found: list, eol: dict, channel: str) -> dict:
         package = packages.setdefault(
             (kind, version), {"kind": kind, "version": version, "channel": channel, "artifacts": []}
         )
-        # What a release *line* is differs per runtime, and it is the line that has an end-of-life
-        # date: PHP's is 8.3, Node.js's is 22. Both spellings are tried, narrowest first, so
-        # `data/eol.json` states each runtime's lines in the shape that runtime actually uses rather
-        # than in a shape this file imposes on all of them.
-        lines = (".".join(version.split(".")[:2]), version.split(".")[0])
-        for line in lines:
-            if line in eol.get(kind, {}):
-                package["eol"] = eol[kind][line]
-                break
-
         package["artifacts"] = [
             existing
             for existing in package["artifacts"]
             if (existing["os"], existing["arch"]) != (artifact["os"], artifact["arch"])
         ] + [artifact]
         package["artifacts"].sort(key=lambda a: (a["os"], a["arch"]))
+
+    # Every package, not only the ones this run added. An end-of-life date is the one thing in the
+    # index that changes without anything being rebuilt: it is a fact about a calendar, and the
+    # versions nearest their date are exactly the ones nobody is packing any more. Applying it only
+    # to new artifacts — which is what this did until P10 — meant a corrected date could never reach
+    # a package already published, so the Ruby 3.2 that was wrong by a day would have stayed wrong
+    # in the index forever. `eol.dated` knows what a release *line* is per kind, and it is shared
+    # with `tools/eol.py` rather than written twice.
+    for package in packages.values():
+        stated = eol.dated(dates, package["kind"], package["version"])
+        if stated:
+            package["eol"] = stated
+        else:
+            # Un-saying it matters as much as saying it: a date deleted from `data/eol.json` because
+            # no publisher ever stated it has to leave the index too, or the correction is invisible
+            # to every client. This is not "losing a version" — the package and its artifacts stay.
+            package.pop("eol", None)
 
     def order(item):
         (kind, version) = item
@@ -150,7 +161,7 @@ def main() -> None:
     parser.add_argument("--base-url", required=True,
                         help="where release assets live, e.g. "
                              "https://github.com/haiquang9994/mixengine-packages/releases/download")
-    parser.add_argument("--eol", type=Path, default=Path("data/eol.json"))
+    parser.add_argument("--eol", type=Path, default=eol.DATA)
     parser.add_argument("--channel", default="stable", choices=["stable", "rc", "beta"])
     parser.add_argument("--out", type=Path, default=Path("dist/index.json"))
     args = parser.parse_args()
@@ -158,9 +169,9 @@ def main() -> None:
     if "windows.php.net" in args.base_url or "nodejs.org" in args.base_url:
         raise SystemExit("the index must point at our own mirror; upstreams prune")
 
-    eol = json.loads(args.eol.read_text(encoding="utf-8")) if args.eol.exists() else {}
+    dates = eol.read(args.eol) if args.eol.exists() else {}
     found = collect(args.artifacts, args.base_url) if args.artifacts.is_dir() else []
-    index = merge(load_previous(args.previous), found, eol, args.channel)
+    index = merge(load_previous(args.previous), found, dates, args.channel)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(index, indent=2, sort_keys=False) + "\n", encoding="utf-8")

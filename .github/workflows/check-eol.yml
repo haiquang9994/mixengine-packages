@@ -1,0 +1,67 @@
+name: check end-of-life dates
+
+# The one claim in this repository that is not about bytes, and the only one that can rot while
+# nothing is touched. Everything else in an artifact is measured and can be re-measured from the
+# archive; "upstream stops patching this line on the 30th of April 2027" is a transcription, and a
+# transcription with nothing checking it is a rumour with a date on it.
+#
+# On a clock rather than at pack time, and the difference is the whole point. `mariadb.py` prints
+# the end-of-life date it saw on every run, which catches a moved schedule the next time that series
+# is packed — but an end-of-life date changes on a calendar, and the lines closest to their date are
+# exactly the ones nobody is packing any more. Ruby 3.2 ended in April 2026 and will never be
+# repacked; the date written for it was wrong by a day and only a scheduled check could have found
+# that. See P10 in docs/roadmap.md.
+on:
+  schedule:
+    # Monday morning UTC. Weekly because a publisher moves a date a few times a year, and a check
+    # that runs more often than the thing it checks changes is a notification people learn to ignore.
+    - cron: '19 6 * * 1'
+  workflow_dispatch:
+  # A hand-edited date is the failure this exists to prevent, so editing one by hand asks the
+  # question immediately rather than up to a week later. These are the only two paths that can
+  # change the answer.
+  push:
+    paths:
+      - 'data/eol.json'
+      - 'tools/eol.py'
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+
+      # No `pip install`: six publishers, six documents, stdlib only, like every other tool here.
+      - name: compare every written date against its publisher
+        id: compare
+        # `shell: bash` and not the default, because the default is `bash -e` *without* pipefail:
+        # piping into tee would hand the step tee's exit code and a disagreeing date would pass.
+        shell: bash
+        run: python tools/eol.py | tee eol.log
+
+      # A failure here is not "the build is broken", it is "upstream moved a schedule and the index
+      # is about to describe a version wrongly", which reads very differently to whoever opens it.
+      - name: say what to do about it
+        if: failure() && steps.compare.outcome == 'failure'
+        run: |
+          {
+            echo '## A date disagrees with its publisher'
+            echo
+            echo 'Rerun the transcription and commit the diff:'
+            echo
+            echo '```'
+            echo 'python tools/eol.py --update'
+            echo '```'
+            echo
+            echo 'Then publish the index, so packages already released pick the correction up —'
+            echo '`mkindex.py` re-dates every package on every run, not only the ones it just added.'
+            echo
+            echo '<details><summary>what the check saw</summary>'
+            echo
+            echo '```'
+            tail -c 60000 eol.log || true
+            echo '```'
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"

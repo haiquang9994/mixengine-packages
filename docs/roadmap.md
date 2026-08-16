@@ -1413,7 +1413,7 @@ good and the compile itself is not. It needs a `workflow_dispatch` on `build-ngi
 
 ## The index
 
-### [ ] P10 — End-of-life dates for every kind, not only MariaDB
+### [x] P10 — End-of-life dates for every kind, not only MariaDB
 
 `data/eol.json` carries what the index promises about a version's support window. MariaDB's entry is
 transcribed from a publisher API and reprinted on every run; the runtime entries are transcribed from
@@ -1421,13 +1421,92 @@ schedule pages by hand and nothing checks them. PHP and Node.js both publish mac
 schedules (`endoflife.date` mirrors the rest); reading them the way `mariadb.py` reads MariaDB's
 turns four hand-maintained entries into four transcriptions with a source.
 
+#### Nothing had ever checked them, and Ruby was wrong in three different ways
+
+The task assumed the fix was four transcriptions and the interesting part would be finding the
+documents. The documents were easy — **all six kinds publish one, and `endoflife.date` turned out
+not to be needed for anything**, which is worth recording because the plan above budgeted for it:
+
+| kind | document | field |
+| --- | --- | --- |
+| php | `php.net/releases/branches.php` | `security_support_end` |
+| node | `nodejs/Release`'s `schedule.json` | `end` |
+| python | `peps.python.org/api/release-cycle.json` | `end_of_life` |
+| ruby | `ruby/www.ruby-lang.org`'s `_data/branches.yml` | `eol_date`, else `expected_eol_date` |
+| mariadb | `downloads.mariadb.org/rest-api/mariadb` | `release_eol_date` |
+| postgres | `postgresql.org/versions.json` | `eolDate` |
+
+The interesting part was the first run of `tools/eol.py`. PHP, Node.js, Python, MariaDB and
+PostgreSQL were correct to the day — thirty-nine entries, no drift. **Ruby was wrong three separate
+ways in the five it had:**
+
+- **3.2 was off by a day.** Written 2026-03-31, upstream says 2026-04-01. Ruby's page says "March"
+  in prose and 1 April in its data.
+- **3.4 and 4.0 were invented.** Upstream states no end date for either, and both had been
+  extrapolated from Ruby's habit of ending a line on 31 March about four years on. A good guess,
+  printed in a field that means "upstream says". They are gone.
+- **3.3 was right by luck.** The number matches, but upstream files it under `expected_eol_date`
+  rather than `eol_date`.
+
+That is the shape of the class: hand-transcription is not usually wrong, and nothing tells you which
+of the forty-four entries is the one that is.
+
+Ruby's `expected_eol_date` is transcribed rather than refused. Ruby is the only one of the six that
+does not state a future date at all — `eol_date` is filled in when a branch actually ends — and
+refusing the expectation would leave 3.3 undated while PHP 8.5 carries a date four years further
+out, when PHP's, Node's and Python's future dates are *also* plans that can move. So it is taken,
+and `--check` prints the field every date came from, which makes an expectation visible as one. What
+is not taken is the case upstream is silent on: 3.4 and 4.0 are undated, per line rather than per
+kind.
+
+#### Three things this settled that the plan did not ask about
+
+**The MariaDB pattern is the wrong pattern, and P10 is where that became measurable.** Reading the
+date at pack time works for MariaDB because it arrives in the same document the download does — it
+costs nothing and catches a moved schedule the next time that series is packed. But an end-of-life
+date does not change when a version is packed; it changes on a calendar, and the lines closest to
+their date are exactly the ones nobody is packing any more. Ruby 3.2 ended in April 2026 and will
+never be repacked. So the check is `.github/workflows/check-eol.yml`, weekly and on any push
+touching the data or the tool, and the recipes keep only the free half: `eol.announce` prints what
+is written down, makes no network call and cannot fail a build. It is wired into all seven runtime
+recipes.
+
+**A subset cannot be checked, so each document is transcribed in full.** The file used to hold a
+curated 44 entries and the curation was the bug: nothing distinguishes a line deliberately left out
+from one forgotten. All 117 lines the six publishers state are now written down — PHP 4.3 and
+PostgreSQL 6.3 included — which turns the check into an *equality*, the only kind that catches an
+omission. It costs nothing: `mkindex.py` reads the lines it needs. Two consequences are recorded in
+`data/eol.json` rather than left to be rediscovered — PostgreSQL 13 now has a date and still cannot
+be packed (P7's Intel-only macOS archive), and Ruby's `1.9.3` and `2.0.0` are named with three parts
+and so can never match `mkindex.py`'s two lookups.
+
+**And a correction could not previously reach the index.** `mkindex.py` applied `data/eol.json` only
+to the artifacts a run had just added, so the fix to Ruby 3.2 would have made the file right and
+left the published index wrong forever. It now re-dates every package on every run, and *removes* a
+date the file no longer states — un-saying is half of a correction, and the invented 3.4 date would
+otherwise have outlived the entry it came from. Proven against a synthetic previous index: 3.2.9
+picked up 2026-04-01 without being rebuilt, 3.4.2's date was dropped, 22.11.0 gained one it never
+had, and Caddy stayed undated.
+
+One thing deliberately not solved: the four undated kinds. Caddy, nginx, Redis and Memcached publish
+no schedule, so `tools/eol.py` has six sources and not ten, and it is the one drift the check cannot
+see — if Caddy starts publishing a schedule tomorrow, nothing here will say so. Re-ask it when a
+kind's packaging is next touched, the way P8 and P9 both did.
+
+Left for whoever runs it: **`check-eol.yml` has never fired.** The check itself was run repeatedly
+against all six live publishers from a developer machine — it found the Ruby entries, `--update`
+fixed them, a second `--check` came back clean and a third `--update` was a no-op — so the tool is
+known good and only the workflow around it is not. The first scheduled Monday will say.
+
 ### [ ] P11 — Prove the archive is permanent
 
 The index promises that a blueprint pinning PHP 8.1.29 keeps working forever, which makes every
 release asset load-bearing and an accidental deletion unrecoverable. Nothing states that today: no
 protection on the releases, no periodic check that every URL in the published index still answers,
 no line in the README saying which assets may never be deleted. A scheduled workflow that `HEAD`s
-every artifact the current index names is the smallest thing that would notice.
+every artifact the current index names is the smallest thing that would notice — and P10 left one to
+copy the shape from: `check-eol.yml` is a weekly job whose whole output is a pass or a failure with
+instructions attached, which is what this wants to be too.
 
 ---
 

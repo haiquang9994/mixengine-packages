@@ -66,6 +66,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import borrow  # noqa: E402  — siblings, and this directory is not importable as a package
+import eol  # noqa: E402
 import relocate  # noqa: E402
 import ruby_parity  # noqa: E402
 import ruby_smoke  # noqa: E402
@@ -990,6 +991,7 @@ def main() -> None:
 
     version, url, digest = resolve(arguments.version)
     print(f"{arguments.version} resolves to Ruby {version} ({operating_system}/{arch})")
+    eol.announce("ruby", version)
 
     work = Path(tempfile.mkdtemp(prefix="mixengine-ruby-"))
     extra = work / "deps"

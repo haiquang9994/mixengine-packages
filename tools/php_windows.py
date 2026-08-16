@@ -53,6 +53,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # because the whole reason those modules exist is that two producers of one claim drift apart
 # invisibly, precisely because they agree on the name of the thing.
 import borrow  # noqa: E402  — siblings, and this directory is not importable as a package
+import eol  # noqa: E402
 import php_parity  # noqa: E402
 import php_smoke  # noqa: E402
 
@@ -578,6 +579,8 @@ def main() -> None:
     if args.version.count(".") == 1:
         args.version = newest_patch(args.version, args.arch)
         print(f"branch resolved to {args.version}")
+
+    eol.announce("php", args.version)
 
     url, upstream_hash = resolve(args.version, args.arch)
     print(f"borrowing {url}")

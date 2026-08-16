@@ -56,6 +56,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import borrow  # noqa: E402  — siblings, and this directory is not importable as a package
+import eol  # noqa: E402
 import relocate  # noqa: E402
 import strip  # noqa: E402
 
@@ -852,6 +853,7 @@ def main() -> None:
     published = catalogue(tag)
     version, asset = resolve(args.version, triple, published, tag)
     print(f"python-build-standalone {tag}: {args.version} resolves to {version} ({triple})")
+    eol.announce("python", version)
 
     url = f"{REPOSITORY}/releases/download/{tag}/{asset.replace('+', '%2B')}"
     work = Path(tempfile.mkdtemp(prefix="mixengine-python-"))

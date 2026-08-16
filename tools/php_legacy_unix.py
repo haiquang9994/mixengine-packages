@@ -66,6 +66,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import eol
 import php_parity
 import php_smoke
 import relocate
@@ -1125,6 +1126,7 @@ def main() -> None:
         )
     if branch < (7, 0):
         raise SystemExit("MixEngine offers PHP from 7.0; nothing here builds 5.x")
+    eol.announce("php", arguments.branch)
 
     operating_system, arch = host()
     work = Path(tempfile.mkdtemp(prefix="mixengine-php-"))

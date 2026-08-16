@@ -40,6 +40,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
+import eol
 import php_parity
 import php_smoke
 import relocate
@@ -323,6 +324,7 @@ def main() -> None:
         raise SystemExit(
             f"static-php-cli builds PHP 8.1 and newer; {args.branch} is php_legacy_unix.py's"
         )
+    eol.announce("php", args.branch)
 
     operating_system, arch, target = host()
     work = Path(tempfile.mkdtemp(prefix="mixengine-php-"))
