@@ -130,14 +130,17 @@ jobs:
 
           $port = 16399
           $conf = "$data\redis.conf"
-          @"
-bind 127.0.0.1
-port $port
-dir "$($data -replace '\\','/')"
-save ""
-appendonly no
-daemonize no
-"@ | Set-Content -Encoding utf8 $conf
+          # An array rather than a here-string, and the reason is the two syntaxes cannot both be
+          # satisfied: PowerShell requires the closing `"@` at column 0, and a line at column 0
+          # ends a YAML block scalar. The first push of this file was unparseable for exactly that.
+          Set-Content -Encoding utf8 -Path $conf -Value @(
+            'bind 127.0.0.1'
+            "port $port"
+            "dir `"$($data -replace '\\','/')`""
+            'save ""'
+            'appendonly no'
+            'daemonize no'
+          )
 
           Get-Content $conf
           $server = Start-Process -PassThru -NoNewWindow -FilePath "$moved\redis-server.exe" `
