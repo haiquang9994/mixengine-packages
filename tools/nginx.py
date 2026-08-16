@@ -858,12 +858,17 @@ def smoke(tree: Path, version: str, provides: dict[str, str], operating_system: 
     """
     elsewhere = borrow.moved(tree)
 
-    if operating_system != "windows":
-        problems = relocate.verify(elsewhere, directories=BINARIES)
-        for problem in problems:
-            print(f"error: {problem}", file=sys.stderr)
-        if problems:
-            raise SystemExit("the relocated tree reaches outside itself")
+    # Windows included since P6a: the guard was written when `relocate` judged a file by its magic
+    # and had nothing to say about a PE, and P8a made that stale. `BINARIES` was already right — this
+    # tree's payload is `nginx.exe` at the root and the default would have found no file at all — so
+    # unlike Node and Python there was only one thing to fix here. The borrowed zip passes: one
+    # binary, every import into System32, which is the claim the module docstring already made about
+    # a statically linked build and could not check on the platform it was made about.
+    problems = relocate.verify(elsewhere, directories=BINARIES)
+    for problem in problems:
+        print(f"error: {problem}", file=sys.stderr)
+    if problems:
+        raise SystemExit("the relocated tree reaches outside itself")
 
     nginx = elsewhere / provides["nginx"]
     path = borrow.clean_path(nginx.parent)

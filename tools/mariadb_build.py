@@ -423,12 +423,16 @@ def main() -> None:
         print(f"needs {measured[0]} {measured[1]} or newer")
 
     elsewhere = borrow.moved(tree)
-    if not windows:
-        problems = relocate.verify(elsewhere)
-        for problem in problems:
-            print(f"error: {problem}", file=sys.stderr)
-        if problems:
-            raise SystemExit("the relocated tree reaches outside itself")
+    # Windows included since P6a. The default `directories` needs no help here: this tree keeps
+    # everything in `bin` and `lib`, and a root scan of the published 12.3.2 finds the same 85 files
+    # — which is why MariaDB is the one row of the six where nothing but the guard was wrong. It is
+    # also the tree `verify` had hard-coded `tree/"bin"` for, a shape that turned out not to be
+    # every tree's; see `relocate.verify`.
+    problems = relocate.verify(elsewhere)
+    for problem in problems:
+        print(f"error: {problem}", file=sys.stderr)
+    if problems:
+        raise SystemExit("the relocated tree reaches outside itself")
     manifest["smoke"] = {
         "relocated": True,
         "ran": mariadb_smoke.server(elsewhere, version, provides, windows),

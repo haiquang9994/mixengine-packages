@@ -731,12 +731,23 @@ def smoke(tree: Path, version: str, manifest: dict) -> dict:
     """
     elsewhere = borrow.moved(tree)
 
-    if sys.platform != "win32":
-        problems = relocate.verify(elsewhere)
-        for problem in problems:
-            print(f"error: {problem}", file=sys.stderr)
-        if problems:
-            raise SystemExit("the relocated tree reaches outside itself")
+    # **`("",)`, because on Windows the default scan was reading pip's launcher stubs.** This ran
+    # under `sys.platform != "win32"` while `relocate` could not read a PE at all; P6a took the guard
+    # off and found that taking it off achieved nothing. A Windows Python keeps `python.exe` and
+    # `python314.dll` at the root and its 48 extension modules in `DLLs\`, and none of that is in
+    # `relocate.BINARY_DIRECTORIES`. What *is* — on a case-insensitive file system — is `lib`, which
+    # matches `Lib\`, the Python source library. So the check looked at exactly eight files, six of
+    # them `pip`'s vendored `distlib` launcher stubs (two of which are ARM64 in an x86_64 archive)
+    # and two of them venv launchers, and passed. Not a check that looked at nothing: a check that
+    # looked at somebody else's binaries.
+    #
+    # On Unix it names the same set the default does — 15 files on linux-x86_64 and 16 on
+    # macos-aarch64, identical both ways, measured on the published 3.14.7 rather than assumed.
+    problems = relocate.verify(elsewhere, directories=("",))
+    for problem in problems:
+        print(f"error: {problem}", file=sys.stderr)
+    if problems:
+        raise SystemExit("the relocated tree reaches outside itself")
 
     python = elsewhere / manifest["provides"]["python"]
     path = borrow.clean_path(python.parent)
