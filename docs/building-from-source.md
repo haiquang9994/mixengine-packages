@@ -422,6 +422,29 @@ import table out of the file itself. Sixty lines of offsets, depending on nothin
 answer, for the record: `redis-server.exe` imports `cygwin1.dll` and `cyggcc_s-seh-1.dll` and
 nothing else outside `C:\Windows` — a smaller set than any Linux artifact here.
 
+### `PATH` is the whole story, three times over
+
+Windows has no `$ORIGIN`, no soname and no install name. **The entire question of "which copy of a
+thing am I getting" is answered by `PATH` and by directory order**, and the same theme produced three
+separate failures before it was stated once:
+
+1. *The smoke test passed because Cygwin was on `PATH`* — after a bundling step that had copied
+   nothing at all.
+2. *The workflow step failed because Cygwin was on `PATH`*, since `shell: bash` then meant Cygwin's
+   bash, which chokes on the CRLF Actions writes into every step script and reports `syntax error:
+   unexpected end of file` about a `fi`. `add-to-path: false` is the fix, and `build-memcached.yml`
+   reached it first.
+3. *And then the toolchain check failed because Cygwin was **not** on `PATH`.* `bash -c "uname -s"`
+   answered `MINGW64_NT` from Cygwin's own bash, standing in the directory the install action had
+   just reported — because a shell resolves its commands through `PATH` like anything else, and Git
+   for Windows' `uname` was the one it found.
+
+The rule that falls out of the third is general: **a check of the form "which installation is this?"
+cannot go through a shell.** It has to ask a file inside the installation, by absolute path. The same
+omission would have stopped `make` one step later, so the build subprocess is handed a `PATH` of
+Cygwin's `bin` and the operating system and nothing else — scoped to the one process that needs it,
+which is precisely what lets the job's own `PATH` stay clean.
+
 ### Two platform differences that no reading of the source predicts
 
 *One was inside a macro.* `deps/hiredis/sds.c` failed with `array subscript has type 'char'
