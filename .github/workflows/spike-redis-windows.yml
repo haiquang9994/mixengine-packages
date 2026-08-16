@@ -28,14 +28,20 @@ jobs:
   spike:
     runs-on: windows-2022
     timeout-minutes: 60
-    env:
-      # **`shell: bash` here is Cygwin's bash, not git-bash, and they disagree about `\r`.** The
-      # install action puts Cygwin ahead of git on PATH, so every bash step below runs under
-      # `D:\cygwin\bin\bash.EXE` — while Actions writes the step's script file with CRLF endings.
-      # Git for Windows patches its bash to ignore a trailing CR; Cygwin's does not, and hands it to
-      # the command as an argument: the first run of this spike died on `uname: unknown option --`
-      # because `uname -a` was really `uname -a<CR>`. `igncr` is Cygwin bash's own answer.
-      SHELLOPTS: igncr
+    # **`shell: bash` here is Cygwin's bash, not git-bash, and they disagree about `\r`.** The
+    # install action puts Cygwin ahead of git on PATH, so every bash step below runs under
+    # `D:\cygwin\bin\bash.EXE` — while Actions writes each step's script file with CRLF endings. Git
+    # for Windows patches its bash to drop a trailing CR; Cygwin's does not, and hands it to the
+    # command as an argument, so the first run died on `uname: unknown option --` because `uname -a`
+    # was really `uname -a<CR>`. `igncr` is Cygwin bash's own answer.
+    #
+    # **It is passed on the command line and must not be passed as `env: SHELLOPTS`**, which is how
+    # the second run failed. A `SHELLOPTS` that is already in the environment stays exported, and
+    # bash writes *every* option it has back into it — so `set -euo pipefail` in a step leaked
+    # `nounset` into every child shell, including the `sh -c './mkreleasehdr.sh'` that
+    # `src/Makefile:19` runs at parse time. Upstream's script died on an unset `SOURCE_DATE_EPOCH`,
+    # `release.h` was never written, and the build stopped hundreds of objects later on a missing
+    # header that had nothing to do with Cygwin. Options given as arguments are not exported.
     steps:
       - uses: actions/checkout@v4
 
@@ -44,7 +50,7 @@ jobs:
           packages: make gcc-core gcc-g++ pkg-config
 
       - name: what this toolchain is
-        shell: bash
+        shell: bash --noprofile --norc -o igncr -eo pipefail {0}
         run: |
           uname -a
           gcc --version | head -1
@@ -56,9 +62,8 @@ jobs:
           ls /usr/lib/libdl.a /usr/lib/librt.a 2>&1 || echo "no libdl.a / librt.a — the generic else will not link"
 
       - name: fetch and unpack
-        shell: bash
+        shell: bash --noprofile --norc -o igncr -eo pipefail {0}
         run: |
-          set -euo pipefail
           curl -fsSL -A 'mixengine-packages spike' \
             -o "redis-${{ inputs.version }}.tar.gz" \
             "https://download.redis.io/releases/redis-${{ inputs.version }}.tar.gz"
@@ -72,9 +77,8 @@ jobs:
 
       - name: build, naming goals rather than patching the Makefile
         id: build
-        shell: bash
+        shell: bash --noprofile --norc -o igncr -eo pipefail {0}
         run: |
-          set -euo pipefail
           cd "redis-${{ inputs.version }}"
           # `-D_GNU_SOURCE` instead of editing /usr/include/dlfcn.h, which is what the community
           # workflow does. Cygwin guards `dladdr` and `RTLD_DEFAULT` behind `__GNU_VISIBLE`, and that
@@ -110,9 +114,8 @@ jobs:
           ls -la ../prefix/bin
 
       - name: what it imports
-        shell: bash
+        shell: bash --noprofile --norc -o igncr -eo pipefail {0}
         run: |
-          set -euo pipefail
           cd prefix/bin
           for exe in *.exe; do
             echo "=== $exe"
@@ -123,9 +126,8 @@ jobs:
           done
 
       - name: pack a tree the way a recipe would
-        shell: bash
+        shell: bash --noprofile --norc -o igncr -eo pipefail {0}
         run: |
-          set -euo pipefail
           mkdir -p tree/bin
           cp prefix/bin/*.exe tree/bin/
           rm -f tree/bin/redis-benchmark.exe tree/bin/redis-sentinel.exe
