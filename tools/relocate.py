@@ -688,7 +688,8 @@ def rewrite(tree: Path, libdir: str, bundled: set[str], executable_dir: Path,
             elf_set_rpath(path, anchor)
 
 
-def verify(tree: Path, directories: Sequence[str] = BINARY_DIRECTORIES) -> list[str]:
+def verify(tree: Path, directories: Sequence[str] = BINARY_DIRECTORIES,
+           executable_dir: Path | None = None) -> list[str]:
     """Re-resolve every dependency and complain about anything outside the tree.
 
     Meant to be run on a *copy of the tree in a directory it has never seen*. Running it where the
@@ -699,9 +700,22 @@ def verify(tree: Path, directories: Sequence[str] = BINARY_DIRECTORIES) -> list[
     Each file is resolved the way the loader will resolve it — including through the search path the
     tree's own executables carry, which is how a plugin with no ``DT_RPATH`` of its own finds a
     library that is nonetheless in the tree. See `loader_search`.
+
+    *executable_dir* is where the **process** will be running from, which is not where the file being
+    checked sits — `pe_resolve` and ``@executable_path`` both need it and neither can derive it from
+    the file. It used to be ``tree / "bin"`` unconditionally, and that is a fact about MariaDB's tree
+    rather than about trees. A Windows Python keeps ``python.exe`` and ``python314.dll`` at the top
+    and its extension modules in ``DLLs\\``, so asking ``tree/bin`` there names a directory that does
+    not exist and reports **34 modules as missing a DLL that is one level above them** — measured on
+    the published 3.14.7 archive, whose 34 modules then all imported from a moved tree on a cut-down
+    ``PATH``. A check that fails what works is not a strict check; it is a check nobody can leave on.
+
+    Derived from the tree rather than defaulted, because the tree already knows: ``bin`` if it has
+    one, its own root if it does not. Still an argument, so that a tree which is neither can say so.
     """
     problems = []
-    executable_dir = tree / "bin"
+    if executable_dir is None:
+        executable_dir = tree / "bin" if (tree / "bin").is_dir() else tree
     search = loader_search(tree)
     for path in machine_files(tree, directories):
         for spelling, resolved in dependencies(path, executable_dir, search):
