@@ -325,15 +325,29 @@ def smoke(tree: Path, version: str, manifest: dict) -> dict:
 
     *It carries a working OpenSSL*, called rather than merely reported: hashing a string exercises
     the bundled library, where reading ``process.versions.openssl`` exercises a string constant.
+
+    Before any of those, *nothing it loads comes from outside the tree* — on Windows too, which it
+    did not used to. See the comment on the `relocate.verify` call for what the platform guard was
+    hiding and why removing it alone would not have been enough.
     """
     elsewhere = borrow.moved(tree)
 
-    if sys.platform != "win32":
-        problems = relocate.verify(elsewhere)
-        for problem in problems:
-            print(f"error: {problem}", file=sys.stderr)
-        if problems:
-            raise SystemExit("the relocated tree reaches outside itself")
+    # **``("",)`` on every platform, and stated rather than defaulted.** This ran under
+    # ``sys.platform != "win32"`` for as long as `relocate.kind` judged a PE by its magic and
+    # answered ``None``, which made the call a no-op there; Redis taught it to read the import
+    # table, and the guard was then hiding a check that works. But dropping the guard on its own
+    # would have bought nothing: this tree's one binary is ``node.exe`` at the **root**, and
+    # `relocate.BINARY_DIRECTORIES` finds no ``bin`` to look in — 0 files against 1, measured on a
+    # packed 24.19.0 archive rather than reasoned about. A check that passes by asking nothing is
+    # what this repository has already shipped once, and it is what the argument exists to prevent.
+    #
+    # On Unix it names the same set the default would: after `prune` the root holds ``bin``, ``lib``
+    # and ``LICENSE``, so scanning from the root asks one question in one dialect instead of two.
+    problems = relocate.verify(elsewhere, directories=("",))
+    for problem in problems:
+        print(f"error: {problem}", file=sys.stderr)
+    if problems:
+        raise SystemExit("the relocated tree reaches outside itself")
 
     node = elsewhere / manifest["provides"]["node"]
     path = borrow.clean_path(node.parent)
