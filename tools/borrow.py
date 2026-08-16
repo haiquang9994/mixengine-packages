@@ -48,7 +48,8 @@ WINDOWS_TAR = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "
 SEVEN_ZIP = Path(r"C:\Program Files\7-Zip\7z.exe")
 
 
-def fetch(url: str, timeout: int = 120, attempts: int = 3) -> bytes:
+def fetch(url: str, timeout: int = 120, attempts: int = 3,
+          headers: Mapping[str, str] | None = None) -> bytes:
     """Download *url*, trying again when the network rather than the server refuses.
 
     A retry here is not defensive programming for its own sake: the source builds fetch five
@@ -60,10 +61,18 @@ def fetch(url: str, timeout: int = 120, attempts: int = 3) -> bytes:
     **An HTTP status is an answer and is not retried.** A 404 means "upstream does not publish
     this", which is a fact three attempts will not change, and each recipe has something to say
     about it that this cannot.
+
+    *headers* exists because one publisher refuses this function by name. ``download.redis.io``
+    answers **403** to ``Python-urllib/3.x`` and 200 to any other ``User-Agent`` — the same URL, the
+    same second — so a recipe that resolved a version perfectly would die on its first download with
+    a status that reads like the file is gone. It is an argument rather than a default so that
+    nothing else here changes behaviour: eight recipes fetch through this and none of the other
+    publishers has an opinion about who is asking.
     """
     for attempt in range(1, attempts + 1):
         try:
-            with urllib.request.urlopen(url, timeout=timeout) as response:
+            request = urllib.request.Request(url, headers=dict(headers or {}))
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 return response.read()
         except urllib.error.HTTPError:
             raise

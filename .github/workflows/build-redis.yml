@@ -1,0 +1,115 @@
+name: build redis
+
+# Asked for, never automatic — the same rule every other workflow here keeps, for the same reason:
+# upstream releases on its own schedule and a human decides which version is wanted.
+#
+# **One job for six targets, and two of them exist only to say they are empty.** Redis has no
+# Windows build at all — no CMakeLists.txt, no win32 directory, a src/Makefile around POSIX fork()
+# and epoll — so `tools/redis.py` exits 75 there and the leg reports a notice instead of an
+# artifact. Running it costs a runner minute and buys the thing an omission cannot: the empty cell
+# is stated in every run's log rather than being a row somebody has to remember is missing.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Redis line (8, 8.10), exact version (8.10.0), or 'latest'. 7.2 and up; Windows has no upstream build."
+        required: true
+        type: string
+      release:
+        description: 'Publish as a GitHub release. Off means build and keep the artifacts for inspection only.'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  pack:
+    # Every leg runs on the operating system and architecture it packs for, and here that is not
+    # merely the smoke test's requirement — it is a compiler's. Nothing is cross-built.
+    #
+    # Linux on 22.04 rather than the newest image, for the reason the MariaDB matrix states: a glibc
+    # build only runs on a glibc at least as new as the one that produced it, so the runner choice
+    # *is* the compatibility floor. 24.04 measures out at 2.38 and excludes Debian 12; 22.04 puts it
+    # at 2.35 and costs nothing. `relocate.floor` measures whatever it actually turns out to be and
+    # writes it into the manifest, so this comment is the intent and the artifact is the record.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-22.04,     os: linux,   arch: x86_64 }
+          - { runner: ubuntu-22.04-arm, os: linux,   arch: aarch64 }
+          - { runner: macos-14,         os: macos,   arch: aarch64 }
+          - { runner: macos-15-intel,   os: macos,   arch: x86_64 }
+          - { runner: windows-2022,     os: windows, arch: x86_64 }
+          - { runner: windows-11-arm,   os: windows, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: build and pack
+        id: pack
+        # bash on every leg, Windows included, so the exit code is read the same way everywhere
+        # rather than in two dialects that could disagree.
+        #
+        # 75 is "there is no build for this target", which for Redis is a permanent fact about the
+        # two Windows cells rather than a version that happens to be missing. Every other non-zero
+        # code is real and is passed on. `|| code=$?` rather than reading `$?` on the next line,
+        # because `shell: bash` runs with `-e` and a non-zero exit would end the step before
+        # anything could look at the code.
+        shell: bash
+        run: |
+          code=0
+          python -u tools/redis.py --version "${{ inputs.version }}" --out dist || code=$?
+          if [ "$code" -eq 75 ]; then
+            echo "::notice::no Redis for ${{ matrix.os }}/${{ matrix.arch }}; upstream has no build system for it"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit "$code"
+        # Generous rather than tight: the core is a few minutes on every runner here, and the whole
+        # point of a ceiling is to catch a build that has stopped rather than one that is slow.
+        timeout-minutes: 45
+      - uses: actions/upload-artifact@v4
+        if: steps.pack.outputs.skipped != 'true'
+        with:
+          name: redis-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    # One release per exact version, holding every artifact of it — the version read back out of
+    # each manifest rather than taken from the input, because the input may be a line or `latest`
+    # and each leg resolves it against upstream independently.
+    needs: pack
+    if: ${{ inputs.release && !failure() && !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: incoming, merge-multiple: true }
+      - name: publish one release per version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          versions=$(jq -r '.version' incoming/*.json | sort -u)
+          for version in $versions; do
+            tag="redis-$version"
+            assets=()
+            for manifest in incoming/*.json; do
+              [ "$(jq -r '.version' "$manifest")" = "$version" ] || continue
+              # Both halves: the manifest is what the index generator reads, so a release holding
+              # only the archive is one the index cannot be rebuilt from.
+              assets+=("${manifest%.json}" "$manifest")
+            done
+            echo "== $tag: ${#assets[@]} artifact(s)"
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              gh release create "$tag" \
+                --title "Redis $version" \
+                --notes "Relocatable Redis $version for MixEngine, compiled from upstream's own source release against the SHA-256 published in redis/redis-hashes. Four cells: macOS and Linux on both architectures. There is no Windows artifact and there will not be one before upstream has a Windows build — Redis is a POSIX program with no project file of any kind, Valkey is the same program forked and is unsupported there too, and Memurai is proprietary. Core Redis only: the modules the 8.x tarball vendors are not built, and TLS is off, so redis-server imports nothing outside the C runtime. Every artifact was run as a cache from a directory it had been moved to before being published — started against a rendered redis.conf, answering redis-cli ping, its reported version checked against the archive's, a key written and read back, and the server stopped with redis-cli shutdown — see mixengine-artifact.json inside each one for what was proven."
+            fi
+            gh release upload "$tag" "${assets[@]}" --clobber
+          done

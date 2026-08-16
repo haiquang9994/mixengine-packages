@@ -1,0 +1,101 @@
+name: build memcached
+
+# Asked for, never automatic — the same rule every other workflow here keeps.
+#
+# The shape is `build-redis.yml`'s, down to the two Windows legs that exist only to state that they
+# are empty, and for the same reason: memcached is autotools and POSIX with a privilege-dropping
+# source file for every Unix and none for Windows. `tools/memcached.py` exits 75 there.
+#
+# GH_TOKEN is set on the pack job and is not on Redis's, which is the one real difference: memcached
+# publishes no GitHub releases at all, so its *tags* are the catalogue, and the API that lists them
+# limits unauthenticated requests to sixty an hour per IP address — which runners share.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "memcached line (1.6), exact version (1.6.45), or 'latest'. 1.6 and up; Windows has no upstream build."
+        required: true
+        type: string
+      release:
+        description: 'Publish as a GitHub release. Off means build and keep the artifacts for inspection only.'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  pack:
+    # Linux on 22.04 for the compatibility floor, as in every built row here — see the comment in
+    # `build-redis.yml`. `relocate.floor` measures what the artifact actually ended up needing.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-22.04,     os: linux,   arch: x86_64 }
+          - { runner: ubuntu-22.04-arm, os: linux,   arch: aarch64 }
+          - { runner: macos-14,         os: macos,   arch: aarch64 }
+          - { runner: macos-15-intel,   os: macos,   arch: x86_64 }
+          - { runner: windows-2022,     os: windows, arch: x86_64 }
+          - { runner: windows-11-arm,   os: windows, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: build and pack
+        id: pack
+        # bash on every leg, Windows included, so the exit code is read the same way everywhere.
+        # 75 is "there is no build for this target" — permanent here, not a missing version.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          code=0
+          python -u tools/memcached.py --version "${{ inputs.version }}" --out dist || code=$?
+          if [ "$code" -eq 75 ]; then
+            echo "::notice::no memcached for ${{ matrix.os }}/${{ matrix.arch }}; upstream has no build system for it"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit "$code"
+        # A libevent and a memcached, both small. The ceiling is here to catch a build that has
+        # stopped rather than one that is slow.
+        timeout-minutes: 45
+      - uses: actions/upload-artifact@v4
+        if: steps.pack.outputs.skipped != 'true'
+        with:
+          name: memcached-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: pack
+    if: ${{ inputs.release && !failure() && !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: incoming, merge-multiple: true }
+      - name: publish one release per version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          versions=$(jq -r '.version' incoming/*.json | sort -u)
+          for version in $versions; do
+            tag="memcached-$version"
+            assets=()
+            for manifest in incoming/*.json; do
+              [ "$(jq -r '.version' "$manifest")" = "$version" ] || continue
+              assets+=("${manifest%.json}" "$manifest")
+            done
+            echo "== $tag: ${#assets[@]} artifact(s)"
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              gh release create "$tag" \
+                --title "memcached $version" \
+                --notes "Relocatable memcached $version for MixEngine, compiled from upstream's own source release against the SHA-1 published beside it at memcached.org. Four cells: macOS and Linux on both architectures. There is no Windows artifact and there will not be one before upstream has a Windows build — memcached is autotools and POSIX, with a privilege-dropping source file for every Unix and none for Windows. libevent 2.1.13-stable is compiled in statically and its licence ships beside memcached's, so the archive is one binary that imports nothing outside the C runtime; TLS, SASL, the proxy and the shutdown command are all off. Every artifact was run as a cache from a directory it had been moved to before being published — started on a free loopback port, answering version over the text protocol, a key stored and read back, and stopped the way the supervisor stops it — see mixengine-artifact.json inside each one for what was proven."
+            fi
+            gh release upload "$tag" "${assets[@]}" --clobber
+          done

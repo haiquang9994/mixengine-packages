@@ -65,6 +65,19 @@
     "branching it; the ones that do branch — MariaDB and PostgreSQL both publish dated release",
     "series — get entries when they are packed."
   ],
+  "_redis_memcached_comment": [
+    "Asked at P8 and left undated, which is a different answer from Caddy's above: Redis does branch",
+    "— 7.2, 7.4 and every 8.x line took a patch on the same day in July 2026 — so a date is the",
+    "right shape for it. Upstream simply does not state one for Redis Open Source anywhere.",
+    "**And searching for one leads somewhere worse than nothing.** redis.io publishes a detailed",
+    "product lifecycle with dated majors, and it is for Redis Software, the commercial cluster",
+    "product, whose version numbers overlap the open-source ones without meaning the same thing —",
+    "it lists a 7.22 and a 7.8, which Redis Open Source has never had, beside a 7.2 and a 7.4,",
+    "which it has. Transcribing that table into this file would date every artifact here against",
+    "another product's support window and nothing would look wrong. Whoever does P10 should read",
+    "this before reaching for an endoflife.date mirror of it.",
+    "memcached publishes no schedule of any kind and maintains one line, so it is Caddy's case."
+  ],
   "_mariadb_comment": [
     "The promise above, kept. MariaDB branches into long-term series and states the end of each one",
     "through its own REST API — `release_eol_date` on /rest-api/mariadb/ — so unlike every other",

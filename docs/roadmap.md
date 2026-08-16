@@ -1271,7 +1271,7 @@ green on 19" but **"is there a green `REL_19_STABLE` run from an animal that is 
 then the first green run of `postgres_build.py` is itself the evidence, and it costs one
 `workflow_dispatch` to find out.
 
-### [ ] P8 — Redis and Memcached
+### [x] P8 — Redis and Memcached
 
 **The evaluation here is likely to answer "build", and on the platform that usually borrows.**
 Neither project publishes an official Windows binary; what circulates is a Microsoft fork abandoned
@@ -1280,6 +1280,70 @@ runner and declaring the cell empty — and an empty cell is a real answer, not 
 the index says so instead of a user finding out.
 
 The smoke test is the cheapest in the table: start, `PING`, `SET`/`GET`, `SHUTDOWN NOSAVE`.
+
+#### It answered "build" on four cells and refused the question on two
+
+**The decision this task was written to make does not exist.** It assumed a choice between compiling
+on a Windows runner and declaring the cell empty, and there is no first option: Redis 8.10 ships no
+`CMakeLists.txt`, no `win32/` directory and no project file at all — a `src/Makefile` around POSIX
+`fork()`, `epoll` and `kqueue`, with a README naming Linux, OSX, OpenBSD, NetBSD and FreeBSD.
+memcached is autotools with a privilege-dropping source file per Unix (`linux_priv.c`,
+`darwin_priv.c`, `freebsd_priv.c`, `openbsd_priv.c`, `solaris_priv.c`) and none for Windows. That is
+a stronger finding than "hard", and it is the same shape as P7c's above: the empty cell belongs to
+upstream, not to this repository, and it does not open by trying harder. It is a *harder* shape than
+P7c's, in fact — PostgreSQL's Windows/ARM64 cell has a date it opens on, and this one has none.
+
+The three alternatives MixEngine's own table named were each asked. **Valkey** is a fork of the same
+POSIX program, unsupported on Windows, and its install page sends a Windows user to WSL — excluded by
+ADR 0003. **Memurai** is proprietary and cannot be redistributed. **The community rebuilds** are the
+unmaintained fork the plan already refused. So both Windows legs run and exit 75, as Caddy's do for a
+release with no archive.
+
+What the four Unix cells got, and what each one settled:
+
+* **`tools/redis.py`, floor 7.2, resolved against `redis/redis-hashes`** — upstream's own one-line-per-tarball
+  catalogue with a SHA-256 and a URL, so what exists and what it should hash to come from one
+  document. The floor is a licence decision as much as an age one: 7.2 is the last BSD-3 line, 7.4 is
+  RSALv2/SSPLv1 and 8.0 adds AGPLv3, and upstream still patches all of them. 58 stable releases
+  across eight lines resolve today.
+* **Core Redis only.** From 8.0 the tarball vendors RediSearch, RedisJSON, RedisTimeSeries,
+  RedisBloom and vector-sets — 6,671 files, and why 8.10.0 is 21 MB where 7.2.15 is 3.4 MB. Building
+  them wants LLVM 21, Rust 1.94 and a CMake pinned to ≤ 3.31.6, on four cells, forever, and it would
+  make the 7.2 cells of this row a different thing from the 8.x ones. `make -C src all` is what
+  upstream's own `scripts/build.sh redis` runs for the core and is the one path that serves both
+  lines.
+* **`tools/memcached.py`, floor 1.6**, catalogue from the GitHub *tags* because memcached publishes
+  no releases at all, tarball and digest from `memcached.org/files/<name>.tar.gz{,.sha1}`. libevent
+  2.1.13-stable is pinned with its SHA-256, compiled static and its licence shipped, because after a
+  static link nothing in the tree names it. No `--enable-shutdown`: it would put an unauthenticated
+  `shutdown` verb on a loopback port, and ADR 0008 already says stopping this service without a
+  signal costs nothing.
+* **No TLS on either.** These are the only built rows here that bundle *no* libraries: with TLS off
+  both binaries import nothing outside the C runtime, which `relocate.verify` states rather than the
+  build flags.
+
+Two things found on the way that are worth more than the row itself.
+
+**`download.redis.io` answers 403 to `Python-urllib/3.x` and 200 to any other `User-Agent`**, same
+URL, same second. A recipe using `borrow.fetch` resolves a version perfectly and then dies on the
+download with a status that reads like the release was withdrawn. `borrow.fetch` gained a `headers`
+argument — defaulted to none, so the other eight recipes are untouched — and `redis.py` names itself.
+Caught here rather than on the first CI run because the resolvers were exercised against the live
+catalogues before anything was committed, which is the cheapest test in this repository and the one
+most easily skipped.
+
+**redis.io's published lifecycle table is for a different product.** Searching for Redis Open
+Source's end-of-life dates leads to a detailed, dated schedule for **Redis Software**, the commercial
+cluster product, whose majors overlap the open-source numbering without meaning the same thing — it
+has a 7.22 and a 7.8 that Redis Open Source has never had, beside a 7.2 and a 7.4 that it has.
+Transcribing it would date every artifact here against another product's support window with nothing
+looking wrong. `data/eol.json` records the trap for P10, which is where the dates belong; neither
+kind gets an entry now.
+
+Left for whoever runs it: **nothing here has been through CI**. The resolvers, the licence collection
+across both Redis lines, and the refusal of an unnamed `deps/` directory were all exercised locally;
+the compile, the relocation check and the smoke tests need a `workflow_dispatch` on each of
+`build-redis.yml` and `build-memcached.yml` to be anything more than an intention.
 
 ### [ ] P9 — nginx
 
