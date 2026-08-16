@@ -56,10 +56,17 @@ import relocate  # noqa: E402
 #             build needs 3.x and fails in the middle of `sql_yacc.yy` rather than at configure time.
 #   openssl@3 macOS has LibreSSL headers only, which MariaDB's OpenSSL detection does not accept.
 #             Bundled afterwards, so the artifact does not depend on Homebrew existing.
+#   snappy    **The one asymmetry the finished artifacts showed that was ours rather than upstream's.**
+#             Comparing the six cells of 12.3 plugin by plugin, both Linux cells carry all five
+#             compression providers and macOS carried four: bzip2, lz4, lzma and lzo build against
+#             what the SDK and MariaDB's own sources supply, and snappy has no header to find. So a
+#             blueprint that sets a table's `PAGE_COMPRESSED` algorithm to snappy worked on Linux and
+#             failed on macOS, for no reason a user could have predicted. Bundled like OpenSSL, and
+#             its licence travels with it through `collect_licences`.
 #
 # `ncurses` is deliberately absent: the client's line editing uses the libedit macOS ships, which is
 # also what `ruby_unix.py` links for the same licence reason — GNU readline is GPLv3.
-BREW_PACKAGES = ("bison", "openssl@3", "pkg-config")
+BREW_PACKAGES = ("bison", "openssl@3", "pkg-config", "snappy")
 
 # What Windows needs beyond Visual Studio, which the runner has. `winflexbison3` provides the same
 # generated-parser tools under the names MariaDB's CMake looks for.
@@ -223,10 +230,12 @@ def dependencies() -> dict[str, Path]:
     if sys.platform == "darwin":
         for package in BREW_PACKAGES:
             attempt("brew", "install", package)
-        found = {name: brew_prefix(name) for name in ("bison", "openssl@3")}
+        found = {name: brew_prefix(name) for name in ("bison", "openssl@3", "snappy")}
         missing = [name for name, prefix in found.items() if prefix is None]
         if missing:
-            raise SystemExit(f"Homebrew has no {', '.join(missing)}, and this build needs both")
+            # Fatal rather than degraded, snappy included: a build that quietly drops a provider is
+            # how macOS came to be the one system missing one, and nothing in the artifact said so.
+            raise SystemExit(f"Homebrew has no {', '.join(missing)}, and this build needs each")
         # **Homebrew's prefix is a search path on Intel and not on Apple Silicon**, which is how two
         # artifacts of one version come to differ with no error on either. Asked rather than assumed,
         # for the reason `ruby_unix.build` states at length.
@@ -279,6 +288,11 @@ def configure(source_tree: Path, build: Path, prefix: Path, found: dict[str, Pat
             f"-DCMAKE_CXX_COMPILER={picked['cxx']}",
             f"-DWITH_SSL={found['openssl@3']}",
             f"-DBISON_EXECUTABLE={found['bison'] / 'bin' / 'bison'}",
+            # **Named, not left to the default search path**, which is the whole lesson of the
+            # comment in `dependencies`: `cmake/FindSnappy.cmake` is a bare `find_path` plus
+            # `find_library`, so on Intel it would find `/usr/local` and on Apple Silicon it would
+            # find nothing — one architecture with the provider and one without, no error on either.
+            f"-DCMAKE_PREFIX_PATH={found['snappy']}",
             # Only the linker can leave room for a longer install name, and every Mach-O here is
             # going to be rewritten by `relocate.bundle`. Finding that out afterwards costs the
             # whole build.
