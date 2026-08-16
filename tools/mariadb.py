@@ -36,6 +36,12 @@ dependency the Caddy recipe refused ``cosign`` for.
 is fetched over the same channel as the file, so a plain-text download would let anything on the path
 substitute both.
 
+*And the file is fetched from the publisher's archive rather than from those URLs at all.* They are a
+redirector to third-party mirrors, one of which served a 10.6.28 tarball 1,846 bytes short of the
+published one — so the checksum comes from the REST API and the bytes come from
+``archive.mariadb.org``, MariaDB's own host and the one ``mariadb_deb.py`` already uses. See
+``ARCHIVE``.
+
 *The test suite is not shipped.* ``mysql-test/`` and ``sql-bench/`` are more than half the unpacked
 tree, are a developer's tool for testing the server rather than for running one, and nothing in
 MixEngine reaches for them. They are named in ``upstream.removed`` rather than quietly dropped.
@@ -64,16 +70,33 @@ import relocate  # noqa: E402
 
 API = "https://downloads.mariadb.org/rest-api/mariadb"
 
+# **Where the bytes come from, which is not where the REST API points.** `file_download_url` is a
+# redirector: it answers 302 to whichever third-party mirror the service picks that minute, and the
+# mirror is not guaranteed to hold the file MariaDB published. CI caught one — 10.6.28 came back from
+# `linux.domainesia.com` 1,846 bytes short of upstream's own copy and hashing to something else
+# entirely — and the failure is worse than it looks, because *which* mirror answers changes per run,
+# so the same recipe passes and fails at random. `archive.mariadb.org` is MariaDB's own host, is what
+# `mariadb_deb.py` already borrows its packages from, and holds every release in the catalogue under
+# one path shape. The checksum still comes from the REST API: one host states what the file should
+# be, another serves it, and they have to agree.
+ARCHIVE = "https://archive.mariadb.org"
+
 # What this recipe can borrow, and what upstream calls it. The value is `(os, cpu, package_type)` as
-# the REST API spells each — its own vocabulary, not this repository's — plus the substring that
-# picks one file out of a release that offers several for the same target.
+# the REST API spells each — its own vocabulary, not this repository's — then the substring that picks
+# one file out of a release that offers several for the same target, and last the directory the
+# archive files that target under.
 #
 # `linux-systemd` is the only Linux bintar still published from 10.6 onwards; the plain `linux-` and
 # `linux-glibc_214-` variants stopped there. It is named explicitly rather than matched loosely so
 # that a release which brings the others back does not change which artifact this publishes.
 BORROWABLE = {
-    ("windows", "x86_64"): ("Windows", "x86_64", "ZIP file", "-winx64.zip"),
-    ("linux", "x86_64"): ("Linux", "x86_64", "gzipped tar file", "-linux-systemd-x86_64.tar.gz"),
+    ("windows", "x86_64"): (
+        "Windows", "x86_64", "ZIP file", "-winx64.zip", "winx64-packages",
+    ),
+    ("linux", "x86_64"): (
+        "Linux", "x86_64", "gzipped tar file", "-linux-systemd-x86_64.tar.gz",
+        "bintar-linux-systemd-x86_64",
+    ),
 }
 
 # Anything below this is not in the REST API at all: the catalogue starts at 10.6, older lines having
@@ -222,10 +245,12 @@ def lines() -> dict[tuple[int, ...], dict]:
     return found
 
 
-def resolve(spec: str, target: tuple[str, str]) -> tuple[str, str, str, str | None]:
+def resolve(spec: str, target: tuple[str, str]) -> tuple[str, str, str, str, str | None]:
     """Turn ``11.8``, ``11.8.8`` or ``latest`` into one published file.
 
-    Answers ``(version, url, sha256, end of life)``. The end-of-life date comes back from the same
+    Answers ``(version, url, mirror, sha256, end of life)`` — the archive's own copy first and the
+    REST API's redirector second, because the two are not interchangeable and only the first is
+    reproducible. See ``ARCHIVE``. The end-of-life date comes back from the same
     document, which is why MariaDB has no hand-written entry in ``data/eol.json``: upstream states a
     dated schedule per series through the API, and copying it into a file here would be a second
     source that goes stale silently.
@@ -252,9 +277,10 @@ def resolve(spec: str, target: tuple[str, str]) -> tuple[str, str, str, str | No
 
     series = stated[wanted[0]]
     catalogue = get(f"{API}/{series['release_id']}/")["releases"]
-    system, cpu, package, tail = BORROWABLE[target]
+    system, cpu, package, tail, directory = BORROWABLE[target]
 
-    offered: dict[tuple[int, ...], tuple[str, str, str]] = {}
+    offered: dict[tuple[int, ...], tuple[str, str, str, str]] = {}
+    unverifiable: list[str] = []
     for version, release in catalogue.items():
         if spec not in ("latest",) and len(borrow.parts(spec)) == 3 and version != spec:
             continue
@@ -268,11 +294,31 @@ def resolve(spec: str, target: tuple[str, str]) -> tuple[str, str, str, str | No
             # artifact of those would install a gigabyte of nothing.
             if "debugsymbols" in name:
                 continue
+            # **A file with no stated checksum is one release out of a series, not a broken API.**
+            # `mariadb-11.4.0-winx64.zip` — the first release of that line — is listed with an empty
+            # checksum object while every 11.4.x after it states one, and treating that as a shape
+            # change killed the whole Windows cell over a version this recipe would never choose:
+            # `max(offered)` takes the newest. So it is skipped and named, not fatal.
             digest = (entry.get("checksum") or {}).get("sha256sum")
             if not digest:
-                raise SystemExit(f"{name} is listed with no sha256sum; the API's shape has changed")
-            offered[borrow.parts(version)] = (version, secure(entry["file_download_url"]), digest)
+                unverifiable.append(name)
+                continue
+            offered[borrow.parts(version)] = (
+                version,
+                f"{ARCHIVE}/mariadb-{version}/{directory}/{name}",
+                secure(entry["file_download_url"]),
+                digest,
+            )
 
+    if unverifiable:
+        print(f"not borrowable, listed with no sha256sum: {', '.join(sorted(unverifiable))}")
+    if not offered and unverifiable:
+        # Every candidate unverifiable is the shape change the per-entry skip is not. It must not
+        # become an empty cell: that would publish silence for a series upstream does build.
+        raise SystemExit(
+            f"every {package} for {system}/{cpu} in {series['release_id']} is listed with no "
+            f"sha256sum; the API's shape has changed"
+        )
     if not offered:
         borrow.unavailable(
             f"downloads.mariadb.org publishes no {package} for {system}/{cpu} in "
@@ -469,7 +515,7 @@ def main() -> None:
             f"built by mariadb_build.py, and Linux ARM64 is unpacked from .deb by mariadb_deb.py."
         )
 
-    version, url, expected, eol = resolve(arguments.version, target)
+    version, url, mirror, expected, eol = resolve(arguments.version, target)
     if version != arguments.version:
         print(f"{arguments.version} resolved to {version}")
     if eol:
@@ -482,7 +528,18 @@ def main() -> None:
     try:
         downloaded.write_bytes(borrow.fetch(url, timeout=900))
     except urllib.error.HTTPError as error:
-        raise SystemExit(f"{url} answered {error.code}") from error
+        # The archive files a release the moment it is published, but a release published *this
+        # minute* is the one case where it might not have it yet. Falling back to the redirector
+        # keeps that from being a red cell; the checksum below is unchanged either way, so the worst
+        # this can do is fail for the reason it already would have.
+        if error.code != 404:
+            raise SystemExit(f"{url} answered {error.code}") from error
+        print(f"{url} answered 404; falling back to {mirror}")
+        url = mirror
+        try:
+            downloaded.write_bytes(borrow.fetch(url, timeout=900))
+        except urllib.error.HTTPError as second:
+            raise SystemExit(f"{url} answered {second.code}") from second
 
     actual = borrow.sha256(downloaded)
     if actual != expected:
