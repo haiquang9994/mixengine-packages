@@ -53,15 +53,26 @@ jobs:
         with: { python-version: '3.12' }
       # The POSIX runtime the source is compiled against. Only on the x86_64 Windows leg: the ARM
       # one has no Cygwin to install, which is the whole reason it exits 75.
-      #
-      # `gcc-g++` is in the list although Redis is C: `deps/hdr_histogram` and `deps/tre` are built
-      # by a Makefile that reaches for `$(CXX)`, and a missing one fails inside a dependency rather
-      # than in anything named Redis. `pkg-config` is what `src/Makefile` probes libsystemd with —
-      # absent, the probe errors instead of answering no.
       - uses: cygwin/cygwin-install-action@master
+        id: cygwin
         if: matrix.os == 'windows' && matrix.arch == 'x86_64'
         with:
+          # `pkg-config` is what `src/Makefile` probes libsystemd with — absent, the probe errors
+          # rather than answering no. `gcc-g++` is what the spike installed and therefore what the
+          # build has actually been measured with; whether any dependency needs the C++ front end
+          # has not been tested, and a package list is not the place to find out.
           packages: make gcc-core gcc-g++ pkg-config
+          # **Load-bearing, and `build-memcached.yml` found it first.** On PATH, Cygwin's bash wins
+          # over Git for Windows and `shell: bash` silently changes meaning for every later step —
+          # which then chokes on the CRLF that Actions writes into each step script, reporting
+          # `syntax error: unexpected end of file` about a `fi`. The usual answer, `SHELLOPTS:
+          # igncr`, is worse: SHELLOPTS stays exported and self-updating, so `set -e` in a step
+          # writes `errexit:nounset` into the environment of everything it starts — including the
+          # `sh -c './mkreleasehdr.sh'` that `src/Makefile:19` runs at parse time, which dies on an
+          # unset variable and leaves the build to fail hundreds of objects later on a missing
+          # `release.h`. Kept off PATH, the step stays git-bash and `tools/redis.py` reaches Cygwin
+          # by absolute path instead.
+          add-to-path: false
       - name: build and pack
         id: pack
         # bash on every leg, Windows included, so the exit code is read the same way everywhere
@@ -73,6 +84,11 @@ jobs:
         # because `shell: bash` runs with `-e` and a non-zero exit would end the step before
         # anything could look at the code.
         shell: bash
+        env:
+          # Where the step above put Cygwin, asked of it rather than pinned — the install action
+          # chose `D:\cygwin` on this runner, not the `C:\cygwin64` a constant would have guessed.
+          # Empty on the five legs that skipped it, which `cygwin_root()` reads as "not set".
+          CYGWIN_ROOT: ${{ steps.cygwin.outputs.root }}
         run: |
           code=0
           python -u tools/redis.py --version "${{ inputs.version }}" --out dist || code=$?

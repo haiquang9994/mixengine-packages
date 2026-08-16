@@ -496,28 +496,41 @@ def pe_imports(path: Path) -> list[str]:
     return names
 
 
-def pe_resolve(name: str, beside: Path, search: Sequence[Path]) -> Path | None:
-    """Where the loader will find *name*, searched the way it searches.
+def pe_resolve(
+    name: str, beside: Path, executable_dir: Path, search: Sequence[Path]
+) -> Path | None:
+    """Where the loader will find *name*, searched roughly the way it searches.
 
-    **The directory of the image being loaded comes first, and that is the whole of the relocation
-    story on Windows.** There is no rpath to set, no install name to rewrite and no signature to
-    repair: a DLL copied next to the executable that needs it *is* the fix, and `$ORIGIN` is
-    emulating a behaviour Windows already has by default. It is also why `bundle` is called with
-    ``libdir="bin"`` here where every other platform uses ``lib``.
+    **The application's directory comes first, and that is the whole of the relocation story on
+    Windows.** There is no rpath to set, no install name to rewrite and no signature to repair: a
+    DLL copied next to the executable *is* the fix, and `$ORIGIN` is emulating a behaviour Windows
+    already has by default. It is also why `bundle` is called with ``libdir="bin"`` here where every
+    other platform uses ``lib``.
+
+    *executable_dir* is that application directory, and it is not the same as *beside* — this is
+    `loader_search`'s problem in the other dialect. A plugin in `lib/` loaded by `bin/postgres.exe`
+    imports from the executable and from the libraries beside it, and the loader resolves those
+    against the **process's** directory rather than the plugin's. Asking only where the plugin sits
+    reports as missing a file that is right there in the tree, which is a false failure and not a
+    strict check: PostgreSQL and MariaDB both ship Windows trees shaped exactly that way.
 
     *search* is where the build put libraries this tree does not carry yet — Cygwin's own `bin` —
     and it is deliberately absent from `verify`, so that a tree which failed to bundle resolves
     nothing and says so.
     """
-    for directory in (beside, *search, *SYSTEM_DIRECTORIES):
+    for directory in (beside, executable_dir, *search, *SYSTEM_DIRECTORIES):
         candidate = directory / name
         if candidate.is_file():
             return candidate
     return None
 
 
-def pe_dependencies(path: Path, search: Sequence[Path] = ()) -> list[tuple[str, Path | None]]:
-    return [(name, pe_resolve(name, path.parent, search)) for name in pe_imports(path)]
+def pe_dependencies(
+    path: Path, executable_dir: Path, search: Sequence[Path] = ()
+) -> list[tuple[str, Path | None]]:
+    return [
+        (name, pe_resolve(name, path.parent, executable_dir, search)) for name in pe_imports(path)
+    ]
 
 
 # ------------------------------------------------------------------------------------ shared ---
@@ -619,7 +632,7 @@ def dependencies(
     if sys.platform == "darwin":
         return macho_dependencies(path, executable_dir)
     if sys.platform == "win32":
-        return pe_dependencies(path, search)
+        return pe_dependencies(path, executable_dir, search)
     return elf_dependencies(path, search)
 
 
