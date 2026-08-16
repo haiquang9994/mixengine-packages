@@ -1406,9 +1406,24 @@ artifact. Writing a path to Redis is fine; reading one back and treating it as a
 an ARM64 build. Running x86_64 under emulation would work and is refused, because an archive
 labelled `aarch64` may not hold binaries that are not.
 
-Memcached is untouched by this and its two Windows cells stay shut — the same route would compile
-it, and its privilege-dropping layer has a source file per Unix and none to write for Windows, which
-is a decision about what the artifact *is* rather than about whether it links.
+**Memcached was said to be untouched by this, and that sentence did not survive being checked.** It
+read: its Windows cells stay shut, because the privilege-dropping layer has a source file per Unix
+and none to write for Windows — a decision about what the artifact *is* rather than about whether it
+links. The source tree says otherwise. Every `*_priv.c` sits behind an `AM_CONDITIONAL` and is off
+by default: optional hardening reached through `--enable-seccomp` or a platform probe, not a
+component the program needs. Under Cygwin `config.h` carries `/* #undef HAVE_DROP_PRIVILEGES */` and
+the build completes. So `windows/x86_64` opened on Redis's route with nothing added to the
+`configure` line and nothing patched, and `windows/aarch64` stays shut for the reason that has no
+date on it: Cygwin has no aarch64 port.
+
+Two things came out of doing it, and both were about this repository rather than about memcached.
+The first Windows build failed on twenty-seven `api-ms-win-*` imports, which are virtual names the
+loader resolves from a schema — `relocate` already knew that and `memcached.py`'s own `cygcheck`
+copy of the same check did not, because the two had been written a year of lessons apart and one
+day of calendar apart. The recipe now calls `relocate.bundle` and `relocate.verify` like `redis.py`,
+and unifying them surfaced the second: `CYGWIN-SOURCE.txt` had been written for memcached alone,
+while Redis shipped `cygwin1.dll` under the identical LGPLv3 obligation with its licence text and no
+route to the source. It lives in `relocate.bundled_licences` now and both archives carry it.
 
 ### [x] P9 — nginx
 
