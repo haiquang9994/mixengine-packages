@@ -60,9 +60,17 @@ while Debian and Windows both publish theirs separately for whoever wants them. 
 benchmarks, not headers or import libraries: MixEngine installs a database or a runtime, not an SDK.
 Every user downloads this once per version per machine, and none of that is ever read.
 
-Whatever is taken out or put in is **recorded in `mixengine-artifact.json`** — `upstream.removed`,
-`upstream.added`, `upstream.stripped` — so that "borrowed" keeps meaning something a reader can
-check against what the publisher shipped.
+*None of that is ever read* is a claim about the runtime, though, and one row answers it the other
+way. `pip install` of a source distribution compiles a C extension on the machine doing the
+installing, so CPython's headers and its Windows import library are read there routinely — and are
+kept, on every cell, named in a top-level `keeps` that says which path and why. An exemption that
+has to be written into the artifact is an exemption somebody argued for; the rule is what makes the
+argument necessary.
+
+Whatever is taken out, put in or deliberately kept is **recorded in `mixengine-artifact.json`** —
+`upstream.removed`, `upstream.added`, `upstream.stripped`, `keeps` — so that "borrowed" keeps
+meaning something a reader can check against what the publisher shipped, and "no more than is
+needed" keeps meaning a list somebody wrote down rather than a habit somebody remembers.
 
 **Both rules are checked by comparing finished artifacts, because intent is not evidence.** The first
 audit of a green MariaDB run — six cells, all six proven against a running server — found the two
@@ -191,6 +199,32 @@ deprecated `crypt` in 3.11 and removed it in 3.13; this makes the three lines be
 same way. Both the addition and the removal are named in each archive's `mixengine-artifact.json`,
 under `upstream.added` and `upstream.removed`, so a reader comparing against upstream finds the
 difference stated rather than deducing it.
+
+**One decision was needed, and it is tkinter — dropped, on every cell.** Not for its size, though it
+is 11.7 MB of a 59.8 MB Windows archive, but because upstream ships a *different* tkinter to each
+half of the table: Windows gets Tk 8.6 with Tix 8.4.3 beside it, Unix gets Tk 9.0 with itcl and the
+Tcl Thread package, and on 3.14 the Windows DLLs turn into Tcl 9 and carry the whole Tcl script
+library inside themselves. So `python 3.13.15` already meant one toolkit on one machine and a
+different one on the next. Dropping it rather than levelling it up is the rule's own test applied to
+the feature: nothing MixEngine runs draws a window, and the two things in the standard library that
+need a display are the graphical toolkit and the editor written in it. The Unix cells lose
+`share/man` with it — one manual page whose Windows twin has never existed — and the Windows cells
+lose the per-extension import libraries, 31 of them on 3.10, which link a module *into* a Python
+being compiled and are opened by nothing that installs a wheel.
+
+**And one thing is kept that this document rules out everywhere else: the C API.** `include/` on all
+six cells, plus `libs/python3XX.lib` and `libs/python3.lib` on the two with a linker that needs
+them. That is the opposite answer to the one P2 gave PHP, where `dev/php8.lib` was deleted as *"892
+KB of import library in a runtime that is not an SDK"*, and the difference is not a lapse — it is
+what "no more than is needed" means when the question is asked per runtime. A PHP extension reaches
+a developer's machine as a DLL somebody else compiled. A Python extension frequently does not:
+`pip install` of any source distribution without a matching wheel compiles C *on the machine doing
+the installing*, against `Python.h` and, on Windows, linked to `python3XX.lib`. Take them out and
+the runtime still starts, still passes every check in its smoke test, and fails the first such
+install. So each archive carries a top-level `keeps` in its manifest naming the path and the reason,
+`borrow.declare` refuses to write a `keeps` naming something the tree does not have, and the smoke
+test proves the claim from the other side by asking the relocated interpreter where its headers are
+and finding `Python.h` there.
 
 For Ruby, one of the three columns turned out to be borrowable and two did not:
 

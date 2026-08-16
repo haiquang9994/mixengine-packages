@@ -28,7 +28,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 # What a recipe exits with when the answer is "upstream builds nothing here", as opposed to
@@ -275,6 +275,7 @@ def run(program: Path, *args: str, path: str, drop: tuple[str, ...] = (), timeou
 
 def declare(
     tree: Path, manifest: dict, added: Iterable[str] = (), removed: Iterable[str] = (),
+    keeps: Mapping[str, str] | None = None,
 ) -> dict:
     """Write what this repository put into a borrowed archive and took out of it, having checked it.
 
@@ -292,6 +293,16 @@ def declare(
 
     Paths are POSIX-relative to the root of the tree, sorted and de-duplicated here so that six cells
     of one version can be compared field to field rather than read side by side.
+
+    *keeps* is the third claim and the only one that is **not** about the publisher, which is why it
+    is written at the top level of the manifest rather than under ``upstream``: nothing was borrowed,
+    added or removed, and the difference being declared is from *this repository's own rule*. The
+    second half of that rule throws out headers, import libraries, manual pages and test suites, and
+    a recipe that keeps one of them anyway has to say which and why — a mapping rather than a list,
+    because a check that reads a bare path can only report "declared", and the whole point is that
+    the reason travels with the artifact instead of living in a commit message. CPython is the first
+    row that needs it: ``pip install`` of a source distribution compiles a C extension on the user's
+    machine, and it compiles it against ``include/`` and links it against ``libs/python3XX.lib``.
     """
     declared = manifest.setdefault("upstream", {})
 
@@ -316,6 +327,18 @@ def declare(
                 f"the removal did not happen, or it happened somewhere this does not see"
             )
         declared["removed"] = removed
+
+    if keeps:
+        # Checked the same way `added` is, and for the same reason: a path kept on purpose that is
+        # no longer there is an exemption still being claimed by a recipe that stopped needing it,
+        # which is precisely the shape of declaration this function exists to refuse.
+        absent = [path for path in sorted(keeps) if not (tree / path).exists()]
+        if absent:
+            raise SystemExit(
+                f"keeps names {', '.join(absent)}, which this tree does not contain — the "
+                f"exemption outlived whatever it was written for"
+            )
+        manifest["keeps"] = dict(sorted(keeps.items()))
 
     return manifest
 

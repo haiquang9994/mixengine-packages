@@ -16,6 +16,12 @@ whole tree moves and every console script keeps working, with nothing for this r
 is a two-line batch file written here rather than the post-install hook
 ``.claude/features/runtime-versions.md`` reserved for it.
 
+**What this recipe chooses is a graphical toolkit it does not ship**, which is the whole of
+:func:`prune`. Upstream builds tkinter into every cell and builds a *different* tkinter into each
+half — Tk 8.6 and Tix on Windows, Tk 9.0 with itcl and the Tcl Thread package on Unix — so keeping
+it would be keeping two things under one version number. What is kept instead, and is normally
+surplus, is the C API: see :func:`keeps`, which states that in the artifact rather than in a comment.
+
 Everything mechanical is in :mod:`borrow`, shared with the Node.js and Ruby recipes. What stays here
 is the resolution against upstream's release and the smoke test, which is a claim about Python and
 not about downloads.
@@ -27,12 +33,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import sys
 import tempfile
 import urllib.error
 import urllib.request
+from fnmatch import fnmatch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -75,12 +83,42 @@ LAYOUT = {
 
 REQUIRED = ("python", "pip")
 
+# What tkinter is in the standard library, on every platform and every line. `turtle.py` is here
+# because it is not a module that happens to use tkinter, it is tkinter with a pen; `idlelib` is an
+# editor written in it and `turtledemo` a gallery of the pen. Left behind, all three would import
+# nothing and raise on every machine, which is worse than being gone.
+TKINTER_STDLIB = ("tkinter", "idlelib", "turtledemo", "turtle.py")
+
+# What a Tcl or Tk file is called, **anchored at the start of the name**, which is not fussiness:
+# `_testclinic.pyd` contains the letters of `tcl` in the middle and is not part of a toolkit. The
+# `\d` after `thread` is the same care — Tcl's `thread3.0.6` is a package, `threading.py` is not.
+TOOLKIT = re.compile(r"(tcl|tk|tix|itcl|thread\d|_tkinter)", re.IGNORECASE)
+
+# What `lib/` holds on Unix that is not the toolkit: the standard library, the interpreter as a
+# shared object, and one pkg-config file. A keep-list rather than a list of Tcl package directories,
+# for the reason P2 and P3 both give — the delete-list would be written against whichever release
+# was measured, and `itcl4.3.8` and `thread3.0.6` carry their versions in their names.
+UNIX_LIB_KEEP = ("python3.*", "libpython3*", "pkgconfig")
+
+# What `libs/` holds on Windows that anything links: the import library for this interpreter and the
+# one for the stable ABI. Upstream also ships one per built-in extension module — 31 files on 3.10,
+# `_socket.lib` and `_tkinter.lib` among them — which exist to link those modules *into* a Python
+# being built, and nothing installing a wheel or compiling an sdist has ever opened one.
+WINDOWS_IMPORT_KEEP = ("python3*.lib",)
+
+# The one path in either tree that `TOOLKIT` matches and that is not the toolkit: `share/terminfo`
+# carries ncurses' description of a terminal emulator called `tkterm`, in a database the built-in
+# `curses` reads and Tcl has never touched. Named here rather than dodged by narrowing the sweep
+# below to the directories Tcl lives in today, which would also stop it looking wherever upstream
+# moves Tcl to next — and moving Tcl is precisely what 3.14 did.
+NOT_TOOLKIT = ("share/terminfo",)
+
 # Imported from the relocated tree, and every one of them is a compiled extension module or the thing
 # that proves one works. A CPython missing any of these starts, answers `--version` correctly and
 # then fails on the first real project: no `ssl` is no `pip install`, no `sqlite3` is no Django
 # development database, no `ctypes` is no `cffi`, and `lzma`/`bz2`/`zlib` are how wheels and
-# tarballs are opened. `tkinter` is deliberately not here — upstream ships it, it needs a display
-# library on Linux, and nothing a local web development environment does touches it.
+# tarballs are opened. `tkinter` is not here because it is not in the archive: `prune` takes it out,
+# and `PROBE` proves it is gone rather than leaving the claim to this comment.
 MODULES = (
     "ssl", "hashlib", "sqlite3", "zlib", "bz2", "lzma", "ctypes", "decimal", "socket",
     "venv", "ensurepip", "json", "uuid",
@@ -183,18 +221,33 @@ def resolve(spec: str, triple: str, published: dict[str, str], tag: str) -> tupl
     return version, offered[version]
 
 
-def site_packages(tree: Path) -> Path | None:
-    """Where this build put third-party packages, without asking it.
+def stdlib(tree: Path) -> Path | None:
+    """Where this build put the standard library — ``Lib`` on Windows, ``lib/python3.X`` on Unix.
 
-    Read off the tree rather than out of ``sysconfig`` because it is used to check what ``pip``
-    reports *against* the archive, and asking the interpreter both questions would let one wrong
-    answer confirm the other.
+    Read off the tree rather than out of ``sysconfig``, because everything that uses it is checking
+    the interpreter *against* the archive, and asking the interpreter both questions would let one
+    wrong answer confirm the other.
+
+    **The Unix shape is tested first, and the order is the whole correctness of this.** ``Lib`` and
+    ``lib`` are the same directory on a case-insensitive file system, which is what a default macOS
+    install has — so a check that asks ``tree / "Lib"`` first is answered *yes* on a Mac by a
+    directory holding ``libpython3.14.dylib``, and every caller then looks for the standard library
+    one level above where it is. Asking for ``lib/python3.*`` cannot be answered by accident.
     """
-    windows = tree / "Lib" / "site-packages"
-    if windows.is_dir():
-        return windows
-    found = sorted((tree / "lib").glob("python3.*/site-packages"))
-    return found[0] if found else None
+    unix = sorted((tree / "lib").glob("python3.*"))
+    if unix:
+        return unix[0]
+    windows = tree / "Lib"
+    return windows if windows.is_dir() else None
+
+
+def site_packages(tree: Path) -> Path | None:
+    """Where this build put third-party packages, inside the standard library `stdlib` locates."""
+    library = stdlib(tree)
+    if library is None:
+        return None
+    packages = library / "site-packages"
+    return packages if packages.is_dir() else None
 
 
 def ensure_pip(tree: Path, operating_system: str) -> list[str]:
@@ -281,6 +334,133 @@ def strip_unportable(tree: Path, operating_system: str) -> list[str]:
     return removed
 
 
+def prune(tree: Path, operating_system: str) -> list[str]:
+    """Take the graphical toolkit out, on every cell, and prove none of it is left.
+
+    **This is the one decision this recipe makes rather than inherits**, and the argument for it is
+    not that tkinter is large. It is that upstream ships a *different* tkinter to each half of the
+    table: Windows gets Tk 8.6 with Tix 8.4.3 beside it, Unix gets Tk 9.0 with itcl and the Tcl
+    Thread package, and on 3.14 the Windows DLL turns into Tcl 9 while keeping neither of the other
+    two. So ``python 3.13.15`` already means one toolkit on one machine and another toolkit on the
+    next, which is exactly what one version is not allowed to mean.
+
+    Dropped rather than levelled up, because the alternative is to make six cells agree on a Tk
+    nobody asked them for. Nothing MixEngine runs is a desktop application; a local web development
+    environment serves HTTP, and the two things in the standard library that need a display —
+    tkinter and the editor written in it — are the ones a runtime aimed at that can most obviously
+    do without. It is also the largest single thing in the Windows cell after the interpreter,
+    11.7 MB of 59.8, and 19.6% of an archive that is supposed to carry no more than is needed.
+
+    What goes with it: `libs/_tkinter.lib` and every other per-extension import library on Windows
+    — 31 of them on 3.10, one per built-in module, which exist to link a module into a Python being
+    compiled and not to compile anything against one — and `share/man` on Unix, one manual page for
+    an interpreter whose Windows twin has never had one and which nothing in the tree reads.
+
+    Keep-lists where the surplus is versioned in its own name (`lib/` on Unix, `libs/` on Windows)
+    and names where it is not, and then **a sweep that fails the pack if any part of any path still
+    matches `TOOLKIT`**. The sweep is what makes this a rule rather than a list: 3.14 renamed
+    `tcl86t.dll` and `tk86t.dll` to `tcl90.dll` and `tcl9tk90.dll` and moved the whole Tcl script
+    library inside the DLL, and a recipe written against 3.13 would have shipped both and said
+    nothing — which is the `php_gd2.dll` failure from P2, one runtime over.
+    """
+    library = stdlib(tree)
+    if library is None:
+        raise SystemExit(
+            f"this archive has no standard library directory to take tkinter out of; its root is "
+            f"{sorted(path.name for path in tree.iterdir())}"
+        )
+
+    removed: list[str] = []
+    freed = 0
+
+    def discard(path: Path) -> None:
+        nonlocal freed
+        # `lexists` for the mysql_ldb reason `borrow.declare` gives: a dangling symlink is still a
+        # file in the archive, and `exists` follows the link and answers no.
+        if not os.path.lexists(path):
+            return
+        if path.is_dir() and not path.is_symlink():
+            freed += sum(child.stat().st_size for child in path.rglob("*") if child.is_file())
+            shutil.rmtree(path)
+        else:
+            freed += path.stat().st_size if not path.is_symlink() else 0
+            path.unlink()
+        removed.append(path.relative_to(tree).as_posix())
+
+    for name in TKINTER_STDLIB:
+        discard(library / name)
+    for cached in sorted((library / "__pycache__").glob("turtle.*")):
+        discard(cached)
+    for module in sorted((library / "lib-dynload").glob("_tkinter*")):
+        discard(module)
+
+    if operating_system == "windows":
+        discard(tree / "tcl")
+        for path in sorted((tree / "DLLs").iterdir()):
+            if TOOLKIT.match(path.name):
+                discard(path)
+        for path in sorted((tree / "libs").iterdir()):
+            if not any(fnmatch(path.name, pattern) for pattern in WINDOWS_IMPORT_KEEP):
+                discard(path)
+    else:
+        for path in sorted((tree / "lib").iterdir()):
+            if not any(fnmatch(path.name, pattern) for pattern in UNIX_LIB_KEEP):
+                discard(path)
+        for launcher in sorted((tree / "bin").glob("idle*")):
+            discard(launcher)
+        discard(tree / "share" / "man")
+
+    survivors = sorted(
+        relative for relative in (path.relative_to(tree).as_posix() for path in tree.rglob("*"))
+        if any(TOOLKIT.match(part) for part in relative.split("/"))
+        and not relative.startswith(NOT_TOOLKIT)
+    )
+    if survivors:
+        raise SystemExit(
+            f"{len(survivors)} path(s) of the toolkit survived the prune, starting with "
+            f"{', '.join(survivors[:5])} — upstream has moved something this does not name"
+        )
+
+    print(f"dropped {', '.join(removed)} ({freed:,} bytes)")
+    return removed
+
+
+def keeps(tree: Path, operating_system: str) -> dict[str, str]:
+    """The paths kept here that the rule's second half throws out everywhere else, and why.
+
+    *"No more than is needed"* is a claim about need, so it has to be answered per runtime rather
+    than per file type, and CPython answers it the opposite way to PHP. P2 deleted `dev/php8.lib`
+    from the Windows PHP archives — *"892 KB of import library in a runtime that is not an SDK"* —
+    and that was right, because a PHP extension reaches a developer's machine as a DLL somebody
+    else compiled. A Python extension does not. ``pip install`` of any source distribution without
+    a matching wheel compiles C on the machine doing the installing, against ``Python.h`` and, on
+    Windows, linked to ``python3XX.lib``. Take those out and the runtime still starts, still passes
+    every check in `smoke`, and fails the first ``pip install`` that has no wheel for this platform.
+
+    So the headers stay on all six cells and the import libraries stay on the two that have a
+    linker needing them — the same decision, spelled the way each toolchain spells it, in the way
+    P2's static-versus-shared extensions are one feature set spelled twice. The asymmetry is real
+    and is not a defect: an ELF or Mach-O extension leaves Python's symbols undefined and resolves
+    them from whatever interpreter loaded it, so there is nothing on Unix for ``libs/`` to be.
+
+    Returned as a mapping and written to the manifest, because P6's within-artifact check is going
+    to refuse an `include/` it was not told about, and the thing that tells it should also say why.
+    """
+    reasons = {
+        "include": "the CPython C API headers. `pip install` of a source distribution compiles a "
+                   "C extension against these on the machine doing the installing, and there is "
+                   "nowhere else to fetch a set that matches this interpreter.",
+    }
+    if operating_system == "windows":
+        libraries = sorted(path.name for path in (tree / "libs").iterdir())
+        reasons["libs"] = (
+            f"{', '.join(libraries)} — the import libraries MSVC has to link a C extension "
+            f"against. There is no Unix counterpart because an ELF or Mach-O extension leaves "
+            f"Python's symbols undefined and resolves them from the interpreter that loads it."
+        )
+    return reasons
+
+
 def describe(
     tree: Path, version: str, target: tuple[str, str], url: str, digest: str, tag: str,
     added: list[str], removed: list[str],
@@ -319,8 +499,9 @@ def describe(
     # somebody comparing hashes a year from now should find the difference written down here instead
     # of deducing it. `borrow.declare` also checks the claim against the tree before writing it —
     # this recipe is the one that had the fields first, and it is not the one that gets to keep its
-    # own copy of what they mean.
-    return borrow.declare(tree, manifest, added, removed)
+    # own copy of what they mean. `keeps` is the difference from the *rule* rather than from the
+    # publisher, and is stated for the same reason.
+    return borrow.declare(tree, manifest, added, removed, keeps(tree, operating_system))
 
 
 PROBE = """
@@ -336,6 +517,15 @@ try:
 except Exception as error:
     handshake = f"{type(error).__name__}: {error}"
 
+# Asked of the interpreter rather than of the directory listing. `borrow.declare` already checks
+# that every path named in `upstream.removed` is gone; what this checks is the other direction —
+# that nothing left behind can still reach a toolkit, which is a question only an import answers.
+try:
+    import tkinter
+    tkinter_left = tkinter.__file__
+except ImportError as error:
+    tkinter_left = None
+
 report = {
     "version": ".".join(str(part) for part in sys.version_info[:3]),
     "executable": sys.executable,
@@ -345,6 +535,8 @@ report = {
     "sqlite": sqlite3.connect(":memory:").execute("select sqlite_version()").fetchone()[0],
     "trusted": ssl.create_default_context().cert_store_stats()["x509_ca"],
     "handshake": handshake,
+    "tkinter_left": tkinter_left,
+    "headers": os.path.join(sysconfig.get_paths()["include"], "Python.h"),
     "trusts": {
         "cafile": paths.openssl_cafile,
         "capath": paths.openssl_capath,
@@ -372,7 +564,7 @@ def smoke(tree: Path, version: str, manifest: dict) -> dict:
     ``python --version`` alone would pass on an archive that is unusable, three ways over: the
     runner's own Python could be answering, an interpreter that found the *runner's* standard
     library would answer the same, and a build whose compiled modules did not survive being moved
-    answers it perfectly right up to the first ``import ssl``. So five things are proven.
+    answers it perfectly right up to the first ``import ssl``. So six things are proven.
 
     *It is this Python.* ``sys.executable`` has to be inside the relocated tree.
 
@@ -398,6 +590,14 @@ def smoke(tree: Path, version: str, manifest: dict) -> dict:
     *It is this pip.* The version ``pip`` reports has to match the ``pip-*.dist-info`` in the
     ``site-packages`` that came in the same archive, which is a fact no other Python on the machine
     can produce.
+
+    *What `prune` took out is gone, and what `keeps` kept is reachable.* ``import tkinter`` has to
+    fail, and ``Python.h`` has to be where this interpreter says its headers are. Both are the same
+    check in opposite directions, and both are the direction the file system cannot answer:
+    `borrow.declare` proves a named path is absent or present, while only the interpreter can say
+    that nothing left behind still reaches a toolkit — a frozen module, a stale ``.pyc``, a second
+    copy under another name — or that the headers a compiling ``pip install`` will look for are the
+    ones this archive carries rather than a set left on the machine by something else.
     """
     elsewhere = borrow.moved(tree)
 
@@ -423,11 +623,21 @@ def smoke(tree: Path, version: str, manifest: dict) -> dict:
 
     if report["version"] != version:
         raise SystemExit(f"sys.version_info says {report['version']}, expected {version}")
-    for field in ("executable", "prefix", "site"):
+    # The `keeps` claim, checked the way the interpreter will meet it. `borrow.declare` proves the
+    # directory is in the tree; this proves the interpreter looks for headers *inside* the archive
+    # and finds `Python.h` where it looked, which is the whole of what a compiling `pip install`
+    # does before it opens a compiler.
+    headers = Path(report["headers"])
+    if not headers.is_file():
+        raise SystemExit(
+            f"this Python says its headers are at {headers}, and there is no Python.h there — "
+            f"every `pip install` of a source distribution with a C extension would stop on it"
+        )
+    for field in ("executable", "prefix", "site", "headers"):
         where = Path(report[field])
         if not where.resolve().is_relative_to(elsewhere.resolve()):
             raise SystemExit(
-                f"sys.{field} is {where}, which is not inside the tree this interpreter was "
+                f"this interpreter reports {field} as {where}, which is not inside the tree it was "
                 f"copied to — it is answering from somewhere else on this machine"
             )
     if len(report["sha256"]) != 64:
@@ -438,12 +648,17 @@ def smoke(tree: Path, version: str, manifest: dict) -> dict:
             f"Its default trust store is {report['trusts']}, and every `pip install` made with it "
             f"would fail the same way"
         )
+    if report["tkinter_left"] is not None:
+        raise SystemExit(
+            f"`import tkinter` still works, from {report['tkinter_left']} — this cell would offer "
+            f"a toolkit the other five do not"
+        )
 
     print(f"python {report['version']}, {report['openssl']}, sqlite {report['sqlite']}, "
           f"verified a live chain against {trust(report['trusts'])} "
           f"({report['trusted']} authorities loaded eagerly)")
     ran = ["python --version", "import " + ", ".join(MODULES),
-           "python -c (execPath, ssl, sqlite3, verified https://github.com)"]
+           "python -c (execPath, ssl, sqlite3, verified https://github.com, tkinter gone, Python.h)"]
 
     packages = site_packages(elsewhere)
     for name in sorted(set(manifest["provides"]) - {"python"}):
@@ -513,7 +728,10 @@ def main() -> None:
     tree = borrow.unpack(downloaded, work / "unpacked", "tar.gz")
 
     added = ensure_pip(tree, target[0])
-    removed = strip_unportable(tree, target[0])
+    # Pruned before it is described and before it is proven, in that order: the manifest has to
+    # describe the tree that ships, and the smoke test is what stands between a keep-list and a
+    # runtime that was quietly cut in half.
+    removed = prune(tree, target[0]) + strip_unportable(tree, target[0])
     manifest = describe(tree, version, target, url, actual, tag, added, removed)
     manifest["smoke"] = smoke(tree, version, manifest)
 

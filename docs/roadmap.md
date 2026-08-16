@@ -18,7 +18,7 @@ What is *not* done is the rule itself.
 | --- | --- | --- | --- |
 | PHP | 7.0 – newest, 6 targets | `php_windows`, `php_unix`, `php_legacy_unix` | yes — P2 |
 | Node.js | 16 – newest, 6 targets | `node` | yes — P3 |
-| Python | 3.10 – newest, 6 targets | `python` | partly — P4 |
+| Python | 3.10 – newest, 6 targets | `python` | yes — P4, less P4a |
 | Ruby | 3.2 – newest, 6 targets | `ruby`, `ruby_unix` | unknown — P5 |
 | Caddy | 2.0 – newest, 6 targets | `caddy` | yes |
 | MariaDB | 10.6 – newest, 6 targets | `mariadb`, `mariadb_deb`, `mariadb_build` | yes — it is where the rule came from |
@@ -33,8 +33,9 @@ written down in [the README](../README.md#one-version-means-one-thing-and-no-mor
 because it is the argument for P6. The rule has never been applied backwards to the four runtime
 rows that were packed before it existed, and P1–P6 are that work. Measured against upstream's own
 archives, the gaps were not marginal: PHP 8.3 on Windows was missing two extensions this repository
-fails a Unix build over, which P2 closed, and Node.js 24.19.0 was 106 MB on Windows against 198 MB
-on Linux, which P3 closed.
+fails a Unix build over, which P2 closed; Node.js 24.19.0 was 106 MB on Windows against 198 MB on
+Linux, which P3 closed; and CPython 3.13.15 shipped Tk 8.6 to Windows and Tk 9.0 to Unix under one
+version number, which P4 closed by shipping neither.
 
 Nothing below is a rewrite. Every recipe already downloads, verifies, relocates, proves and packs
 correctly; what they do not do is *choose*, and choosing once is the whole of the rule.
@@ -202,7 +203,7 @@ real Linux tarball of each, which is as far as a Windows machine can take the ot
 pruned, **the entire remaining difference between the Windows and Linux trees is `node.exe` against
 `bin/node` and the per-shell launchers beside it.** Every other path matches.
 
-### [ ] P4 — Python: tkinter, and the same two questions **(rule)**
+### [x] P4 — Python: tkinter, and the same two questions **(rule)**
 
 `tools/python.py` is the recipe that already does this properly — `install_only_stripped`, `_crypt`
 removed with the reason written down, `upstream.added` and `upstream.removed` both populated. Two
@@ -221,6 +222,80 @@ they are load-bearing: `pip install` of an sdist with a C extension links `pytho
 decision the rule permits ("something it would reach for is enabled everywhere"), and what it is
 missing is being stated rather than merely being true. 62.7 MB Windows against 98.3 MB Linux is a gap
 that should be explainable line by line after this task.
+
+Both closed, and the first one turned out not to be an argument about size. **Upstream ships a
+different tkinter to each half of the table**: Windows carries Tk 8.6 with Tix 8.4.3, Unix carries
+Tk 9.0 with itcl 4.3.8 and the Tcl Thread package, and 3.14 replaces the Windows DLLs with Tcl 9
+and moves the entire Tcl script library inside them. So `python 3.13.15` meant one toolkit on one
+machine and another on the next before anything here chose, which is the rule's first half failing
+in a way the *"needs a display library on Linux"* comment never described. Dropped rather than
+levelled up, by the rule's own test: nothing a local web development environment does draws a
+window, and the two things in the standard library that need a display are the toolkit and IDLE.
+
+**A keep-list twice more**, in the two places the surplus versions itself in its own name — `lib/`
+on Unix keeps `python3.X`, `libpython3*` and `pkgconfig` and nothing else, `libs/` on Windows keeps
+`python3*.lib` — and names elsewhere. It earned itself twice, again: `libs/` on 3.10 and 3.11 holds
+**31 per-extension import libraries** (`_socket.lib`, `_tkinter.lib`, one per built-in module) that
+3.12 onwards does not, which exist to link a module *into* a Python being compiled and are opened
+by nothing that installs a wheel; and `lib/itcl4.3.8` and `lib/thread3.0.6` carry their versions in
+their names, so a delete-list would have been out of date at the next Tcl release. `share/man` goes
+with them on Unix — one manual page whose Windows twin has never had one.
+
+**And then a sweep that fails the pack if any part of any path still matches Tcl or Tk**, which is
+what makes the drop a rule rather than a list. It is not decoration: 3.14 renamed `tcl86t.dll` and
+`tk86t.dll` to `tcl90.dll` and `tcl9tk90.dll`, and a recipe written against 3.13 would have shipped
+both in silence — the `php_gd2.dll` failure from P2 exactly, one runtime over. The sweep also found
+the one path in either tree that looks like the toolkit and is not, `share/terminfo/t/tkterm`, an
+ncurses description of a terminal emulator; it is named in `NOT_TOOLKIT` rather than dodged by
+narrowing the sweep to where Tcl lives today, since moving Tcl is precisely what 3.14 did.
+
+The second question closed the other way, and the reversal is the useful part. `include/` and
+`libs/python3XX.lib` are kept — the opposite of P2, which deleted `dev/php8.lib` as *"892 KB of
+import library in a runtime that is not an SDK"* and was right to. A PHP extension reaches a
+developer as a DLL somebody else compiled; a Python extension frequently does not, because
+`pip install` of any sdist without a matching wheel compiles C on the installing machine against
+`Python.h`. So **"no more than is needed" is a question about the runtime, not about the file
+type**, and the answer now travels in the artifact: a top-level `keeps` mapping each exempt path to
+why, written by `borrow.declare`, which refuses a `keeps` naming something the tree does not have.
+The schema carries it and P6 is what will read it. The smoke test proves it from the other side —
+it asks the relocated interpreter where its headers are and requires `Python.h` to be there, and
+requires `import tkinter` to fail, because a deletion checked only against the file system is
+checked only in the direction that cannot go wrong twice.
+
+**A latent bug the simulation caught**, which was in `site_packages` before this task and would have
+bitten on macOS rather than here: `tree / "Lib"` is answered *yes* by a case-insensitive file system,
+and a default macOS install has one. Deciding "is this a Unix layout" by looking for `lib/python3.*`
+first cannot be answered by accident; asking for `Lib` first pointed every caller one level above the
+standard library on two of the six cells.
+
+Proven on 3.10.21, 3.13.15 and 3.14.7 — three different Tcl layouts — packed end to end on Windows,
+and `prune` run against the real Linux *and* macOS tarballs of each, which is as far as a Windows
+machine reaches. All three manifests validate against the schema. What the gap looks like now, on
+3.13.15: Windows 59.8 MB → 48.1, Linux 93.8 → 83.5, macOS 61.4 → 52.2. What is left of it is P4a.
+
+### [ ] P4a — Python: Unix ships the interpreter twice **(rule)**
+
+P4 owed an explanation of the Windows/Linux gap line by line, and produced one. After it, 35.4 MB
+of the remaining 35.4 MB is two things, both Unix-only, and neither is a feature:
+
+**`lib/libpython3.13.so.1.0` is a second complete copy of the interpreter — 30.3 MB on Linux,
+16.7 MB on macOS — and nothing in the tree loads it.** `bin/python3.13` links CPython statically:
+read out of the ELF's own `DT_NEEDED` it asks for `libpthread`, `libdl`, `libutil`, `librt`, `libm`
+and `libc` and for no `libpython` at all, and the macOS binary's `LC_LOAD_DYLIB` list says the same.
+Nor does anything else: of the twelve dynamically linked ELF files in a 3.13.15 Linux tree, **zero**
+name it. Windows carries `python313.dll` once and that one is the interpreter. This is the same
+shape as `include/node` — weight one publisher gives one platform, that the platform's own
+executable never opens — with one difference that makes it a task rather than a line in P4:
+deleting it is what stops `python3-config --libs --embed` from linking, so it is a decision about
+whether a MixEngine Python is ever *embedded* in another process, and that deserves being asked
+rather than assumed. `_sysconfigdata__*.py` names the file and would need to stop.
+
+**`share/terminfo` is ~1.9 MB and 2,800 files, and whether the bundled ncurses can even reach it is
+not measurable from here.** The interpreter has `readline` and `curses` compiled in, so a terminfo
+database is genuinely wanted; the question is whether these builds look for it beside themselves or
+at the `/tools/deps` prefix they were built under — in which case the copy in the archive is
+unreachable, the system's own database answers, and this is 1.9 MB of nothing. Settling it needs a
+Linux machine with `TERM` set and the system database moved out of the way. Windows has no `share/`.
 
 ### [ ] P5 — Ruby: make the two recipes answer the same questions **(rule)**
 
@@ -268,9 +343,12 @@ that finds nothing in the row that was just cleaned is a check that has been tes
 second, and it is the row that shows the check has to read `upstream.removed` rather than only the
 tree — `include/`, `share/man` and `share/doc` are on that list because P3 named what it dropped,
 and a check reading the tree alone would say nothing about a cell that never had them. A
-recipe that legitimately keeps one of them (P4's `python313.lib`) declares it, and the declaration is
-what the check reads — so "no more than is needed" becomes a list somebody wrote down rather than a
-habit somebody remembers.
+recipe that legitimately keeps one of them declares it, and the declaration is what the check reads
+— so "no more than is needed" becomes a list somebody wrote down rather than a habit somebody
+remembers. That field now exists: P4 added a top-level `keeps`, a mapping of path to reason rather
+than a list, because a check reading a bare path can only report *declared* and the argument is the
+part worth keeping. CPython is its only writer so far — `include/` on six cells and `libs/` on two —
+and this check is what stops it from being the only reader as well.
 
 Run it in `publish-index.yml`, where every artifact of a version is visible at once. An empty cell is
 not a failure — a target upstream never built is already an `exit 75`, and this must keep that
