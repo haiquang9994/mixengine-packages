@@ -573,6 +573,23 @@ def resolvable(path: Path) -> dict[str, object]:
 # ------------------------------------------------------------------------------ the operation ---
 
 
+def whole(path: Path) -> str:
+    """The digest of the file exactly as it sits on disk.
+
+    Not a proof of anything — :func:`mapped` and :func:`resolvable` are that — but the only way to
+    tell a strip that removed something from one that found nothing to remove. The difference
+    matters to what gets written down rather than to what gets published: `upstream.changed` says
+    *this file is not the bytes upstream published*, and a file `strip` left alone is exactly those
+    bytes. `mariadb_deb.py` is why it exists and expects to find nothing, because Debian strips its
+    own binaries before it packages them.
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def symbols(tree: Path, paths: Sequence[Path], flags: Sequence[str],
             operating_system: str) -> dict[str, str]:
     """Run the platform's `strip` over *paths*, proving each one across the operation.
@@ -587,6 +604,11 @@ def symbols(tree: Path, paths: Sequence[Path], flags: Sequence[str],
     the saving is the whole point and an unstripped bintar is merely large. Here the tree ships
     either way and the difference is what the artifact claims about itself, so a missing tool has to
     stop the pack rather than silently publish the other archive.
+
+    What comes back is `upstream.changed` — every path whose bytes this actually altered, mapped to
+    the command that altered them. Every path, and not one more: a file `strip` found nothing to
+    remove is not in it, which is the difference between a manifest a reader can check against
+    upstream's archive and one that sends them looking for a change nobody made.
     """
     if not paths:
         return {}
@@ -606,7 +628,7 @@ def symbols(tree: Path, paths: Sequence[Path], flags: Sequence[str],
         noun = "debug information" if archive else "symbol table"
         seeing = "a linker can resolve" if archive else "a loader or a linker can see"
 
-        before, was = proof(path), path.stat().st_size
+        before, was, original = proof(path), path.stat().st_size, whole(path)
         done = subprocess.run([tool, *flags, str(path)], capture_output=True, text=True)
         if done.returncode != 0:
             raise SystemExit(f"strip {' '.join(flags)} {relative} failed: {done.stderr.strip()}")
@@ -644,6 +666,13 @@ def symbols(tree: Path, paths: Sequence[Path], flags: Sequence[str],
         wrong = countersigned(path) if operating_system == "macos" and not archive else None
         if wrong:
             raise SystemExit(wrong)
+
+        # A file `strip` found nothing to remove is upstream's file, and claiming it in
+        # `upstream.changed` would send a reader holding both archives looking for a difference that
+        # is not there. Read from the bytes rather than from the size, because the field's whole
+        # subject is bytes.
+        if whole(path) == original:
+            continue
 
         now = path.stat().st_size
         # The command rather than a sentence, because this field's reader is holding upstream's

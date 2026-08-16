@@ -12,7 +12,9 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **(rule)** = a conforma
 ## Where we are
 
 Every row of the runtime table is packed, and both service rows that have been evaluated are packed.
-What is *not* done is the rule itself.
+Every recipe now conforms to the rule and there is a program that says so. What is *not* done is the
+**repack**: the artifacts on the releases page were packed before P2–P5, and `tools/parity.py` names
+every one of those differences on every run. P6 below is what it says and what it does not.
 
 | Kind | Cells | Recipes | Conforms |
 | --- | --- | --- | --- |
@@ -30,8 +32,8 @@ version produced three different feature sets, and fixing that is what
 finish it: a later audit of the six *finished* artifacts of a green run found four more asymmetries
 no recipe knew it had, and closing those took seven further commits; what that audit found is
 written down in [the README](../README.md#one-version-means-one-thing-and-no-more-than-is-needed),
-because it is the argument for P6. The rule has never been applied backwards to the four runtime
-rows that were packed before it existed, and P1–P6 are that work. Measured against upstream's own
+because it is the argument for P6. The rule had never been applied backwards to the four runtime
+rows that were packed before it existed, and P1–P6 were that work. Measured against upstream's own
 archives, the gaps were not marginal: PHP 8.3 on Windows was missing two extensions this repository
 fails a Unix build over, which P2 closed; Node.js 24.19.0 was 106 MB on Windows against 198 MB on
 Linux, which P3 closed; CPython 3.13.15 shipped Tk 8.6 to Windows and Tk 9.0 to Unix under one
@@ -44,7 +46,10 @@ P5a was written to close an asymmetry that a look at the six trees says is not t
 rule is for, and it is the argument for measuring the artifacts rather than the release notes: every
 one of those four was written from what the publisher says and corrected by what the publisher ships.
 P5b then said the same thing about a check rather than an artifact — the comparison it added was
-correct on paper and wrong on the first real archive it was pointed at.
+correct on paper and wrong on the first real archive it was pointed at. P6 closed the sequence by
+turning the audit that started it into a program, and its first run says the same thing a sixth
+time: every difference it reports is real, and every one is against an archive packed before the
+task that already closes it.
 
 Nothing below is a rewrite. Every recipe already downloads, verifies, relocates, proves and packs
 correctly; what they do not do is *choose*, and choosing once is the whole of the rule.
@@ -761,7 +766,7 @@ published it.
 
 The row has to be repacked for any of this to take effect, and only the four compiled cells change.
 
-### [ ] P6 — Make the rule something CI can fail on **(rule)**
+### [x] P6 — Make the rule something CI can fail on **(rule)**
 
 P2–P5 are one-time corrections; this is what keeps them. `verify.py` already validates each artifact
 against the schema. What it cannot do is compare the artifacts of *one version to each other*, which
@@ -771,49 +776,117 @@ tests, and P2 then packed five branches of PHP without GD for the same reason �
 between eras, invisible to every per-artifact check because what is missing cannot fail a load test.
 Twice now, and both times by comparing rather than by reading.
 
-Two checks, both cheap because every fact they need is already in `mixengine-artifact.json`:
+Closed as `tools/parity.py`, run in `publish-index.yml` before the index is generated rather than
+after — a version that fails this is a version that should not be described to anybody.
 
-*Across cells* — for one `(kind, version)`, the feature sets must match. For PHP that is
-`extensions.static ∪ extensions.enabled` — the set a cell actually runs with, which is what P2
-added `enabled` for; `shared` is only what it could be asked to do, and on Windows it says the same
-word about `curl` and about a debugger. The exemption list is no longer a guess: `php_parity` names
-the four extensions Windows has never had, the two its old builds gained late, and the two its 7.x
-builds compile in and cannot drop. Everything outside those names is a defect this check fails on.
-For the other kinds the comparison is `provides`.
+#### Across cells
 
-*Within one artifact* — no path matching what the second half of the rule forbids and the manifest
-does not declare: `.pdb`, `.dSYM`, `*.lib`/`*.a`, `include/`, `share/man`, `share/doc`, `test/`. PHP
-on Windows is where to point it first, because P2 already deletes every one of those there: a check
-that finds nothing in the row that was just cleaned is a check that has been tested. Node.js is the
-second, and it is the row that shows the check has to read `upstream.removed` rather than only the
-tree — `include/`, `share/man` and `share/doc` are on that list because P3 named what it dropped,
-and a check reading the tree alone would say nothing about a cell that never had them. A
-recipe that legitimately keeps one of them declares it, and the declaration is what the check reads
-— so "no more than is needed" becomes a list somebody wrote down rather than a habit somebody
-remembers. That field now exists: P4 added a top-level `keeps`, a mapping of path to reason rather
-than a list, because a check reading a bare path can only report *declared* and the argument is the
-part worth keeping. CPython was its first writer — `include/` on six cells, `libs/` on two and the
-shared interpreter on four — and P5a made Ruby the second, on all six at once and from both recipes,
-which is the case that matters most here: `libx64-ucrt-ruby340.dll.a` and `libruby-static.a` are
-what this check would otherwise read as two rows disagreeing, and they are one decision spelled by
-two toolchains. Ruby is also the first *built* artifact to write the field, so the check cannot
-assume a `keeps` implies an `upstream` beside it.
-The Unix entries are also the reminder that this check will never be the whole of the field: no
-pattern above would flag a `.so` in `lib/`, and P4a declared 30 MiB of one anyway, because the
-reason it is kept is not reconstructable from the file. What the check enforces is that everything
-matching the patterns is declared; what the field is *for* is larger than that, and stays larger.
+For one `(kind, version)`, the feature sets must match. For PHP that is `extensions.static ∪
+extensions.enabled` — the set a cell actually runs with, which is what P2 added `enabled` for;
+`shared` is only what it could be asked to do, and on Windows it says the same word about `curl` and
+about a debugger. For every kind, including PHP, it is also the commands in `provides`, which is
+where the cheapest asymmetry of all lives and nothing was looking for it.
 
-The fold-in P1 deferred to here got larger while waiting, and clearer. `upstream.stripped` is a
-sentence MariaDB writes about an unchecked `strip --strip-debug`; `upstream.changed` is a mapping
-P4b writes about a strip that refuses to publish unless the loader's and the linker's whole view of
-the file came through identical. Two spellings of one fact is the shape of thing this rule exists to
-remove, and the fold-in is not a rename: it is `mariadb.strip_debug` reading its own exit code and
-answering to `python.mapped`, which is worth more to that row than to this one — MariaDB strips 371
-MB of bintar down to 27 and nothing checks what came out.
+The comparison is **a cell against the union of its siblings**, not against a list of what a version
+owes. That is deliberate and it is the half `php_parity.check` cannot do: a recipe sees one cell and
+cannot know the other five have something. It is also why an empty cell costs nothing — a row of
+three is compared as a row of three, and a target upstream never built is still an `exit 75` in its
+own workflow.
 
-Run it in `publish-index.yml`, where every artifact of a version is visible at once. An empty cell is
-not a failure — a target upstream never built is already an `exit 75`, and this must keep that
-distinction or it will block the release of the five cells that do exist.
+Three things exempt a difference, and they are three different kinds of thing on purpose:
+
+* **`lacks`**, written by the recipe into the artifact, for something *this cell* cannot do at any
+  price. P5 invented the field for Ruby on Windows — no YJIT, no compiler for native gems — and this
+  is what reads it. The reason travels with the archive, where a reader holding it can find it.
+* **`php_parity.exempt`**, written here, for a difference that belongs to the whole row: the four
+  extensions Windows has never had, the two its old builds gained late, and the two its 7.x builds
+  compile in and cannot drop. That last pair used to be a paragraph of comment and is now
+  `WINDOWS_UNTIL`, because a sentence is not something a program can be told.
+* **`php_parity.SERVES`**, the one place two commands are one capability: a site is served through
+  `php-fpm` on Unix and `php-cgi.exe` behind FastCGI on Windows, which has never had an FPM SAPI.
+  Deliberately not a general mechanism — a table of "these two names mean the same thing" that grew
+  would be a table for explaining differences away.
+
+Everything outside those three is a defect this fails on.
+
+#### Within one artifact
+
+No path matching what the second half of the rule throws out and the manifest does not declare:
+`*.pdb`, `*.dSYM`, `*.lib`, `*.a`, `include/`, `share/man`, `share/doc`, `share/ri`, `test/`.
+Extensions match anywhere in the tree, directories only at its root — a `test` at the root is a
+suite for testing the thing, while `lib/ruby/3.4.0/test/unit.rb` is Ruby's standard library.
+
+A recipe that legitimately keeps one of them declares it, and the declaration is what the check
+reads — so "no more than is needed" becomes a list somebody wrote down rather than a habit somebody
+remembers. That field exists: P4 added a top-level `keeps`, a mapping of path to reason rather than
+a list, because a check reading a bare path can only report *declared* and the argument is the part
+worth keeping. CPython was its first writer — `include/` on six cells, `libs/` on two and the shared
+interpreter on four — and P5a made Ruby the second, on all six at once and from both recipes, which
+is the case that matters most here: `libx64-ucrt-ruby340.dll.a` and `libruby-static.a` are what this
+would otherwise read as two rows disagreeing, and they are one decision spelled by two toolchains.
+Ruby is also the first *built* artifact to write the field, so nothing here assumes a `keeps` implies
+an `upstream` beside it. The Unix entries are the reminder that this will never be the whole of the
+field: no pattern above would flag a `.so` in `lib/`, and P4a declared 30 MiB of one anyway, because
+the reason it is kept is not reconstructable from the file. What is enforced is that everything
+matching the patterns is declared; what the field is *for* is larger, and stays larger.
+
+Two more checks came free, and neither repeats `borrow.declare`. That runs against the tree a recipe
+is about to pack; this runs against the archive that came out, which is the only place a path lost
+between the two can be caught — so a `keeps` naming something the archive does not contain fails,
+and so does an `upstream.removed` naming something it still does. A removal that did not survive
+packing is exactly the `mysql_ldb` shape, one stage later.
+
+#### The fold-in
+
+`upstream.stripped` was a sentence MariaDB wrote about an unchecked `strip --strip-debug`;
+`upstream.changed` is a mapping P4b writes about a strip that refuses to publish unless the loader's
+and the linker's whole view of the file came through identical. The fold-in is not a rename: it is
+`mariadb.strip_debug` reading its own exit code and answering to `strip.mapped`, which is worth more
+to that row than to this one — MariaDB strips 371 MB of bintar down to 27 and nothing checked what
+came out. It asks for `--strip-debug` in the recipe rather than from one of `strip`'s two tables,
+because `lib/libmariadb.so` is an image that *is* linked against and neither `IMAGES` nor `ARCHIVES`
+means that; naming it at the call site is what keeps those two tables meaning what they say.
+
+One thing had to change in `strip.symbols` for the fold-in to be honest. It now names a file in
+`changed` only if the bytes actually moved, read from a digest rather than from a size — because
+`mariadb_deb.py` calls the same function *expecting to find nothing*, Debian having stripped its own
+binaries before packaging them, and a mapping that named 412 unchanged files would send a reader
+holding both archives looking for a difference nobody made.
+
+`stripped` stays in the schema, described as what it was, because artifacts published before this
+carry it. That is the same call `loaded_extension` got in P2.
+
+#### What it found
+
+Pointed at the whole published catalogue — 194 manifests, 35 versions, six kinds — plus one archive
+per kind opened and walked:
+
+| | across cells | within artifacts |
+| --- | --- | --- |
+| caddy, mariadb, node, python, ruby | **0** | node: `include/` (3,324 paths), `share/man`, `share/doc` · python: `include/` (270), `share/man`, two `libitclstub*.a` |
+| php | **370**, all against the Windows cell | `dev/php8.lib`, `php8embed.lib` |
+
+**Not one of those is a defect a landed task has not already closed.** Node's three are P3's
+`upstream.removed`; python's `include/` is P4's `keeps` and its `share/man` and itcl stubs are what
+P4 deletes with the whole of `share/` and the Tk sweep; PHP's two `.lib` files are named in
+`php_windows.prune`; and of the 370, `php-win` and `phpdbg` are deleted by that same function while
+the rest are the extensions P2 wrote `extensions.enabled` for. Every one of them is an artifact
+packed before the task that fixes it, which is the standing caveat every task since P2 has ended on,
+now stated once by a program instead of six times by a person.
+
+So the check's first verdict is the useful one: the rule is enforced from here, and the catalogue
+has a repack owing. `publish-index.yml` is red until that happens, which is the correct behaviour
+for a gate and not a reason to soften it — there is no flag to turn this off, because a fallback
+that succeeds is the hardest kind of difference to notice.
+
+#### Verified
+
+The two archives P5a produced against the two it was measured on: `ruby-3.4.10` on Windows passes
+both halves — 195 paths under `include/` and one `.a`, every one declared — while the linux-x86_64
+and macos-aarch64 cells of the *published* 3.4.10 fail on exactly those paths, because they were
+packed before `keeps` existed. Same version, same check, opposite answers, and the difference
+between them is the task that landed in between. Formats: `.zip` through `zipfile`, `.tar.gz` and
+`.tar.zst` through `tar`, since the 3.12 the index workflow installs cannot read zstd itself.
 
 ---
 

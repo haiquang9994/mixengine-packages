@@ -67,13 +67,16 @@ kept, on every cell, named in a top-level `keeps` that says which path and why. 
 has to be written into the artifact is an exemption somebody argued for; the rule is what makes the
 argument necessary.
 
-Whatever is taken out, put in, deliberately kept or **shipped at upstream's path and not in
-upstream's bytes** is recorded in `mixengine-artifact.json` — `upstream.removed`, `upstream.added`,
-`upstream.changed`, `upstream.stripped`, `keeps` — so that "borrowed" keeps meaning something a
+Whatever is taken out, put in, deliberately kept, admitted missing or **shipped at upstream's path
+and not in upstream's bytes** is recorded in `mixengine-artifact.json` — `upstream.removed`,
+`upstream.added`, `upstream.changed`, `keeps`, `lacks` — so that "borrowed" keeps meaning something a
 reader can check against what the publisher shipped, and "no more than is needed" keeps meaning a
-list somebody wrote down rather than a habit somebody remembers. The fourth of those is the newest
-and the one hardest to do without: a file that was modified rather than added or deleted is
-indistinguishable from a corrupted download unless the artifact says what was done to it.
+list somebody wrote down rather than a habit somebody remembers. `upstream.changed` is the one
+hardest to do without: a file that was modified rather than added or deleted is indistinguishable
+from a corrupted download unless the artifact says what was done to it. There was briefly a sixth,
+`upstream.stripped`, which said in a sentence what `changed` says as a mapping of path to command —
+and two spellings of one fact is the shape of thing this rule exists to remove, so it survives only
+in artifacts published before the check below was written.
 
 **Both rules are checked by comparing finished artifacts, because intent is not evidence.** The first
 audit of a green MariaDB run — six cells, all six proven against a running server — found the two
@@ -94,6 +97,22 @@ recipe knew it had:
 
 Most of that is invisible in a passing build. A smoke test proves an artifact *runs*; only a diff
 proves six of them are the same thing.
+
+That diff is now [`tools/parity.py`](tools/parity.py), and it runs where every artifact of a version
+is on one disk at once — the index workflow, which is the only place in the repository that can see
+more than one cell. Across the cells it compares feature sets: `extensions.static ∪
+extensions.enabled` for PHP, the commands in `provides` for every kind. Within one artifact it
+refuses any path matching what the second half of the rule throws out. **Every difference it is not
+told about is a defect**, which is what makes the two ways of telling it worth having — `lacks` for
+something a cell cannot do at any price, `keeps` for something it carries on purpose, both written
+into the artifact with the reason attached, and [`tools/php_parity.py`](tools/php_parity.py) for the
+handful of differences that belong to a whole row rather than to one cell.
+
+Pointed at the catalogue as it stands, it reports 370 differences on the PHP row and none on any
+other, and every one of them is against an archive packed before the task that closes it. That is
+the answer a check like this is supposed to give the first time: not *nothing is wrong*, and not
+something new either, but *here is the backlog, and here is the thing that will notice if it comes
+back*.
 
 For PHP:
 

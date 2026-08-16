@@ -14,9 +14,15 @@ will drift, and the drift is invisible because they agree on the name of the ext
 this serves is [*One version means one thing, and no more than is needed*][rule], whose first
 half is about this file and whose second half is about `php_windows.py`'s pruning.
 
-Nothing here downloads, builds or loads anything. It answers three questions — what a branch owes,
-what is on by default, and whether a finished set is short of either — and it is deliberately
+Nothing here downloads, builds or loads anything. It answers four questions — what a branch owes,
+what is on by default, whether a finished set is short of either, and which of the differences
+between two finished cells the platform imposed rather than a recipe — and it is deliberately
 readable end to end, because it is the list somebody will want to argue with.
+
+The fourth arrived last and is the one the other three were written for. `parity.py` compares the
+six finished cells of a version and treats every difference it is not told about as a defect, which
+is only a rule worth having if the list of things it is told about is short, argued and in one
+place. That is :func:`exempt`.
 
 [rule]: ../README.md#one-version-means-one-thing-and-no-more-than-is-needed
 """
@@ -124,6 +130,27 @@ DLL_NAMES = {"gd2": "gd"}
 # fewer line in this file.
 WINDOWS_SINCE = {"readline": (7, 1), "dba": (7, 2)}
 
+# The same asymmetry read from the other end: compiled into the publisher's Windows build, present
+# on no Unix cell of the branch, and removed by PHP itself in the branch named here — `mcrypt` in
+# 7.2, `wddx` in 7.4. Nothing on this side can close either, because this row does not compile
+# anything on Windows and a compiled-in extension is not a file anybody can delete.
+#
+# Written as data rather than as the sentence it used to be, because `parity.py` is the check that
+# meets it: it compares the six finished cells and would otherwise report `mcrypt` missing from four
+# of them on two branches, every time the index is generated, forever.
+WINDOWS_UNTIL = {"mcrypt": (7, 2), "wddx": (7, 4)}
+
+# One capability, and the two platforms spell it with two commands. A site is served through
+# `php-fpm` on Unix and through `php-cgi.exe` behind FastCGI on Windows, which has never had an FPM
+# SAPI — see `php_windows.py`'s own argument for taking the NTS build. A cross-cell comparison of
+# `provides` sees two names and one absence on either side; what is actually there is one feature,
+# and this is the set that says so.
+#
+# It is the only such pair in the repository, and it is deliberately not a general mechanism: two
+# commands are the same capability roughly never, and a table that grew would be a table for
+# explaining differences away.
+SERVES = frozenset({"php-fpm", "php-cgi"})
+
 # Dropped from the Windows archive by the keep-list above, listed here with the reason because the
 # reason is a decision about the whole row rather than about one recipe — a reader of `php_unix.py`
 # wondering why nothing configures LDAP should find the answer without reading a packer. Measured on
@@ -133,11 +160,8 @@ WINDOWS_SINCE = {"readline": (7, 1), "dba": (7, 2)}
 # `php_windows.py` asserts that none of these survived, so this is a check and not a caption: a
 # keep-list that grew an entry by accident is exactly the kind of edit that reads as harmless.
 #
-# Two more are surplus and stay, because they are compiled into the publisher's build and this row
-# does not compile anything on Windows: `mcrypt` on 7.0 and 7.1, and `wddx` on 7.0 through 7.3. PHP
-# removed both itself — mcrypt in 7.2, wddx in 7.4 — and no Unix cell of those branches has either.
-# A cross-cell check will find them and has to be told; it is the same shape as `NO_WINDOWS_BUILD`
-# read from the other end, and the same answer: name it, because nothing here can close it.
+# Two more are surplus and stay, because they are compiled into the publisher's build and nothing
+# here compiles that build: `mcrypt` and `wddx`, which is what :data:`WINDOWS_UNTIL` above is.
 #
 # Every one of them is the README's own test applied twice — *something a local development
 # environment does not do is dropped everywhere* — and the two at the end are not even that:
@@ -185,7 +209,34 @@ def enabled_by_default(shared: list[str]) -> list[str]:
     return sorted(set(shared) - OFF_BY_DEFAULT)
 
 
-def _reported(names: list[str]) -> set[str]:
+def exempt(branch: tuple[int, int], name: str, operating_system: str) -> str | None:
+    """Why *name* is legitimately not on this cell of this branch, or ``None`` if it is a defect.
+
+    The answer `parity.py` asks for every extension one cell of a version has and another does not.
+    It lives here rather than there for the reason the whole file lives here: what the official
+    Windows build has never carried is a fact about the PHP row, and eleven versions asking it
+    separately is eleven chances to answer differently.
+
+    Everything this does **not** name is a defect, which is what makes the naming worth doing. It
+    takes no free text from the artifact either: a reason that is about one cell belongs in that
+    cell's ``lacks`` and is read there, and a reason a recipe could invent on the spot is a reason
+    nobody argued about.
+    """
+    if operating_system == "windows":
+        if name in NO_WINDOWS_BUILD:
+            return NO_WINDOWS_BUILD[name]
+        arrived = WINDOWS_SINCE.get(name)
+        if arrived and branch < arrived:
+            return (f"the official Windows build has carried {name} only since "
+                    f"{arrived[0]}.{arrived[1]}")
+    elif name in WINDOWS_UNTIL and branch < WINDOWS_UNTIL[name]:
+        return (f"PHP removed {name} in {WINDOWS_UNTIL[name][0]}.{WINDOWS_UNTIL[name][1]}; until "
+                f"then the official Windows build compiles it in and nothing here compiles that "
+                f"build")
+    return None
+
+
+def reported(names: list[str]) -> set[str]:
     """Extension names as this file spells them, out of names as PHP and the recipes spell them.
 
     Two mismatches, both of which make a present extension look absent. ``get_loaded_extensions()``
@@ -210,10 +261,10 @@ def check(branch: tuple[int, int], static: list[str], shared: list[str],
     while every check passed. What is missing cannot fail a load test.
 
     What is *not* checked here is the six cells against each other, because a recipe only ever sees
-    one of them. That is P6's, and it reads `extensions` out of the six finished manifests — where
-    it would also have caught the GD one, from the other direction.
+    one of them. That is `parity.py`, which reads `extensions` out of the six finished manifests —
+    where it would also have caught the GD one, from the other direction.
     """
-    have = _reported(static) | _reported(shared)
+    have = reported(static) | reported(shared)
     owed = [
         name for name in COMPILED_IN
         if name not in NOT_REPORTED

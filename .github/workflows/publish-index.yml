@@ -43,6 +43,13 @@ jobs:
           done
           ls -la dist
 
+      # Before the index is generated rather than after, because a version that fails this is a
+      # version that should not be described to anybody — and this is the only job in the repository
+      # where every cell of every version is on one disk at once, which is the whole reason the
+      # comparison can be made here and nowhere else.
+      - name: compare the cells of each version
+        run: python tools/parity.py --artifacts dist
+
       - name: generate
         run: |
           python tools/mkindex.py \

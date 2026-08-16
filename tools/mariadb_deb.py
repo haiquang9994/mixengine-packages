@@ -472,8 +472,10 @@ def main() -> None:
     # Expected to find nothing and run anyway: Debian strips its binaries and ships the symbols in a
     # separate `-dbg` package, which is the whole reason this route produces an archive an order of
     # magnitude smaller than the bintar one. Calling it keeps that a measurement rather than a
-    # belief about somebody else's packaging policy.
-    stripped = mariadb.strip_debug(tree)
+    # belief about somebody else's packaging policy — and since P6 the measurement is exact, because
+    # `strip.symbols` names a file only if its bytes actually moved. An empty mapping here is the
+    # policy holding; a full one is Debian having stopped.
+    changed = mariadb.strip_debug(tree)
     added = relocate.bundle(tree, search=[tree / "lib"])
     if added:
         print(f"bundled {len(added)} librar{'y' if len(added) == 1 else 'ies'}: "
@@ -503,7 +505,7 @@ def main() -> None:
                        f"rearranged into upstream's own bintar layout",
             "added": sorted(f"lib/{library}" for library in added),
             **({"removed": sorted(set(dropped))} if dropped else {}),
-            **({"stripped": stripped} if stripped else {}),
+            **({"changed": dict(sorted(changed.items()))} if changed else {}),
         },
         "provides": provides,
     }

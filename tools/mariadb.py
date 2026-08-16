@@ -67,6 +67,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import borrow  # noqa: E402  — siblings, and this directory is not importable as a package
 import mariadb_smoke  # noqa: E402
 import relocate  # noqa: E402
+import strip  # noqa: E402
 
 API = "https://downloads.mariadb.org/rest-api/mariadb"
 
@@ -416,8 +417,8 @@ def bundled_licences(tree: Path, bundled: dict[str, Path]) -> None:
         )
 
 
-def strip_debug(tree: Path) -> str | None:
-    """Take the debug symbols out of a borrowed bintar, and answer with what that saved.
+def strip_debug(tree: Path) -> dict[str, str]:
+    """Take the debug symbols out of a borrowed bintar, and answer with which files that changed.
 
     **Measured because the artifacts did not agree with each other.** MariaDB 11.8.8 packs to 27 MB
     from upstream's own ``arm64`` ``.deb`` packages and to 371 MB from its ``x86_64`` bintar — the
@@ -429,25 +430,37 @@ def strip_debug(tree: Path) -> str | None:
     object loadable and a stack trace nameable, and removing it saves nothing here because it is
     small. What goes is ``.debug_*``, which is nearly all of the difference above.
 
-    The saving is returned rather than assumed, and it goes in the manifest — an archive that says
-    it was stripped and is the same size as one that was not is a claim worth being able to check.
+    **What this used to return was a sentence, and P6 is where it stopped being one.** It said
+    "debug symbols stripped from 412 files (371 MB -> 27 MB)" into an ``upstream.stripped`` field of
+    its own, which was this repository's first attempt at recording that a shipped file is not
+    upstream's file — written before there was a rule and before ``upstream.changed`` existed. Two
+    fields saying one thing is the shape of drift the rule is against, so the sentence goes and the
+    mapping stays. The fold-in is worth more to this row than to the one it folds into: 344 MB came
+    out of a bintar here and *nothing checked what came out*, while `strip.symbols` refuses to
+    return unless the loader's and the linker's whole view of every file survived the operation.
+
+    So `strip` failing is now a failed pack rather than a file quietly left alone. That was the
+    right call when this ran `strip` over whatever `machine_files` handed it and hoped; it is the
+    wrong one now that the same list is proved file by file, because a `strip` that exits non-zero
+    on a MariaDB plugin is a fact about the archive and not about the tool.
     """
     if sys.platform != "linux" or not shutil.which("strip"):
-        return None
+        return {}
 
     files = relocate.machine_files(tree)
     before = sum(path.stat().st_size for path in files)
-    for path in files:
-        # A file this cannot strip is left alone rather than failing the build: `strip` refuses
-        # anything it does not recognise, and the point here is size rather than uniformity.
-        subprocess.run(["strip", "--strip-debug", str(path)], capture_output=True, timeout=300)
+    # Spelled here rather than taken from one of `strip`'s two tables, and those tables are why:
+    # `IMAGES` is `--strip-all` because a CPython tree's binaries are loaded and never linked
+    # against, `ARCHIVES` is `--strip-debug` because an `ar` archive is only ever linked against.
+    # This is an image that *is* linked against — `lib/libmariadb.so` is what a client extension
+    # resolves — so it asks for the third thing, and asking for it in the recipe is what keeps the
+    # two tables meaning what they say.
+    changed = strip.symbols(tree, files, ["--strip-debug"], "linux")
     after = sum(path.stat().st_size for path in files)
-    if after >= before:
-        return None
-    print(f"stripped debug symbols from {len(files)} files: "
-          f"{before / 1e6:,.0f} MB of machine code became {after / 1e6:,.0f} MB")
-    return (f"debug symbols stripped from {len(files)} files "
-            f"({before / 1e6:,.0f} MB -> {after / 1e6:,.0f} MB)")
+    if changed:
+        print(f"stripped debug symbols from {len(changed)} of {len(files)} files: "
+              f"{before / 1e6:,.0f} MB of machine code became {after / 1e6:,.0f} MB")
+    return changed
 
 
 def unshippable_plugins(tree: Path) -> list[str]:
@@ -646,7 +659,7 @@ def main() -> None:
         print(f"not shipping {len(removed)} paths: {', '.join(removed)}")
     if not windows:
         removed += unshippable_plugins(tree)
-    stripped = strip_debug(tree)
+    changed = strip_debug(tree)
 
     provides = mariadb_smoke.describe(tree, windows)
 
@@ -684,8 +697,8 @@ def main() -> None:
         manifest["upstream"]["added"] = sorted(f"lib/{library}" for library in added)
     if removed:
         manifest["upstream"]["removed"] = sorted(removed)
-    if stripped:
-        manifest["upstream"]["stripped"] = stripped
+    if changed:
+        manifest["upstream"]["changed"] = dict(sorted(changed.items()))
 
     measured = relocate.floor(tree) if not windows else None
     if measured:
