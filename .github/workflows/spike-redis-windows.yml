@@ -28,6 +28,14 @@ jobs:
   spike:
     runs-on: windows-2022
     timeout-minutes: 60
+    env:
+      # **`shell: bash` here is Cygwin's bash, not git-bash, and they disagree about `\r`.** The
+      # install action puts Cygwin ahead of git on PATH, so every bash step below runs under
+      # `D:\cygwin\bin\bash.EXE` — while Actions writes the step's script file with CRLF endings.
+      # Git for Windows patches its bash to ignore a trailing CR; Cygwin's does not, and hands it to
+      # the command as an argument: the first run of this spike died on `uname: unknown option --`
+      # because `uname -a` was really `uname -a<CR>`. `igncr` is Cygwin bash's own answer.
+      SHELLOPTS: igncr
     steps:
       - uses: actions/checkout@v4
 
