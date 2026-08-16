@@ -19,7 +19,7 @@ What is *not* done is the rule itself.
 | PHP | 7.0 – newest, 6 targets | `php_windows`, `php_unix`, `php_legacy_unix` | yes — P2 |
 | Node.js | 16 – newest, 6 targets | `node` | yes — P3 |
 | Python | 3.10 – newest, 6 targets | `python` | yes — P4, P4a and P4b |
-| Ruby | 3.2 – newest, 6 targets | `ruby`, `ruby_unix` | unknown — P5 |
+| Ruby | 3.2 – newest, 6 targets | `ruby`, `ruby_unix` | yes — P5, less P5a |
 | Caddy | 2.0 – newest, 6 targets | `caddy` | yes |
 | MariaDB | 10.6 – newest, 6 targets | `mariadb`, `mariadb_deb`, `mariadb_build` | yes — it is where the rule came from |
 
@@ -34,8 +34,9 @@ because it is the argument for P6. The rule has never been applied backwards to 
 rows that were packed before it existed, and P1–P6 are that work. Measured against upstream's own
 archives, the gaps were not marginal: PHP 8.3 on Windows was missing two extensions this repository
 fails a Unix build over, which P2 closed; Node.js 24.19.0 was 106 MB on Windows against 198 MB on
-Linux, which P3 closed; and CPython 3.13.15 shipped Tk 8.6 to Windows and Tk 9.0 to Unix under one
-version number, which P4 closed by shipping neither. Three times now a task has come out somewhere
+Linux, which P3 closed; CPython 3.13.15 shipped Tk 8.6 to Windows and Tk 9.0 to Unix under one
+version number, which P4 closed by shipping neither; and Ruby 4.0.6 on Windows was 276 MB of which
+225 MB was documentation the four compiled cells are configured never to build, which P5 closed. Three times now a task has come out somewhere
 other than where it was pointed — P3 kept npm's manual pages after going and reading npm, P4a keeps
 30 MiB of a shared library nothing in the archive loads, and P4b found its own title wrong and two of
 its stated reasons for existing wrong with it. That is what a rule is for, and it is the argument for
@@ -510,7 +511,7 @@ is not published unless the mapped image is identical. And extracting a Unix tar
 symlinks into copies, so the local run stripped `bin/python` and `bin/python3` as well; on a runner
 `relocate.machine_files` skips them and the four paths above are what `upstream.changed` will name.
 
-### [ ] P5 — Ruby: make the two recipes answer the same questions **(rule)**
+### [x] P5 — Ruby: make the two recipes answer the same questions **(rule)**
 
 `ruby_smoke.py` exists precisely so that a borrowed Ruby and a compiled Ruby make the same claim, and
 it works. What sits outside it does not:
@@ -528,6 +529,103 @@ it works. What sits outside it does not:
 Unpacking a `.7z` needs 7-Zip, which the machine this was audited on does not have, so the Windows
 half is *unknown* rather than *wrong*. Measure it first; the answer decides whether this task is a
 prune, a note, or nothing.
+
+**The blocker had already been removed by somebody fixing something else.** `borrow.seven_zip` falls
+back to `%SystemRoot%\System32\tar.exe` — bsdtar, which ships with Windows and reads 7-Zip — a
+fallback added because 7-Zip itself failed on a `windows-2022` runner. So the audit ran here after
+all, on 3.2.11, 3.4.10 and 4.0.6. It is **a prune and a note**, and the prune is the largest single
+thing this repository has thrown out.
+
+#### The prune: half the archive, and four fifths of one of them
+
+| | tree | after | zip | after |
+| --- | --- | --- | --- | --- |
+| 3.2.11 | 86.3 MB | 39.2 MB | 28.8 MB | **14.7 MB** |
+| 3.4.10 | 108.0 MB | 47.7 MB | 34.0 MB | **17.2 MB** |
+| 4.0.6 | 276.1 MB | 51.1 MB | 53.5 MB | **18.8 MB** |
+
+`share/doc` and `share/ri` — RDoc's HTML rendering of Ruby's own manual, and the `ri` database — are
+60.3 MB of the 3.4.10 tree and **224.9 MB of the 4.0.6 tree**, which is 81% of an artifact of a
+programming language. It grew four and a half times in one line while the language grew by 8%: 1,334
+HTML files averaging 160 KB where 3.4 had 1,502 averaging 32 KB.
+
+**The direction was decided by the Unix half rather than by the size**, which matters because the
+size alone would have been a reason to do something hasty. `ruby_unix.py` does not merely delete
+those directories, it passes `--disable-install-doc` so they are never generated — a positive choice
+with an argument written beside it, that this repository has no business shipping four copies of
+Ruby's manual on four targets for every version of every line. Nothing on the Windows side argues
+back; the `.7z` carries them because RubyInstaller is a general-purpose distribution of Ruby.
+
+`share/ri` was checked rather than assumed, and it is **not** the CPython terminfo case: it is
+genuinely reachable, `RDoc::RI::Paths.path` names it inside the tree and `RDoc::RI::Driver` answers
+`String#upcase` out of it. What it is not is reachable through anything either recipe publishes —
+neither `provides` has ever held `ri` or `rdoc`, and IRB's own `help` in 3.4 routes to its command
+table rather than to RDoc. A working feature of a Ruby installation that no MixEngine command
+reaches, on two cells of six, against four that were configured never to build it.
+
+The list is `tools/ruby_parity.py`, read by both recipes, for the reason P2 built `php_parity.py`:
+"say so beside the other recipe" is a comment, and this is precisely the drift a comment did not
+prevent — `ruby_unix.PRUNE` carried an argument about "four targets" while the other two carried
+225 MB nobody had weighed.
+
+#### The note: two things the six cells cannot be made to share
+
+Asked what RubyInstaller does about the three flags the Unix build passes — the second bullet above
+— a 3.2.11, a 3.4.10 and a 4.0.6 all answer the same way:
+
+- **YJIT is not there.** `RubyVM::YJIT` is undefined and `ruby --yjit` answers *"warning: Ruby was
+  built without YJIT support"*. CRuby does not build YJIT for `x64-mingw-ucrt`. `ruby_unix.py`
+  configures `--enable-yjit` and its smoke test **refuses to publish** a Ruby that answers false to
+  `RubyVM::YJIT.enabled?`, on the grounds that the flag warns rather than fails without a Rust
+  compiler — so this is a capability four cells are checked for and two cannot have.
+- **No native gem compiles.** `gem install bigdecimal` exits 1 with *"MSYS2 could not be found.
+  Please run `ridk install`"*. The toolchain is a separate ~1 GB MSYS2 that RubyInstaller publishes
+  as its own installer, which is why the archive borrowed here is the one without it. `ruby_unix.py`
+  proves the opposite claim from the moved tree and calls it a claim about Ruby.
+- **libedit is a difference on one line only.** Windows is built `--without-ext=readline` and
+  `require "readline"` resolves to the pure-Ruby Reline on every line. `ruby_unix.py`'s own comment
+  says the same is true of its 3.3+ cells, so only 3.2 differs — there the four Unix cells carry
+  real libedit, ncurses and tinfo beside them. Recorded rather than acted on: the `Readline` API is
+  the same either way and what differs is how a line editor behaves inside `irb`.
+
+The first two are written into a new top-level `lacks`, a mapping of capability to reason. It is the
+only field in the schema that is an admission rather than a decision, and it exists because the
+alternative is an artifact quietly smaller than its version number promises — a daemon can read it
+and refuse to enable a feature the cell has not got, and a blueprint asking for a native gem can
+fail where it is written. The four cells that lack nothing ask and write no field, which is not the
+same as never having asked.
+
+Packed end to end on Windows for all three lines, every manifest validating against the schema with
+`upstream.removed` naming both directories and `lacks` naming both capabilities. What is left is
+P5a, which is a question this audit raised rather than one it was sent to answer.
+
+### [ ] P5a — Ruby: the shared library, and the linker's half of the archive **(rule)**
+
+Two things the P5 audit measured and deliberately did not act on, because both need the *compiled*
+half changed and this machine cannot build it.
+
+**`--disable-shared` on four cells, a DLL on two.** RubyInstaller's Ruby answers
+`RbConfig::CONFIG['ENABLE_SHARED']` with `yes` and ships `bin/ruby.exe` beside
+`bin/x64-ucrt-ruby340.dll`; `ruby_unix.py` passes `--disable-shared`, so there is no `libruby.so` on
+any Unix cell at all. That is the same question P4a answered for CPython and the answer came out the
+other way round there: Windows cannot help shipping `python3XX.dll`, so the Unix cells keep
+`libpython` to match, and an embedder can link a MixEngine Python on all six. Here two cells can
+embed Ruby and four cannot. Deciding it means either dropping `--disable-shared` — which changes
+what four artifacts contain and how they relocate — or arguing that embedding Ruby is not something
+MixEngine offers, in which case the Windows DLL is not surplus either, because there it *is* the
+interpreter.
+
+**A 2.4 MB import library for a compiler the manifest now says is absent.**
+`lib/libx64-ucrt-ruby340.dll.a` is 14% of the pruned Windows archive and is what `-lx64-ucrt-ruby340`
+resolves to when a native extension links. P5 has just declared that this cell cannot compile one.
+The two readings are both defensible and they contradict each other: it is dead weight, or it is
+what makes the cell work after a user runs `ridk install`, which is the same argument P4 used to
+*keep* `libs/python3XX.lib` on a Windows that ships no compiler either. Whichever it is, `include/`
+— 1.6 MB of Ruby headers on both halves — travels with it and neither recipe declares either in
+`keeps` today, so the decision is one entry or two in a field that already exists.
+
+Do it with P6 or before it, not after: the check P6 writes reads `keeps`, and a row whose linker
+story is undecided is a row that check cannot be pointed at.
 
 ### [ ] P6 — Make the rule something CI can fail on **(rule)**
 

@@ -285,6 +285,27 @@ passes the same flag to a build of its own — and the two recipes share `tools/
 is *what they claim* rather than how they got there, because a daemon installing one of these cannot
 tell which produced it.
 
+**What they claim was shared and what they *decide* was not, and that had cost 225 MB.** The four
+compiled cells pass `--disable-install-doc` and delete `share/man`, `share/doc` and `share/ri` on an
+explicit argument — that a development environment has no business shipping four copies of Ruby's
+manual for every version of every line. The two borrowed cells had never been told, because
+RubyInstaller ships a general-purpose Ruby and nothing had measured what that meant: 60.3 MB of a
+108 MB tree on 3.4.10, and **224.9 MB of a 276 MB tree on 4.0.6**, four fifths of an artifact of a
+programming language being RDoc's HTML rendering of that language's own manual. The list is
+`tools/ruby_parity.py` now and both recipes read it, which halves the Windows archive — 34.0 MB to
+17.2 MB on 3.4.10, 53.5 MB to 18.8 MB on 4.0.6.
+
+**And one asymmetry here cannot be closed at any price, so the artifact states it.** Asked what
+RubyInstaller does about the three flags the Unix build passes, a Windows Ruby answers that it has
+no YJIT — `RubyVM::YJIT` is undefined and `ruby --yjit` warns, because CRuby does not build YJIT for
+`x64-mingw-ucrt` — and that `gem install` of a gem with a C extension exits 1 with `MSYS2 could not
+be found`, the compiler being a separate ~1 GB toolchain published as its own installer. The Unix
+recipe *fails a build* over both. Neither can be moved, so both are written into a top-level `lacks`
+field: a daemon can then refuse to enable a feature the cell does not have instead of passing a flag
+that warns, and a blueprint asking for a native gem can fail where it is written rather than on
+somebody's machine. It is the only field here that is an admission, and an absence nothing states is
+an absence a reader has to discover.
+
 The CA store is the part that is not obvious. A Ruby linked against a distribution's OpenSSL
 inherits that distribution's `OPENSSLDIR` — `/etc/pki/tls` on the Red Hat family, `/etc/ssl` on the
 Debian one — so an artifact built on one verifies certificates perfectly on the build machine and

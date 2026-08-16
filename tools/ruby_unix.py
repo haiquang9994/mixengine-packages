@@ -67,6 +67,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import borrow  # noqa: E402  — siblings, and this directory is not importable as a package
 import relocate  # noqa: E402
+import ruby_parity  # noqa: E402
 import ruby_smoke  # noqa: E402
 
 # Every Ruby release ruby-lang.org has ever published, with the SHA-256 it published beside it. One
@@ -170,7 +171,12 @@ REQUIRED = ("ruby", "gem", "bundle")
 
 # Installed and then thrown away: documentation this repository has no business shipping four copies
 # of, on four targets, for every version of every line.
-PRUNE = ("share/man", "share/doc", "share/ri")
+#
+# The list moved to `ruby_parity` in P5 and this name is kept as the way in, because the argument
+# above was only ever true of four cells: `ruby.py` was carrying the same directories on the other
+# two — 225 MB of them on 4.0.6 — while this comment described a policy it had never been told
+# about. A decision two producers take separately drifts, and this one had.
+PRUNE = ruby_parity.SURPLUS
 
 # What replaces an absolute `#!` in a bin/ script that upstream did not already write relatively.
 # `ruby -x` skips everything before the *next* `#!` line naming ruby, which is what makes one file
@@ -991,6 +997,13 @@ def main() -> None:
         "recipe": recipe,
         "provides": provides,
     }
+    # Asked on this side too, and answering nothing. That is the point of asking: `lacks` present on
+    # two cells and absent on four says the four were considered, where a field only one recipe has
+    # ever heard of says nothing about the other. These are the cells that *have* YJIT and that
+    # compile a native gem — both proven below rather than claimed here.
+    absent = ruby_parity.lacks(operating_system)
+    if absent:
+        manifest["lacks"] = absent
     measured = relocate.floor(tree)
     if measured:
         manifest["requires"] = {measured[0]: measured[1]}

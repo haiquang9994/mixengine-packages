@@ -46,6 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import borrow  # noqa: E402  — siblings, and this directory is not importable as a package
+import ruby_parity  # noqa: E402
 import ruby_smoke  # noqa: E402
 
 API = "https://api.github.com/repos/oneclick/rubyinstaller2/releases"
@@ -77,6 +78,43 @@ LAYOUT = {
 }
 
 REQUIRED = ("ruby", "gem", "bundle")
+
+
+def prune(tree: Path) -> list[str]:
+    """Throw out the documentation, which is most of this archive and none of this runtime.
+
+    **Measured before it was decided, and the measurement is why this is not a footnote.** RDoc's
+    HTML rendering of Ruby's own manual, plus the `ri` database beside it, is 60.3 MB of a 108 MB
+    tree on 3.4.10 and **224.9 MB of a 276 MB tree on 4.0.6** — four fifths of an artifact of a
+    programming language being that language's manual, growing four and a half times in one line
+    while the language itself grew by 8%.
+
+    The four compiled cells have never carried any of it: `ruby_unix.py` passes
+    `--disable-install-doc` so it is never generated. That is what decides the direction rather than
+    the size — a positive choice with an argument behind it on one side, and on the other an archive
+    that carries the docs because RubyInstaller is a general-purpose distribution of Ruby. The list
+    itself is :data:`ruby_parity.SURPLUS`, read by both recipes, because "say so beside the other
+    recipe" is a comment and comments do not fail a build.
+
+    `share/ri` is the one worth arguing about and was checked rather than assumed: unlike the
+    terminfo database CPython's Unix cells were carrying, this one **is** reachable —
+    `RDoc::RI::Paths.path` names it and `RDoc::RI::Driver` answers `String#upcase` out of it. What it
+    is not is *reachable through anything this artifact publishes*. Neither recipe puts `ri` or
+    `rdoc` in `provides`, and IRB's own `help` in 3.4 routes to its command table and not to RDoc. So
+    it is a working feature of a Ruby installation that no MixEngine command reaches, on two cells
+    out of six.
+    """
+    removed = []
+    for surplus in ruby_parity.SURPLUS:
+        path = tree / surplus
+        # `lexists`, for the reason `borrow.declare` gives at length: the check that follows this is
+        # about paths being gone, and a link whose target went first is invisible to `exists`.
+        if os.path.lexists(path):
+            removed.append(surplus)
+            shutil.rmtree(path, ignore_errors=True)
+    if removed:
+        print(f"dropped {', '.join(removed)} (documentation; the compiled cells never build it)")
+    return removed
 
 
 def releases() -> list[dict]:
@@ -162,12 +200,13 @@ def describe(tree: Path, version: str, arch: str, tag: str, url: str, digest: st
              added: list[str] | tuple[()] = (), removed: list[str] | tuple[()] = ()) -> dict:
     """What is in the archive, as the daemon will read it.
 
-    *added* and *removed* are empty today and are arguments rather than a later edit because P5 is
-    the task that fills them: ``ruby_unix.py`` prunes ``share/man``, ``share/doc`` and ``share/ri``
-    from the four cells it compiles and this recipe prunes nothing from the two it borrows, which is
-    the packer/compiler pair that has to answer the same question or say why it does not. See
-    :func:`borrow.declare` for what the two fields promise and what is checked before they are
-    written.
+    *removed* is what :func:`prune` threw out, which until P5 was nothing at all while
+    ``ruby_unix.py`` was throwing out the same three directories from the four cells it compiles —
+    the packer/compiler pair that has to answer the same question or say why it does not. The list
+    lives in :mod:`ruby_parity` now so neither side can move without the other. *added* is still
+    empty: nothing here writes into the archive, and it stays an argument because the field it
+    fills is the one that would have to say so. See :func:`borrow.declare` for what the fields
+    promise and what is checked before they are written.
     """
     provides = {}
     for name, candidates in LAYOUT.items():
@@ -208,6 +247,14 @@ def describe(tree: Path, version: str, arch: str, tag: str, url: str, digest: st
         },
         "provides": provides,
     }
+    # Stated rather than left to be noticed. The other five cells of this version run YJIT and
+    # compile a native gem; these two can do neither and no pruning or downloading fixes it, so the
+    # artifact says which and why. See `ruby_parity.LACKS` — it is the only field here that is an
+    # admission, and writing it is the alternative to an artifact that is quietly smaller than the
+    # word `ruby` promises.
+    absent = ruby_parity.lacks("windows")
+    if absent:
+        manifest["lacks"] = absent
     return borrow.declare(tree, manifest, added, removed)
 
 
@@ -263,7 +310,11 @@ def main() -> None:
 
     tree = borrow.unpack(downloaded, work / "unpacked", "7z")
 
-    manifest = describe(tree, version, arch, tag, url, actual, published)
+    # Before the tree is described and before it is proven, in that order and for the reason the
+    # Python recipe gives: the manifest has to describe the tree that ships, and the smoke test is
+    # what stands between a prune and a runtime that was quietly cut in half.
+    removed = prune(tree)
+    manifest = describe(tree, version, arch, tag, url, actual, published, removed=removed)
     manifest["smoke"] = smoke(tree, version, manifest)
 
     borrow.publish(tree, manifest, args.out, "zip")
