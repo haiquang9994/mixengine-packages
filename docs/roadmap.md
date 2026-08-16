@@ -1345,11 +1345,69 @@ across both Redis lines, and the refusal of an unnamed `deps/` directory were al
 the compile, the relocation check and the smoke tests need a `workflow_dispatch` on each of
 `build-redis.yml` and `build-memcached.yml` to be anything more than an intention.
 
-### [ ] P9 — nginx
+### [x] P9 — nginx
 
 nginx publishes a Windows zip itself and nothing relocatable for macOS or Linux, so the shape is
 PHP's rather than Caddy's. The proof has one thing Caddy's does not: nginx has no admin endpoint, so
 reload is `-s reload` against a running master and health is a request actually served.
+
+#### The borrowed binary turned out to be the specification for the built ones
+
+Both halves of the shape were right, and the thing worth writing down is what happened when the two
+were made to mean the same thing. `nginx -V` on upstream's own Windows zip prints the configure line
+it was built with, and that line is not a curiosity — it is a **specification a recipe can compile
+against**. The four Unix cells are configured from it: the same twenty-two `--with-` flags, the same
+three libraries, the same empty prefix. Which modules a version of nginx has here is upstream's
+decision transposed rather than anybody's taste, and `check_modules` holds *both* sides to the
+constant, so an upstream that changes its build stops the recipe rather than quietly publishing a row
+that means two things. A check that looked only at the compiled side could not tell those apart.
+
+Five cells, and both the floor and the empty one were measured rather than chosen:
+
+* **Floor 1.26.0.** Every Windows zip from 1.26.0 to 1.31.3 carries exactly those twenty-two flags;
+  1.24.0 carries twenty, missing `stream_realip` and `stream_ssl_preread`. A 1.24 row would mean one
+  thing on Windows and another on the compiled cells. Worse, 1.24.0's zip is linked against **OpenSSL
+  1.1.1t** — public security fixes ended September 2023 — and a published zip is frozen.
+* **Windows/aarch64 is empty**, and for a new reason. Upstream publishes **one** Windows build and it
+  is 32-bit x86; there is no `-win64` asset in any of its 331 zips, at any version. On x86_64 that
+  runs natively under WOW64 and ships. On ARM64 it would be an i386 payload in an archive whose
+  manifest says `arch: aarch64`, which is a lie in the index. Unlike Redis, nginx *has* an MSVC build
+  system, so this cell could be compiled — that is a Windows-on-ARM pipeline with three vendored
+  libraries maintained for every security release to fill one cell, which is the trade *Borrow before
+  you build* refuses. Its leg still runs and exits 75.
+* **`lacks` earns its keep for the first time since Ruby.** nginx.org calls its own Windows build a
+  beta: `select()`/`poll()` only, several workers of which one does any work, no UDP. That is
+  upstream's admission and the borrowed artifact carries it, so a daemon can decline to render
+  `worker_processes auto;` there instead of being mysteriously slower on one platform. **HTTP/3 is off
+  everywhere** for the matching reason — QUIC is UDP, and a `listen ... quic` that parses on four
+  cells and not two is the asymmetry the module table exists to prevent.
+
+**nginx publishes no digest of anything** — 594 tarballs, 331 zips, a detached PGP signature beside
+each and nothing else. Keeping the property every other recipe here has meant verifying signatures,
+so seven fingerprints are pinned in `tools/nginx.py`, each key file is checked against its pin
+*before* import, and a signature is accepted only on a `VALIDSIG` naming one of them. Two things fell
+out of building that: `nginx_signing.key` is **three** public keys in one file, which is where an
+extra key would go unnoticed and is why all three are pinned individually; and the gpg on a Windows
+runner is Git's MSYS build, which reads `--homedir C:\…` as *relative* and prepends its own working
+directory, so the homedir has to be `.` with the cwd set instead.
+
+Two smaller things, both found by running it rather than by reading. **`--prefix=` does not mean the
+same on both platforms**: it stops `NGX_PREFIX` being defined at all, which is upstream's own answer
+to relocation, but the sub-paths still get joined onto it, so `conf/nginx.conf` becomes
+`/conf/nginx.conf` — absolute on Unix, prefix-relative on Windows where nginx wants a drive letter.
+Nothing relies on the compiled-in defaults; the contract, proven on every cell, is
+`nginx -p <instance> -c conf/nginx.conf -e stderr`. And **an instance prefix needs `logs/` and
+`temp/` created before nginx starts** — `logs/` because nginx never creates it, `temp/` because nginx
+creates `temp/client_body_temp` with one `mkdir` rather than a chain, so a missing parent is
+`[emerg] … CreateDirectory() failed (3)` one line after `nginx -t` passed. That is a note for
+whoever writes the daemon's nginx recipe, and it is what the first run of this smoke test did.
+
+Left for whoever runs it: **the four compiled cells have not been through CI**. The Windows cell was
+run end to end on a real Windows machine — signature verified against a pinned key, repacked, module
+set checked, `nginx -t`, a request served, the configuration rewritten and `-s reload` proven by the
+new body coming back, `-s quit` — and the Unix path was exercised with the compiler stubbed out, so
+the downloads, the pinned library digests, the licence collection and the assembled tree are known
+good and the compile itself is not. It needs a `workflow_dispatch` on `build-nginx.yml`.
 
 ---
 

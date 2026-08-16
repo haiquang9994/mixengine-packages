@@ -346,3 +346,10 @@ what is in the file). The Python row learned the second half separately, by asse
 - Where the same runtime is produced by two recipes, share the *claim* and not the mechanics.
   `ruby_smoke.py` is what the borrowed Windows archive and the compiled Unix one both have to
   satisfy, because a daemon installing one of them cannot tell which recipe produced it.
+- **Where a row borrows on one cell and compiles on the rest, read the specification off the
+  borrowed binary rather than deciding it.** nginx is the clearest case: `nginx -V` prints the
+  configure line upstream built its Windows zip with, so the compiled cells are configured against
+  that and a constant in the recipe holds both sides to it. The decision a build otherwise makes by
+  omission — which modules a version has — is one the publisher already made for the cell nobody
+  compiles, and matching it is the only way the row means one thing. `php -i`, `ruby -e
+  'RbConfig::CONFIG'` and `caddy build-info` are the same question asked of three other publishers.

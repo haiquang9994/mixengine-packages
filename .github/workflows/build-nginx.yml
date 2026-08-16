@@ -1,0 +1,108 @@
+name: build nginx
+
+# Asked for, never automatic — the same rule every other workflow here keeps.
+#
+# **Five cells, and the two halves of the row are produced differently.** Windows/x86_64 borrows
+# upstream's own zip; the four Unix cells compile nginx against the configure line read off that
+# same zip, so a version means one set of directives everywhere. Windows-on-ARM is the empty cell:
+# upstream publishes one Windows build and it is 32-bit x86, which is a WOW64 binary on the first
+# Windows cell and would be an i386 payload in an aarch64 archive on the second. `tools/nginx.py`
+# exits 75 there, and the leg runs anyway so the emptiness is stated in every run's log.
+#
+# gpg is a hard requirement of every leg, not a nicety: nginx publishes no digest of anything — only
+# detached PGP signatures — so a runner without one would pack an unverified archive. Ubuntu and
+# macOS images carry GnuPG; on Windows the one that exists belongs to Git, which is why the recipe
+# looks in `C:\Program Files\Git\usr\bin` and why every step here runs under `shell: bash`.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "nginx line (1.30 stable, 1.31 mainline), exact version (1.30.4), or 'latest'. 1.26 and up; Windows-on-ARM has no upstream build."
+        required: true
+        type: string
+      release:
+        description: 'Publish as a GitHub release. Off means build and keep the artifacts for inspection only.'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  pack:
+    # Linux on 22.04 for the compatibility floor, as in every built row here — a glibc build only
+    # runs on a glibc at least as new as the one that produced it, so the runner choice *is* the
+    # floor. `relocate.floor` measures whatever it turns out to be and writes it into the manifest.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-22.04,     os: linux,   arch: x86_64 }
+          - { runner: ubuntu-22.04-arm, os: linux,   arch: aarch64 }
+          - { runner: macos-14,         os: macos,   arch: aarch64 }
+          - { runner: macos-15-intel,   os: macos,   arch: x86_64 }
+          - { runner: windows-2022,     os: windows, arch: x86_64 }
+          - { runner: windows-11-arm,   os: windows, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: build and pack
+        id: pack
+        # bash on every leg so the exit code is read the same way everywhere. 75 is "upstream builds
+        # nothing for this target", which here means Windows-on-ARM and nothing else.
+        shell: bash
+        run: |
+          code=0
+          python -u tools/nginx.py --version "${{ inputs.version }}" --out dist || code=$?
+          if [ "$code" -eq 75 ]; then
+            echo "::notice::no nginx for ${{ matrix.os }}/${{ matrix.arch }}; upstream publishes one Windows build and it is 32-bit x86"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit "$code"
+        # Longer than Redis's or Caddy's, and OpenSSL is the whole reason: the four Unix legs compile
+        # it from source before nginx links against it, which is most of the wall clock. The Windows
+        # leg is a download and finishes in a minute.
+        timeout-minutes: 90
+      - uses: actions/upload-artifact@v4
+        if: steps.pack.outputs.skipped != 'true'
+        with:
+          name: nginx-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    # One release per exact version, holding every artifact of it — the version read back out of
+    # each manifest rather than taken from the input, because the input may be a line or `latest`
+    # and each leg resolves it against upstream independently.
+    needs: pack
+    if: ${{ inputs.release && !failure() && !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: incoming, merge-multiple: true }
+      - name: publish one release per version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          versions=$(jq -r '.version' incoming/*.json | sort -u)
+          for version in $versions; do
+            tag="nginx-$version"
+            assets=()
+            for manifest in incoming/*.json; do
+              [ "$(jq -r '.version' "$manifest")" = "$version" ] || continue
+              assets+=("${manifest%.json}" "$manifest")
+            done
+            echo "== $tag: ${#assets[@]} artifact(s)"
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              gh release create "$tag" \
+                --title "nginx $version" \
+                --notes "Relocatable nginx $version for MixEngine. Five cells: macOS and Linux on both architectures compiled from upstream's own source release, and Windows on x86_64 borrowed from upstream's own zip. Every download was checked against the detached PGP signature nginx publishes beside it, verified against a key fingerprint pinned in tools/nginx.py — nginx states no digest of any of its archives, anywhere. The compiled cells use upstream's own Windows configure line: the same twenty-two modules, and PCRE2, zlib and OpenSSL compiled in statically, so the binary imports nothing outside the C runtime. HTTP/3 is off on every cell because the Windows build has no UDP support and a row must mean one thing. **The Windows artifact is a 32-bit x86 binary running under WOW64 — upstream has never published a 64-bit or ARM64 Windows build of nginx — and its mixengine-artifact.json carries a lacks block naming what upstream's own documentation calls a beta.** Every artifact was run as a web server from a directory it had been moved to before being published: nginx -t against a rendered configuration, a request actually served, the configuration rewritten and reloaded with nginx -s reload until the new body came back, and nginx -s quit. Run it as nginx -p <prefix> -c conf/nginx.conf -e stderr; the binaries carry no compiled-in prefix. See mixengine-artifact.json inside each one for what was proven."
+            fi
+            gh release upload "$tag" "${assets[@]}" --clobber
+          done

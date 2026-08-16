@@ -78,6 +78,19 @@
     "this before reaching for an endoflife.date mirror of it.",
     "memcached publishes no schedule of any kind and maintains one line, so it is Caddy's case."
   ],
+  "_nginx_comment": [
+    "Caddy's case again, and asked at P9 rather than assumed from the fact that nginx has numbered",
+    "branches. It does have them — 1.26, 1.28 and 1.30 all exist — but only the newest stable line",
+    "and the newest mainline ever take a fix, so a branch is unsupported the moment the next one",
+    "appears rather than on a date anybody announced. nginx publishes no lifecycle schedule and no",
+    "end-of-life dates of any kind; its security advisories name the versions a flaw was fixed in,",
+    "which is a different fact. A date invented here would be this file's opinion, so there is none",
+    "and `mkindex.py` leaves the packages undated.",
+    "What the index can say instead is already in each artifact: the compiled cells name the OpenSSL",
+    "they were built against and the borrowed Windows one names the OpenSSL upstream built it",
+    "against, in `smoke.openssl`. For a web server that is the number worth watching, and it is",
+    "measured rather than transcribed."
+  ],
   "_mariadb_comment": [
     "The promise above, kept. MariaDB branches into long-term series and states the end of each one",
     "through its own REST API — `release_eol_date` on /rest-api/mariadb/ — so unlike every other",
