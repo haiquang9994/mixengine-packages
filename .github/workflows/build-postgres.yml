@@ -7,12 +7,13 @@ name: build postgres
 # as ordinary as one pinning 18. `tools/postgres.py --plan` expands `all` into upstream's own
 # `versions.json`, and the matrix below is the cross product of that with the targets EDB builds for.
 #
-# **Three targets, not six, and the three that are missing are missing for stated reasons.** EDB
-# publishes a Windows x86_64 zip and one universal macOS zip that serves both Apple cells; it stopped
-# publishing Linux tarballs, and the PostgreSQL project itself publishes source only, so Linux comes
-# from apt.postgresql.org's own packages in a recipe of its own (P7a). Nobody publishes a
-# Windows-on-ARM build at all (P7b). An unlisted cell here is an empty cell of the index, which is a
-# real answer as long as the index says so.
+# **Five targets, not six, and they do not share a recipe.** EDB publishes a Windows x86_64 zip and
+# one universal macOS zip that serves both Apple cells; it stopped publishing Linux tarballs, and the
+# PostgreSQL project itself publishes source only, so both Linux cells come from the project's own
+# `.deb` packages instead. Which recipe a cell uses is written down once, in the matrix, rather than
+# decided in an `if:` — the same shape `build-mariadb.yml` has and for the same reason. Nobody
+# publishes a Windows-on-ARM PostgreSQL at all (P7b); an unlisted cell is an empty cell of the index,
+# which is a real answer as long as the index says so.
 on:
   workflow_dispatch:
     inputs:
@@ -64,14 +65,25 @@ jobs:
     # on the architecture it is for. What each leg proves is that *this* Mach-O slice starts and
     # serves on *this* machine, which is the only thing that makes a universal build a fact rather
     # than a claim about a header.
+    #
+    # Linux on 22.04 rather than the newest image, for the reason the MariaDB matrix states at
+    # length: the glibc floor of the artifact is the floor of the runner, because `postgres_deb.py`
+    # bundles the runner's own libraries beside upstream's binaries. 24.04 measures out at 2.38 and
+    # excludes Debian 12; 22.04 puts it at 2.35, matches the suite the packages are taken from, and
+    # gives MixEngine's Linux artifacts one floor across both databases rather than two.
     strategy:
       fail-fast: false
       matrix:
         major: ${{ fromJSON(needs.plan.outputs.majors) }}
         target:
-          - { runner: windows-2022,   os: windows, arch: x86_64 }
-          - { runner: macos-14,       os: macos,   arch: aarch64 }
-          - { runner: macos-15-intel, os: macos,   arch: x86_64 }
+          # Borrowed from EnterpriseDB: a Windows zip, and one universal macOS zip for both cells.
+          - { runner: windows-2022,     os: windows, arch: x86_64,  recipe: postgres.py }
+          - { runner: macos-14,         os: macos,   arch: aarch64, recipe: postgres.py }
+          - { runner: macos-15-intel,   os: macos,   arch: x86_64,  recipe: postgres.py }
+          # Borrowed from the project's own apt repository, and lifted out of /usr with the layout
+          # kept: EDB stopped publishing Linux tarballs and postgresql.org publishes source only.
+          - { runner: ubuntu-22.04,     os: linux,   arch: x86_64,  recipe: postgres_deb.py }
+          - { runner: ubuntu-22.04-arm, os: linux,   arch: aarch64, recipe: postgres_deb.py }
     runs-on: ${{ matrix.target.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -82,13 +94,15 @@ jobs:
         # bash on every leg, Windows included, so the exit code is read the same way everywhere
         # rather than in two dialects that could disagree.
         #
-        # 75 is "EDB publishes nothing for this cell at this version", which is an empty cell of the
-        # table and not a failure. Every other non-zero code is real and is passed on. `|| code=$?`
-        # rather than reading `$?` on the next line, because `shell: bash` runs with `-e`.
+        # 75 is "the publisher has nothing for this cell at this version", which is an empty cell of
+        # the table and not a failure — for the `.deb` legs it is also what the few days between
+        # upstream tagging a release and Debian packaging it look like. Every other non-zero code is
+        # real and is passed on. `|| code=$?` rather than reading `$?` on the next line, because
+        # `shell: bash` runs with `-e`.
         shell: bash
         run: |
           code=0
-          python -u tools/postgres.py --version "${{ matrix.major }}" --out dist || code=$?
+          python -u tools/${{ matrix.target.recipe }} --version "${{ matrix.major }}" --out dist || code=$?
           if [ "$code" -eq 75 ]; then
             echo "::notice::no PostgreSQL ${{ matrix.major }} for ${{ matrix.target.os }}/${{ matrix.target.arch }}; nothing to pack"
             echo "skipped=true" >> "$GITHUB_OUTPUT"
@@ -96,7 +110,8 @@ jobs:
           fi
           exit "$code"
         # Generous for a borrow, because the download is what takes the time: EDB's archives are
-        # 330–440 MB each, of which this recipe unpacks about a fifth.
+        # 330–440 MB each, of which that recipe unpacks about a fifth, and the `.deb` legs fetch a
+        # 22 MB package index before they fetch 10 MB of packages.
         timeout-minutes: 45
       - uses: actions/upload-artifact@v4
         if: steps.pack.outputs.skipped != 'true'
@@ -137,7 +152,7 @@ jobs:
             if ! gh release view "$tag" >/dev/null 2>&1; then
               gh release create "$tag" \
                 --title "PostgreSQL $version" \
-                --notes "Relocatable PostgreSQL $version for MixEngine, repacked from EnterpriseDB's binary archives — one Windows x86_64 zip and one universal macOS zip, which is why both Apple cells carry the same build proven separately on each. pgAdmin, StackBuilder, the headers, the static and import libraries, PGXS and the procedural languages that need an interpreter nobody installed are not shipped; every one of them is named in upstream.removed. EDB publishes no checksum for these archives, which upstream.verified_against says in those words. Every artifact was run as a database from a directory it had been moved to before being published — a cluster bootstrapped with initdb, the server started against a rendered postgresql.conf, pg_isready answered, a row written and read back, hstore and pgcrypto created and used, and the server stopped with pg_ctl stop -m fast — see mixengine-artifact.json inside each one for what was proven."
+                --notes "Relocatable PostgreSQL $version for MixEngine, repacked from two publishers because no one of them covers the table. Windows and macOS come from EnterpriseDB's binary archives — one Windows x86_64 zip and one universal macOS zip, which is why both Apple cells carry the same build proven separately on each; EDB publishes no checksum for those, and upstream.verified_against says so in those words. Both Linux cells come from the PostgreSQL project's own apt repository, where a signed Release file states the digest of the package index and the index states the digest of every package, and where every minor ever published is still kept. pgAdmin, StackBuilder, the headers, the static and import libraries, PGXS, the LLVM JIT that only one publisher offers, and the procedural languages that need an interpreter nobody installed are not shipped; every one of them is named in upstream.removed. All five cells offer the same commands and the same extensions, which tools/parity.py checks rather than assumes. Every artifact was run as a database from a directory it had been moved to before being published — a cluster bootstrapped with initdb, the server started against a rendered postgresql.conf, pg_isready answered, a row written and read back, hstore and pgcrypto created and used, and the server stopped with pg_ctl stop -m fast — see mixengine-artifact.json inside each one for what was proven, and its requires field for what it expects the machine to have."
             fi
             gh release upload "$tag" "${assets[@]}" --clobber
           done

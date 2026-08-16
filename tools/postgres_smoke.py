@@ -71,10 +71,15 @@ from pathlib import Path
 import borrow
 
 # Where each command lives inside the tree, by the name MixEngine knows it under. A list, as in
-# `mariadb_smoke.LAYOUT`, because the routes do not agree: EDB puts everything in `bin/`, and a tree
-# rearranged from Debian's packages has the server under `lib/postgresql/<major>/bin/` with only the
-# client tools in `bin/`. Nothing here guesses — `find` takes the first spelling that exists and
-# `describe` fails naming what it looked for.
+# `mariadb_smoke.LAYOUT`, because a route is free to disagree — `find` takes the first spelling that
+# exists and `describe` fails naming what it looked for.
+#
+# **Every route has one spelling all the same, and the Debian one buys it with a symlink.** Debian
+# keeps all thirty-six programs, server and client alike, in `/usr/lib/postgresql/<major>/bin`, and
+# `postgres_deb` has to keep them there — see its docstring for the one function in PostgreSQL that
+# makes that mandatory rather than tidy. So it lays `bin` as a link to that directory, and the
+# manifests of all three cells say `bin/postgres` rather than three things a daemon would have to
+# tell apart.
 LAYOUT = {
     "postgres": ["bin/postgres"],
     "initdb": ["bin/initdb"],
@@ -99,13 +104,20 @@ LAYOUT = {
 # server.
 REQUIRED = ("postgres", "initdb", "pg_ctl", "psql", "pg_isready")
 
-# **The two halves an extension needs, and they are in different places on the two archives EDB
-# publishes.** Windows puts its modules straight in `lib/` and its share tree at `share/`; macOS puts
-# modules in `lib/postgresql/` and the whole share tree under `share/postgresql/`, beside a
-# `share/man` that belongs to nothing. `pg_config --pkglibdir` would answer this and is not shipped
-# — see the note on `pg_config` in `postgres.prune` — so the layout is read off the tree.
-MODULES = ("lib/postgresql", "lib")
-SHARE = ("share/postgresql", "share")
+# **The two halves an extension needs, and the three routes here put them in three places.** Windows
+# puts its modules straight in `lib/` and its share tree at `share/`; EDB's macOS zip puts modules in
+# `lib/postgresql/` and the whole share tree under `share/postgresql/`; a tree rearranged from
+# Debian's packages keeps `/usr`'s own shape — `lib/postgresql/<major>/lib` and
+# `share/postgresql/<major>` — because that is what makes upstream's binaries find their own share
+# directory, which `postgres_deb` explains at length. `pg_config --pkglibdir` would answer this and
+# is not shipped — see the note on `pg_config` in `postgres.prune` — so the layout is read off the
+# tree, most specific spelling first.
+#
+# `CONTROLS` names the extension directory itself rather than the share root above it. That is the
+# thing every caller actually wanted, and naming it directly is what keeps `share/postgresql/*` from
+# matching `share/postgresql/extension` on the one route where the major is not in the path.
+MODULES = ("lib/postgresql/*/lib", "lib/postgresql", "lib")
+CONTROLS = ("share/postgresql/*/extension", "share/postgresql/extension", "share/extension")
 
 # The database the smoke test creates. Named for what it is, so a data directory left behind by a
 # failed run on somebody's machine says where it came from.
@@ -150,11 +162,15 @@ def describe(tree: Path, windows: bool) -> dict[str, str]:
 
 
 def where(tree: Path, candidates: tuple[str, ...]) -> Path | None:
-    """The first of *candidates* this tree actually has. See :data:`MODULES` and :data:`SHARE`."""
-    for relative in candidates:
-        path = tree / relative
-        if path.is_dir():
-            return path
+    """The first of *candidates* this tree actually has. See :data:`MODULES` and :data:`CONTROLS`.
+
+    Patterns rather than paths, because one of the three routes puts the major version in the middle
+    of both of them and a table cannot name a number it will only learn at run time.
+    """
+    for pattern in candidates:
+        for path in sorted(tree.glob(pattern)):
+            if path.is_dir():
+                return path
     return None
 
 
@@ -168,10 +184,14 @@ def extensions(tree: Path) -> list[str]:
     cell of a version and absent from the other, which is exactly the shape ``tools/parity.py``
     exists to fail on. The recipe removes it from both rather than adding it to one, because a
     third route packing PostgreSQL from Debian's packages could never have it at all.
+
+    That third route has since been packed, and it agrees: Debian's own ``postgresql-18`` offers
+    exactly the 46 these two archives were cut down to, with nothing on either side of the
+    difference. Two packagers who share no build system arriving at the same set is the closest this
+    repository gets to a second opinion on what a version means.
     """
-    share = where(tree, SHARE)
-    directory = share / "extension" if share else None
-    if not directory or not directory.is_dir():
+    directory = where(tree, CONTROLS)
+    if not directory:
         return []
     return sorted(path.stem for path in directory.glob("*.control"))
 

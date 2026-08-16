@@ -15,8 +15,9 @@ Every row of the runtime table is packed, and every service row that has been ev
 Every recipe now conforms to the rule and there is a program that says so. What is *not* done is the
 **repack**: the artifacts on the releases page were packed before P2–P5, and `tools/parity.py` names
 every one of those differences on every run. P6 below is what it says and what it does not.
-PostgreSQL is the first row packed *after* it, and the difference shows: the rule caught an
-asymmetry inside EDB's own release before anything was published.
+PostgreSQL is the first row packed *after* it, and the difference shows twice: the rule caught an
+asymmetry inside EDB's own release before anything was published, and when a second publisher was
+added for the same version it had something to be checked against rather than only a recipe's word.
 
 | Kind | Cells | Recipes | Conforms |
 | --- | --- | --- | --- |
@@ -26,7 +27,7 @@ asymmetry inside EDB's own release before anything was published.
 | Ruby | 3.2 – newest, 6 targets | `ruby`, `ruby_unix` | yes — P5, P5a and P5b |
 | Caddy | 2.0 – newest, 6 targets | `caddy` | yes |
 | MariaDB | 10.6 – newest, 6 targets | `mariadb`, `mariadb_deb`, `mariadb_build` | yes — it is where the rule came from |
-| PostgreSQL | 14 – newest, 3 of 6 targets | `postgres` | yes — P7, and it is the first row packed under the rule |
+| PostgreSQL | 14 – newest, 5 of 6 targets | `postgres`, `postgres_deb` | yes — P7 and P7a, and it is the first row packed under the rule |
 
 The rule was written **after** MariaDB, because MariaDB is what taught it: three routes to one
 version produced three different feature sets, and fixing that is what
@@ -904,8 +905,8 @@ than `--version`.
 ### [x] P7 — PostgreSQL: EDB's two archives, and what is actually inside them
 
 The evaluation question was Windows and macOS, and the answer moved three of the four cells it
-touched. Closed as `tools/postgres.py` and `tools/postgres_smoke.py`, with `build-postgres.yml`
-running three legs.
+touched. Closed as `tools/postgres.py` and `tools/postgres_smoke.py`. The workflow it added ran three
+legs; P7a below took it to five.
 
 #### What the catalogue actually says
 
@@ -920,7 +921,7 @@ would have been wrong about most of it.
   say. Read out of the file's own header, four bytes at a time, over an HTTP range request — the
   archive is 445 MB and this cost 64 KB.
 * **Linux** — `…-linux-x64-binaries.tar.gz` answers 403 for every version tried. EDB stopped. That
-  is P7a.
+  became P7a, which packs both Linux cells from the project's own `.deb` packages instead.
 * **Windows on ARM** — nothing, from anybody. P7b.
 * **The version catalogue and the end-of-life dates are one document**, `versions.json`, which states
   every major, its newest minor, whether it is supported and the day support ends. The same trade
@@ -1040,20 +1041,110 @@ land on **46**, which is what the Windows artifact actually shipped. The second 
 `extract`'s permission bits and symlinks come out right, and whether a universal build's arm64 slice
 starts on an arm64 runner.
 
-### [ ] P7a — PostgreSQL on Linux, from apt.postgresql.org
+### [x] P7a — PostgreSQL on Linux, from the project's own packages
 
-The cell P7's evaluation moved rather than filled. EDB's `linux-x64-binaries.tar.gz` answers 403 at
-every version, and the PostgreSQL project publishes source only — so the route is the one MariaDB's
-aarch64 cell already takes, and it is *better supported* here than it was there: `apt.postgresql.org`
-publishes `postgresql-<major>` for **amd64 and arm64 alike**, with a SHA256 per file in a `Packages`
-index signed by the repository's own key, which is a digest from the publisher that P7 does not have.
+The two cells P7's evaluation moved rather than filled, and it turned out to be one task rather than
+two: `apt.postgresql.org` builds `amd64` and `arm64` alike, so a single recipe covers both. Closed as
+`tools/postgres_deb.py`, with `build-postgres.yml` grown from three legs to five.
 
-Three things this owes beyond the rearrangement. The Debian layout puts the server under
-`lib/postgresql/<major>/bin` and the client tools in `bin`, which `postgres_smoke.LAYOUT` already
-expects and nothing has yet exercised. The packages split what EDB ships as one archive —
-`postgresql-<major>`, `postgresql-client-<major>`, `libpq5` and the contrib modules — so *which
-packages* make one artifact is the decision, and `parity.py` is what will say whether the answer
-matches the cells P7 packed. And the glibc floor is the runner's, as it is for `mariadb_deb.py`.
+#### It is the best-checked download in this repository, and P7 is the worst
+
+EDB publishes no digest at all — P7 says so in `verified_against` because there was nothing else
+honest to say. This route has two links and follows both: the suite's `Release` file states the
+SHA256 of the `Packages` index, and `Packages` states the SHA256 of every `.deb` in it. Nothing is
+taken on trust but TLS to the project's own host, and a broken link is a stopped run rather than a
+quiet substitution. That the *same database* arrives one way with a chain and the other way with
+none is worth leaving visible in the two manifests rather than smoothing over.
+
+**And it is `apt-archive.postgresql.org`, not `apt.postgresql.org`.** The live repository keeps
+roughly the last three minors of a major and drops the rest — at the time of writing its `jammy-pgdg`
+suite offers 18.3, 18.4 and 18.6 and nothing before them, which would make this index's promise that
+a blueprint pinning 18.4 keeps working true for about four months. The archive host keeps every build
+ever pushed, twenty-five of PostgreSQL 14 alone, and is still written to daily, so using it for
+current versions costs nothing. The same trade `mariadb_deb.py` makes between `deb.mariadb.org` and
+`archive.mariadb.org`, and it is the second time the live/archive distinction has decided a recipe.
+
+#### The layout may not be rearranged, and MariaDB's answer is the opposite one
+
+This is the finding, and the roadmap had it backwards: it said the Debian layout "puts the server
+under `lib/postgresql/<major>/bin` and the client tools in `bin`", which is wrong — all thirty-six
+programs are under `lib/postgresql/<major>/bin` — and it assumed the tree would be rearranged into
+one shape the way `mariadb_deb.py` rearranges its packages into upstream's bintar layout.
+
+It cannot be. MariaDB is *told* where it lives, through `--basedir`, so its payload can be moved
+anywhere and still resolve. PostgreSQL is told nothing and works it out, in `make_relative_path` in
+`src/port/path.c`: it takes the `bindir` and `sharedir` compiled into the binary, strips the prefix
+they share, and then requires the directory it is **actually running from to end in what is left**.
+Debian configures `--bindir=/usr/lib/postgresql/18/bin --datadir=/usr/share/postgresql/18`, so what
+is left is `lib/postgresql/18/bin`; a `postgres` moved to a plain `bin/` does not end in that, the
+tail match fails, and the binary silently falls back to the absolute `/usr/share/postgresql/18` that
+no artifact has. It would still start. `initdb` would work on the packager's machine and fail on
+every other one — the exact failure shape this repository packs artifacts to avoid.
+
+So the tree keeps Debian's `/usr` shape exactly, and `bin` is laid over it as a **symlink**, which
+`find_my_exec` resolves before it measures anything. All five cells now report `bin/postgres` and
+upstream's binaries still find their own share directory. Two consequences worth having written down:
+
+* **The symlink goes on after `relocate.bundle`, not before**, and that order is a finding rather
+  than a style. `$ORIGIN` in an ELF search path is the *resolved* directory of the object being
+  loaded, so a `bin` link laid first makes `relocate.rewrite` compute `$ORIGIN/../lib` from a path
+  the loader never uses — pointing at `lib/postgresql/<major>/lib`, which holds the extension modules
+  and no bundled library at all. Everything resolves on the packing machine, where the distribution's
+  own copies are still installed, and nothing resolves on a user's.
+* **`postgres_smoke` learned to glob.** `MODULES` and the new `CONTROLS` are patterns rather than
+  paths because one of the three routes puts the major version in the middle of both, and a table
+  cannot name a number it will only learn at run time. `postgres.PRUNE` became patterns for the same
+  reason, with `**` so that one entry covers all three depths — writing them out is how that list
+  came to have two spellings of `man` and not the third.
+
+#### Two things left out that no check could have caught
+
+`postgresql-<major>-jit` is PostgreSQL's LLVM expression compiler, and Debian is the only publisher
+here that offers one: EDB's Windows archive has no JIT provider and its macOS archive has only the
+headers, which this repository drops with the rest of the SDK. Taking it on Linux alone would make
+`jit = on` — PostgreSQL's own default — mean *compile the query* on two cells of a version and not on
+the other three, with no error and no log line either way. `sepgsql` is the same shape one size
+smaller: built on Linux only, useless without an SELinux policy loaded, and the one module in
+Debian's set neither EDB archive has.
+
+Neither is a command nor an extension, so `parity.py` is blind to both. That is the point of writing
+them down here: the program covers what it covers, and a row is still allowed to need a decision the
+program cannot make.
+
+#### One thing this cell needs that its siblings carry
+
+Debian builds `--with-system-tzdata`, so the 646 files of timezone data are not in the archive — and
+cannot be put there, because the compiled-in `/usr/share/zoneinfo` is the one path PostgreSQL never
+relocates. Copying the files in would produce a directory the server does not open. It is named in
+`requires` beside the glibc floor, which is where `php_windows.py` already puts `vcredist`: a
+dependency a user already has is a fact to state, not a reason to refuse a cell.
+
+#### The proof, and the part of it that ran here
+
+The claim is P7's, unchanged and now exercised by a second producer: `initdb` through
+`pg_ctl stop -m fast`, with `hstore` and `pgcrypto` created and used. Only a Linux runner can run it.
+
+What *was* run here is the half that decides whether the artifact is the same PostgreSQL. The three
+packages were downloaded, the rearrangement and `postgres.prune` were run against them offline, and
+the resulting tree was read by the same `describe` and `extensions` the EDB route uses: **15 commands
+and 46 extensions, and against the published Windows cell the difference is empty in both directions
+and both ways round.** `parity.across` over the three cells reports no problems. Two packagers who
+share no build system arriving at the same 46 is the closest this repository gets to a second opinion
+on what a version means — and it is also the strongest evidence yet that P7's own pruning was right,
+since Debian threw out the procedural languages by never putting them in the package.
+
+The same refactor was re-run against the EDB archive P7 packed from, and it produces P7's answer
+exactly: the same 137 paths in `upstream.removed`, the same 15 `provides`, the same 46 extensions,
+the same `extension_dir`. `parity.py` over the whole published catalogue still reports its 370.
+
+#### Where the licence collection now lives
+
+`bundled_licences` and `licence_texts` moved from `mariadb.py` to `relocate.py`. Nothing in them was
+ever about MariaDB; they were there because MariaDB was the first kind to bundle a system library,
+and the moment a second one did the choice was to import a database module from a database module or
+to put them beside `relocate.bundle` — the function that creates the obligation and that already
+answers with *where each library came from* for no other purpose than this. Three call sites moved
+with them and nothing else changed.
 
 ### [ ] P7b — PostgreSQL: Windows on ARM, and the second slice of a universal build
 

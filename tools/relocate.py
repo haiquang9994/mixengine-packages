@@ -595,6 +595,102 @@ def floor(tree: Path, directories: Sequence[str] = BINARY_DIRECTORIES) -> tuple[
     return ("glibc", measured) if measured else None
 
 
+# ---------------------------------------------------------------------------------- licences ---
+#
+# **Beside `bundle`, because `bundle` is what creates the obligation.** These lived in `mariadb.py`
+# and were called by three MariaDB recipes; nothing in them is about MariaDB, and the moment a
+# fourth kind bundled its first system library the choice was to import a database module from a
+# database module or to put them where they belong. `bundle` already answers with *where each
+# library came from* for no other purpose than this.
+
+# Where a licence text sits once it is installed, in the two shapes this repository meets: at the root
+# of a Homebrew keg, and under `share/doc/<anything>/` — Debian's spelling and also where several
+# formulas put theirs. Globbed rather than named because projects disagree about `LICENSE`, `LICENCE`,
+# `COPYING` and every suffix of each.
+LICENCE_GLOBS = ("LICENSE*", "LICENCE*", "COPYING*", "COPYRIGHT*", "copyright")
+
+
+def dpkg_owner(path: Path) -> str | None:
+    """Which Debian package installed this file, if the machine can say."""
+    try:
+        result = subprocess.run(["dpkg", "-S", str(path)], capture_output=True, text=True,
+                                timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 or ":" not in result.stdout:
+        return None
+    # `libssl3:arm64: /usr/lib/...` on a multi-arch system; the qualifier is not part of the name,
+    # and `/usr/share/doc` is filed under the bare one.
+    return result.stdout.split(":", 1)[0].strip() or None
+
+
+def licence_texts(origin: Path) -> list[tuple[str, Path]]:
+    """The licence files belonging to a library at ``origin``, as ``(who it belongs to, file)``."""
+    real = origin.resolve()
+    places: list[Path] = []
+    owner: str | None = None
+
+    if "/Cellar/" in str(real):
+        # **The keg, not the formula directory.** Walking up until the parent is `Cellar` stops at
+        # `/opt/homebrew/Cellar/snappy`, which holds version directories and no files — which is how
+        # six Homebrew libraries came to be bundled into the macOS artifacts with `licenses/` holding
+        # nothing but MariaDB's own. One level lower is `.../snappy/1.2.2`, where the files are.
+        keg = real
+        while keg.parent.parent.name != "Cellar" and keg.parent != keg:
+            keg = keg.parent
+        owner = keg.parent.name
+        places = [keg] + sorted(p for p in keg.glob("share/doc/*") if p.is_dir())
+    else:
+        owner = dpkg_owner(real) or dpkg_owner(origin)
+        if owner:
+            places = [Path("/usr/share/doc") / owner]
+
+    found: list[tuple[str, Path]] = []
+    for place in places:
+        for pattern in LICENCE_GLOBS:
+            for text in sorted(place.glob(pattern)):
+                if text.is_file():
+                    found.append((owner or "unknown", text))
+    return found
+
+
+def bundled_licences(tree: Path, bundled: dict[str, Path]) -> None:
+    """Ship the licence of every library :func:`bundle` put beside the payload.
+
+    **Decided once for the same reason each recipe's `prune` is.** :func:`bundle` already answers
+    with where each library came from precisely so that its caller can do this, and only the macOS
+    recipe tried — with a walk that stopped one directory too high, so it collected nothing and said
+    nothing. The Linux recipes bundle between eighteen and twenty-two system libraries apiece and
+    never looked at all: OpenSSL, PCRE2, lz4, lzo, snappy and zstd travel inside these artifacts, and
+    several of those licences require their text to travel with them. That is a condition of
+    redistributing the archive, not tidiness, so a library whose licence cannot be found is a failure
+    and not a warning — a warning is what the last one was.
+    """
+    if not bundled:
+        return
+    licences = tree / "licenses"
+    licences.mkdir(exist_ok=True)
+
+    rows, unlicensed = [], []
+    for name, origin in sorted(bundled.items()):
+        rows.append(f"{name}\t{origin}")
+        texts = licence_texts(origin)
+        if not texts:
+            unlicensed.append(f"{name} (from {origin})")
+            continue
+        for owner, text in texts:
+            shutil.copy2(text, licences / f"{owner}-{text.name}")
+
+    (licences / "BUNDLED.tsv").write_text(
+        "library\tbuilt from\n" + "\n".join(rows) + "\n", encoding="utf-8"
+    )
+    if unlicensed:
+        raise SystemExit(
+            "no licence text found for a bundled library, and the archive may not be redistributed "
+            "without one: " + "; ".join(unlicensed)
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tree", type=Path, help="the directory to make self-contained")

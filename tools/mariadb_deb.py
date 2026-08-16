@@ -483,7 +483,7 @@ def main() -> None:
     # The copyright files collected in `rearrange` cover the MariaDB packages this recipe unpacked.
     # These are the runner's own libraries, which arrived from a different twenty-odd packages and
     # are just as much inside the artifact. Same rule, same directory.
-    mariadb.bundled_licences(tree, added)
+    relocate.bundled_licences(tree, added)
 
     manifest = {
         "schema": 1,

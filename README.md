@@ -471,7 +471,7 @@ installer's payload rather than a server.
 | --- | --- | --- |
 | Windows x86_64 | **14 – newest** | **borrowed** — EDB's `postgresql-<version>-<n>-windows-x64-binaries.zip` |
 | macOS aarch64, x86_64 | **14 – newest** | **borrowed** — one `osx-binaries.zip`, a **universal** build serving both cells |
-| Linux x86_64, aarch64 | — | EDB stopped publishing Linux tarballs; from `apt.postgresql.org`'s own packages, still to do |
+| Linux x86_64, aarch64 | **14 – newest** | **borrowed, rearranged** — the project's own `.deb` packages from `apt-archive.postgresql.org` |
 | Windows aarch64 | — | nobody publishes one |
 
 **The floor is where the archive changes shape.** EDB's macOS zip for 13 is a thin x86_64 Mach-O and
@@ -529,6 +529,45 @@ does not stem — **and exits zero**. The same artifact on two developers' machi
 databases that answer differently. The check states `--locale=C -E UTF8` so it is reproducible; what
 that teaches the daemon is that it has to choose, because the default is whatever the machine is.
 
+#### The Linux cells, where the publisher is the project and the layout may not be touched
+
+EDB never built the Linux tarball the runtime table promised, so both Linux cells come from
+`apt.postgresql.org` instead — run by the same people who tag the releases, built for `amd64` and
+`arm64` alike, and **better checked than the archives above**: a `Release` file states the digest of
+the package index and the index states the digest of every package, so both links are followed where
+EDB offers none at all. The packages are taken from `apt-archive.postgresql.org`, because the live
+repository keeps roughly the last three minors of a major and drops the rest, and this index promises
+that a blueprint pinning 18.4 keeps working. The same trade `mariadb_deb.py` makes between
+`deb.mariadb.org` and `archive.mariadb.org`.
+
+**Where this reverses MariaDB's answer is the layout.** MariaDB's `.deb` route rearranges upstream's
+packaging into upstream's own bintar shape, because a MariaDB is *told* where it lives —
+`--basedir`. PostgreSQL is told nothing and works it out, in `make_relative_path` in
+`src/port/path.c`: it strips the shared part of the `bindir` and `sharedir` compiled into the binary
+and then requires the directory it is actually running from to **end in what is left**. Debian
+configures `--bindir=/usr/lib/postgresql/18/bin`, so what is left is `lib/postgresql/18/bin`, and a
+`postgres` moved to a plain `bin/` does not end in that: the match fails, the binary falls back to
+the absolute `/usr/share/postgresql/18` no artifact has, and `initdb` then fails on every machine
+except the packager's own. So the tree keeps Debian's `/usr` shape exactly and lays `bin` over it as
+a symlink — which `find_my_exec` resolves *before* it measures anything, so all five cells report
+`bin/postgres` and upstream's binaries still find their own share directory.
+
+Two more decisions that are the rule rather than the packaging. `postgresql-<major>-jit` is left out:
+Debian is the only publisher here that offers an LLVM JIT, and taking it would make `jit = on` —
+PostgreSQL's own default — mean *compile the query* on one cell of a version and not on the other
+four, with no error and no log line either way. `sepgsql` goes for the same reason one step smaller.
+Neither is a command or an extension, so `tools/parity.py` could never have caught either: this is
+the rule applied by hand where the check cannot reach. What the check *can* see, it saw — Debian's
+`postgresql-18` offers exactly the 46 extensions the two EDB archives were cut down to, with nothing
+on either side of the difference, which is the closest this repository gets to a second opinion on
+what a version means.
+
+And one thing this cell needs that its siblings carry: Debian builds `--with-system-tzdata`, so the
+646 files of timezone data are not in the archive and cannot be put there — the compiled-in
+`/usr/share/zoneinfo` is the one path PostgreSQL never relocates. It is named in `requires` beside
+the glibc floor, because a dependency a user already has is a fact to state rather than a reason to
+refuse.
+
 ## Repack, do not rearrange
 
 A borrowed artifact keeps the directory layout its publisher shipped. It is tempting to normalise
@@ -585,8 +624,9 @@ python tools/mariadb.py --version 11.8 --out dist/        # Windows x86_64, Linu
 python3 tools/mariadb_deb.py --version 11.8 --out dist/   # Linux aarch64, out of upstream's .deb
 python tools/mariadb_build.py --version 11.8 --out dist/  # macOS, and Windows on ARM64
 
-# PostgreSQL: EDB's binaries on Windows and macOS, most of which is never unpacked
-python tools/postgres.py --version 18 --out dist/
+# PostgreSQL: two recipes, because the project publishes no binaries of its own
+python tools/postgres.py --version 18 --out dist/         # EDB's, most of which is never unpacked
+python3 tools/postgres_deb.py --version 18 --out dist/    # Linux, out of the project's own .deb
 
 # Then regenerate and sign the index from what the releases actually contain
 python tools/mkindex.py --base-url … --out dist/index.json
@@ -605,19 +645,25 @@ versions — `all` expands to every supported series — because MariaDB maintai
 end-of-life dates years apart, so a workflow that took one version would have to be invoked four
 times and would miss one.
 
-`build-postgres.yml` takes a list for the same reason and has the opposite shape otherwise: one
-recipe across **three** legs, because that is how many cells anybody publishes a binary for. The two
-macOS legs download the same universal archive, which looks wasteful and is the point — what each
-one proves is that *this* Mach-O slice starts and serves on *this* machine, and a single leg
-producing both artifacts could only ever have run one of them.
+`build-postgres.yml` takes a list for the same reason, and runs **two** recipes across five legs: EDB
+builds three of the six cells and the project's own `.deb` packages cover two more, leaving Windows
+on ARM as the only cell nobody publishes anything for. The two macOS legs download the same universal
+archive, which looks wasteful and is the point — what each one proves is that *this* Mach-O slice
+starts and serves on *this* machine, and a single leg producing both artifacts could only ever have
+run one of them.
 
-The five borrowed recipes share `tools/borrow.py` — downloading, hashing, unwrapping the publisher's
+The borrowed recipes share `tools/borrow.py` — downloading, hashing, unwrapping the publisher's
 wrapper directory where there is one, packing, and running a program with a `PATH` the runner cannot
-answer. What none of them share is the smoke test, deliberately: the mechanics are the same for every
-publisher and the *claim* is not, and this repository has already been bitten once by two producers
-writing the same manifest field to mean two different strengths of proof. The one exception proves
-the rule — `tools/ruby_smoke.py` is shared by the two Ruby recipes precisely *because* they produce
-the same runtime for one table row, so there the claim is the thing that must not differ.
+answer. What no two *kinds* share is the smoke test, deliberately: the mechanics are the same for
+every publisher and the *claim* is not, and this repository has already been bitten once by two
+producers writing the same manifest field to mean two different strengths of proof.
+
+Inside a kind the opposite holds, and for the same reason read backwards. `ruby_smoke.py` is shared
+by the two Ruby recipes, `mariadb_smoke.py` by three and `postgres_smoke.py` by two, precisely
+*because* each set produces one runtime for one row of the table: two producers of the same thing
+that check it differently will drift, and the drift is invisible because they agree on the field
+name. Where the routes disagree about a tree's shape the shared module carries every spelling — see
+`postgres_smoke.LAYOUT`, which is a table of them and not an `if`.
 
 ## The signing key
 

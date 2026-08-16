@@ -12,9 +12,9 @@ rather than read off a download page:
   download serves two cells, which no other recipe in this repository can say.
 * **Linux** — ``…-linux-x64-binaries.tar.gz`` answers 403 for every version tried. EDB stopped
   publishing it, and the PostgreSQL project itself publishes source and nothing else. The route left
-  is the one MariaDB's aarch64 cell already takes: rearranging Debian's own packages, which
-  ``apt.postgresql.org`` publishes for amd64 **and** arm64 with a SHA256 per file in its ``Packages``
-  index. That is a recipe of its own and is P7a.
+  is the one MariaDB's aarch64 cell already takes: the project's own ``.deb`` packages, published for
+  amd64 **and** arm64 with a SHA256 per file in a ``Packages`` index whose own digest a ``Release``
+  file states. That is :mod:`postgres_deb`, and it is a better-checked download than this one.
 * **Windows on ARM** — nothing, from anybody. An empty cell, and P7b.
 
 Three decisions this recipe is answerable for.
@@ -109,8 +109,13 @@ UNWANTED = ("pgadmin", "stackbuilder", "doc", "include", "symbols")
 # regression harness (`pg_regress`, `isolationtester`) beside them. A user compiling an extension
 # needs it *and* the headers that are not here, so shipping half of it would ship something that
 # cannot work. `pkgconfig` is the same fact in a `.pc` file.
-PRUNE = ("share/man", "share/doc", "share/postgresql/man", "share/postgresql/doc",
-         "lib/pkgconfig", "lib/postgresql/pgxs", "lib/pgxs")
+#
+# **Patterns rather than paths, and `**` rather than three spellings of each.** The three routes that
+# produce a PostgreSQL disagree about depth and about nothing else: EDB's Windows zip has
+# `share/man`, its macOS zip has `share/postgresql/man`, and a tree rearranged from Debian's packages
+# has `share/postgresql/<major>/man`. `**` matches zero directories as well as several, so one entry
+# is all three. Writing them out instead was how this list came to have two of the three.
+PRUNE = ("share/**/man", "share/**/doc", "lib/**/pkgconfig", "lib/**/pgxs")
 
 # **What MixEngine does not ship, stated once so that the cells of one version contain the same
 # PostgreSQL.** Every entry is here because it fails one of two tests: it is not part of PostgreSQL,
@@ -137,6 +142,13 @@ NOT_SHIPPED = (
     # each other — 18.6 ships `system_stats.control` on macOS and not on Windows, which is one
     # version meaning two things inside a single publisher's own release.
     "pldbgapi*", "plugin_debugger*", "system_stats*",
+    # **And `sepgsql`, which is upstream's and which only one of the three routes even has.** It is
+    # built on Linux alone, it is the one module in Debian's set that neither EDB archive contains,
+    # and it does nothing on a machine without an SELinux policy loaded and `shared_preload_libraries`
+    # naming it — which is not a machine anyone runs a local development environment on. It ships no
+    # control file either, so `parity.py` would never have seen the difference: this is the rule
+    # applied by hand where the check cannot reach.
+    "sepgsql*",
     # The test suite's modules and harness, which live beside the real ones rather than in a
     # directory of their own. `test_decoding` is upstream's *example* logical-decoding plugin —
     # `pgoutput` is the one replication actually uses and it stays — and `test_cloexec` and
@@ -318,14 +330,18 @@ def prune(tree: Path) -> list[str]:
     route does about its own layout stays with the route.
     """
     removed = []
-    for relative in PRUNE:
-        path = tree / relative
-        if path.is_dir():
-            shutil.rmtree(path, ignore_errors=True)
-            removed.append(relative)
-        elif path.is_file():
-            path.unlink()
-            removed.append(relative)
+    for pattern in PRUNE:
+        # `sorted` so that a tree with two matches removes them in a stated order, and the *matched*
+        # path is what goes into `upstream.removed` rather than the pattern: a reader holding the
+        # publisher's archive and this one is comparing paths, not globs.
+        for path in sorted(tree.glob(pattern)):
+            relative = str(path.relative_to(tree)).replace("\\", "/")
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+                removed.append(relative)
+            elif path.is_file():
+                path.unlink()
+                removed.append(relative)
 
     for pattern in NOT_SHIPPED + DEBRIS:
         for path in sorted(tree.rglob(pattern)):

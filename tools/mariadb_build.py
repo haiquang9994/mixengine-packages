@@ -355,9 +355,10 @@ def collect_licences(tree: Path, source_tree: Path, bundled: dict[str, Path]) ->
         if (source_tree / name).is_file():
             shutil.copy2(source_tree / name, licences / f"mariadb-{name}")
 
-    # The bundled half is `mariadb.bundled_licences`, shared with the two Linux recipes, because the
-    # walk that used to live here stopped one directory above the files and collected nothing.
-    mariadb.bundled_licences(tree, bundled)
+    # The bundled half is `relocate.bundled_licences`, shared with every recipe that bundles at all,
+    # because the walk that used to live here stopped one directory above the files and collected
+    # nothing.
+    relocate.bundled_licences(tree, bundled)
 
 
 def main() -> None:
