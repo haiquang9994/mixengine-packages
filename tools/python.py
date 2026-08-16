@@ -20,7 +20,8 @@ is a two-line batch file written here rather than the post-install hook
 :func:`prune`. Upstream builds tkinter into every cell and builds a *different* tkinter into each
 half — Tk 8.6 and Tix on Windows, Tk 9.0 with itcl and the Tcl Thread package on Unix — so keeping
 it would be keeping two things under one version number. What is kept instead, and is normally
-surplus, is the C API: see :func:`keeps`, which states that in the artifact rather than in a comment.
+surplus, is everything a linker needs — the C API on all six cells, the shared interpreter on the
+four Unix ones: see :func:`keeps`, which states that in the artifact rather than in a comment.
 
 Everything mechanical is in :mod:`borrow`, shared with the Node.js and Ruby recipes. What stays here
 is the resolution against upstream's release and the smoke test, which is a claim about Python and
@@ -105,13 +106,6 @@ UNIX_LIB_KEEP = ("python3.*", "libpython3*", "pkgconfig")
 # `_socket.lib` and `_tkinter.lib` among them — which exist to link those modules *into* a Python
 # being built, and nothing installing a wheel or compiling an sdist has ever opened one.
 WINDOWS_IMPORT_KEEP = ("python3*.lib",)
-
-# The one path in either tree that `TOOLKIT` matches and that is not the toolkit: `share/terminfo`
-# carries ncurses' description of a terminal emulator called `tkterm`, in a database the built-in
-# `curses` reads and Tcl has never touched. Named here rather than dodged by narrowing the sweep
-# below to the directories Tcl lives in today, which would also stop it looking wherever upstream
-# moves Tcl to next — and moving Tcl is precisely what 3.14 did.
-NOT_TOOLKIT = ("share/terminfo",)
 
 # Imported from the relocated tree, and every one of them is a compiled extension module or the thing
 # that proves one works. A CPython missing any of these starts, answers `--version` correctly and
@@ -353,8 +347,9 @@ def prune(tree: Path, operating_system: str) -> list[str]:
 
     What goes with it: `libs/_tkinter.lib` and every other per-extension import library on Windows
     — 31 of them on 3.10, one per built-in module, which exist to link a module into a Python being
-    compiled and not to compile anything against one — and `share/man` on Unix, one manual page for
-    an interpreter whose Windows twin has never had one and which nothing in the tree reads.
+    compiled and not to compile anything against one — and the whole of `share/` on Unix, which is
+    a manual page the Windows twin has never had beside a terminfo database this build's own
+    ncurses does not look in. Neither is a feature; both are a directory Windows does not have.
 
     Keep-lists where the surplus is versioned in its own name (`lib/` on Unix, `libs/` on Windows)
     and names where it is not, and then **a sweep that fails the pack if any part of any path still
@@ -408,12 +403,23 @@ def prune(tree: Path, operating_system: str) -> list[str]:
                 discard(path)
         for launcher in sorted((tree / "bin").glob("idle*")):
             discard(launcher)
-        discard(tree / "share" / "man")
+        # The whole of `share/`, and not the manual page alone, because the *other* thing upstream
+        # puts there cannot be read by the archive that carries it. `share/terminfo` is 2.2 MB and
+        # 1,833 files on Linux and does not exist on the other four cells at all; the ncurses
+        # compiled into this interpreter looks for a database in `$TERMINFO`, `$TERMINFO_DIRS`,
+        # `~/.terminfo` and then the three absolute paths built into it —
+        # `/etc/terminfo:/lib/terminfo:/usr/share/terminfo`, read out of the binary's own strings —
+        # and not one of them is inside the tree. So it is answered by the machine's database or by
+        # nothing, and the copy in the archive is unreachable either way. That directory is also
+        # where the one path in either tree that `TOOLKIT` matches without being the toolkit lived,
+        # a terminal called `tkterm`; deleting the directory it is in is why the sweep below needs
+        # no exemption list, which is the better shape — an exemption is a claim that goes stale
+        # silently, and this one would have.
+        discard(tree / "share")
 
     survivors = sorted(
         relative for relative in (path.relative_to(tree).as_posix() for path in tree.rglob("*"))
         if any(TOOLKIT.match(part) for part in relative.split("/"))
-        and not relative.startswith(NOT_TOOLKIT)
     )
     if survivors:
         raise SystemExit(
@@ -445,6 +451,31 @@ def keeps(tree: Path, operating_system: str) -> dict[str, str]:
 
     Returned as a mapping and written to the manifest, because P6's within-artifact check is going
     to refuse an `include/` it was not told about, and the thing that tells it should also say why.
+
+    **The Unix entry is the largest thing this repository keeps and the hardest to justify by
+    looking at it**, so the argument is written out. ``lib/libpython3.X.so.1.0`` is 31.8 MB on
+    Linux and 17.5 MB on macOS, it is a complete second copy of an interpreter ``bin/python3.X``
+    already contains statically, and **nothing that ships in the archive loads it**: of the twelve
+    dynamically linked ELF files in a Linux tree, zero name it in ``DT_NEEDED``, and the macOS
+    binary's ``LC_LOAD_DYLIB`` list says the same. Everything about it reads like `include/node`,
+    which P3 threw out.
+
+    It stays because of what upstream ships beside it and what the tree says about itself.
+    ``lib/libpython3.X.so`` is a symlink to it — a name the runtime loader never uses, since the
+    loader goes by ``SONAME``, and that only a *linker* has any use for. ``python3-config`` is
+    built to hand that linker its path: the shell script derives the prefix from its own location
+    precisely so a moved tree still answers, and ``--ldflags --embed`` prints ``-L<tree>/lib
+    -lpython3.X``, with ``PY_ENABLE_SHARED="1"`` written into it so it will not fall back to the
+    config directory. Delete the library and every one of those keeps saying what it says. **The
+    artifact would be describing a file it does not carry**, and the only way to stop it would be
+    to rewrite `_sysconfigdata` and `python3-config`, which is editing the publisher's record of
+    its own build.
+
+    Windows settles the parity question in the same direction and has no choice about it:
+    ``python3XX.dll`` *is* the interpreter there — ``python.exe`` is a 91 KB launcher — and
+    ``libs/python3XX.lib``, kept above so a C extension can be compiled, is the same file an
+    embedder links. So two cells can embed a Python whatever this recipe does, and dropping the
+    Unix library is not a saving so much as a way of making one version mean two things again.
     """
     reasons = {
         "include": "the CPython C API headers. `pip install` of a source distribution compiles a "
@@ -458,6 +489,27 @@ def keeps(tree: Path, operating_system: str) -> dict[str, str]:
             f"against. There is no Unix counterpart because an ELF or Mach-O extension leaves "
             f"Python's symbols undefined and resolves them from the interpreter that loads it."
         )
+    else:
+        # Named off the tree rather than spelled out, because the cells spell it three ways —
+        # `libpython3.13.so.1.0`, its `libpython3.13.so` linker symlink and macOS's
+        # `libpython3.13.dylib` — and `borrow.declare` is about to check every one of them exists.
+        # The two globs are disjoint and carry different reasons: what follows `libpython3.` is a
+        # digit for the versioned library and an `s` for the stable-ABI forwarder.
+        for library in sorted((tree / "lib").glob("libpython3.[0-9]*")):
+            reasons[library.relative_to(tree).as_posix()] = (
+                "the interpreter as a shared library, which nothing in this archive loads and "
+                "which `python3-config --ldflags --embed` names anyway: upstream ships the "
+                "linker symlink beside it and writes PY_ENABLE_SHARED=1 into its own build "
+                "record, so anything embedding Python — a uWSGI compiled by `pip`, a program "
+                "linking libpython directly — is told to look here. Windows cannot drop its "
+                "equivalent at all, because there python3XX.dll is the interpreter."
+            )
+        for forwarder in sorted((tree / "lib").glob("libpython3.so")):
+            reasons[forwarder.relative_to(tree).as_posix()] = (
+                "the stable-ABI library, 20 KB of forwarding that an extension built against "
+                "`Py_LIMITED_API` links as `-lpython3`. It is what `python3.dll` is on Windows, "
+                "which is kept there for the same reason and by the same rule."
+            )
     return reasons
 
 
@@ -526,6 +578,20 @@ try:
 except ImportError as error:
     tkinter_left = None
 
+# What `python3-config --ldflags --embed` will name, computed the way that script computes it and
+# **not** the way `sysconfig` reports it: `LIBDIR` here is still the build machine's `/install/lib`,
+# while the shell script derives its prefix from its own location so a moved tree keeps answering.
+# In a moved tree that prefix is `sys.prefix`.
+#
+# Skipped on Windows by asking about the platform rather than about the variable, which is the
+# correction this check needed on its first run: `LDLIBRARY` is not absent there, it answers
+# `python313.dll` — a real file that lives at the root and not under `lib/`, described by a
+# variable that means "what a POSIX linker is given" on a platform that has neither the linker nor
+# the `python3-config` handing it over. `libs/python3XX.lib` is what is checked there, by `keeps`.
+library = None
+if os.name != "nt":
+    library = os.path.join(sys.prefix, "lib", sysconfig.get_config_var("LDLIBRARY"))
+
 report = {
     "version": ".".join(str(part) for part in sys.version_info[:3]),
     "executable": sys.executable,
@@ -537,6 +603,7 @@ report = {
     "handshake": handshake,
     "tkinter_left": tkinter_left,
     "headers": os.path.join(sysconfig.get_paths()["include"], "Python.h"),
+    "library": library,
     "trusts": {
         "cafile": paths.openssl_cafile,
         "capath": paths.openssl_capath,
@@ -592,12 +659,13 @@ def smoke(tree: Path, version: str, manifest: dict) -> dict:
     can produce.
 
     *What `prune` took out is gone, and what `keeps` kept is reachable.* ``import tkinter`` has to
-    fail, and ``Python.h`` has to be where this interpreter says its headers are. Both are the same
-    check in opposite directions, and both are the direction the file system cannot answer:
-    `borrow.declare` proves a named path is absent or present, while only the interpreter can say
-    that nothing left behind still reaches a toolkit — a frozen module, a stale ``.pyc``, a second
-    copy under another name — or that the headers a compiling ``pip install`` will look for are the
-    ones this archive carries rather than a set left on the machine by something else.
+    fail; ``Python.h`` has to be where this interpreter says its headers are; and on Unix the
+    library ``python3-config --ldflags --embed`` is about to name has to be there. All three are
+    the same check in opposite directions, and all three are the direction the file system cannot
+    answer: `borrow.declare` proves a named path is absent or present, while only the interpreter
+    can say that nothing left behind still reaches a toolkit — a frozen module, a stale ``.pyc``, a
+    second copy under another name — or that the headers and the library a build will go looking
+    for are the ones this archive carries rather than something else left on the machine.
     """
     elsewhere = borrow.moved(tree)
 
@@ -633,7 +701,19 @@ def smoke(tree: Path, version: str, manifest: dict) -> dict:
             f"this Python says its headers are at {headers}, and there is no Python.h there — "
             f"every `pip install` of a source distribution with a C extension would stop on it"
         )
-    for field in ("executable", "prefix", "site", "headers"):
+    # The same claim about the other kept thing, and the half `borrow.declare` cannot make. It
+    # proves `lib/libpython3.X.so` is in the tree; this proves the link line the interpreter's own
+    # `python3-config` hands an embedder points at it after the tree has moved, which is the only
+    # form the claim is ever used in.
+    if report["library"] is not None and not Path(report["library"]).is_file():
+        raise SystemExit(
+            f"`python3-config --ldflags --embed` will name {report['library']}, and there is no "
+            f"such file — this cell could not link an embedder that the Windows cells can"
+        )
+    inside = ["executable", "prefix", "site", "headers"]
+    if report["library"] is not None:
+        inside.append("library")
+    for field in inside:
         where = Path(report[field])
         if not where.resolve().is_relative_to(elsewhere.resolve()):
             raise SystemExit(
@@ -658,7 +738,8 @@ def smoke(tree: Path, version: str, manifest: dict) -> dict:
           f"verified a live chain against {trust(report['trusts'])} "
           f"({report['trusted']} authorities loaded eagerly)")
     ran = ["python --version", "import " + ", ".join(MODULES),
-           "python -c (execPath, ssl, sqlite3, verified https://github.com, tkinter gone, Python.h)"]
+           "python -c (execPath, ssl, sqlite3, verified https://github.com, tkinter gone, "
+           "Python.h, libpython)"]
 
     packages = site_packages(elsewhere)
     for name in sorted(set(manifest["provides"]) - {"python"}):

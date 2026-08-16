@@ -207,10 +207,12 @@ Tcl Thread package, and on 3.14 the Windows DLLs turn into Tcl 9 and carry the w
 library inside themselves. So `python 3.13.15` already meant one toolkit on one machine and a
 different one on the next. Dropping it rather than levelling it up is the rule's own test applied to
 the feature: nothing MixEngine runs draws a window, and the two things in the standard library that
-need a display are the graphical toolkit and the editor written in it. The Unix cells lose
-`share/man` with it — one manual page whose Windows twin has never existed — and the Windows cells
-lose the per-extension import libraries, 31 of them on 3.10, which link a module *into* a Python
-being compiled and are opened by nothing that installs a wheel.
+need a display are the graphical toolkit and the editor written in it. The Unix cells lose the whole
+of `share/` with it — a manual page whose Windows twin has never existed, and a 2.2 MB terminfo
+database the ncurses compiled into these very builds cannot reach, because the paths built into that
+binary are `/etc/terminfo`, `/lib/terminfo` and `/usr/share/terminfo` and none of them is inside the
+archive — and the Windows cells lose the per-extension import libraries, 31 of them on 3.10, which
+link a module *into* a Python being compiled and are opened by nothing that installs a wheel.
 
 **And one thing is kept that this document rules out everywhere else: the C API.** `include/` on all
 six cells, plus `libs/python3XX.lib` and `libs/python3.lib` on the two with a linker that needs
@@ -225,6 +227,22 @@ install. So each archive carries a top-level `keeps` in its manifest naming the 
 `borrow.declare` refuses to write a `keeps` naming something the tree does not have, and the smoke
 test proves the claim from the other side by asking the relocated interpreter where its headers are
 and finding `Python.h` there.
+
+**The second kept thing is the one that looks least defensible and is the same decision.** Every
+Unix cell carries `lib/libpython3.X.so` — 30.3 MiB on Linux, 16.7 MiB on macOS — which is a second
+complete copy of an interpreter `bin/python3.X` already contains statically, and which nothing that
+ships in the archive loads: of the twelve dynamically linked ELF files in a Linux tree, none names it
+in `DT_NEEDED`, and the macOS binary's `LC_LOAD_DYLIB` list says the same. It is kept because of what
+upstream ships beside it. There is a `libpython3.X.so` symlink whose only possible consumer is a
+linker, the runtime loader going by `SONAME` instead; `python3-config` derives its prefix from its
+own location precisely so a *moved* tree still answers, and prints `-L<tree>/lib -lpython3.X` with
+`PY_ENABLE_SHARED=1` written in so it will not look anywhere else. Delete the library and the
+artifact is describing a file it does not carry — repairable only by rewriting the publisher's record
+of its own build. Windows settles the same question with no choice in the matter, `python3XX.dll`
+being the interpreter there and `libs/python3XX.lib` the same file an embedder links, so two cells
+can embed a Python whatever anyone decides. **That is the whole of the remaining difference between
+the halves**: pruned, Linux is 33.3 MiB larger than Windows on 3.13.15 and 30.3 MiB of it is this
+file, the rest being OpenSSL and SQLite compiled in on one side and shipped as DLLs on the other.
 
 For Ruby, one of the three columns turned out to be borrowable and two did not:
 

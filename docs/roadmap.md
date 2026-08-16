@@ -18,7 +18,7 @@ What is *not* done is the rule itself.
 | --- | --- | --- | --- |
 | PHP | 7.0 – newest, 6 targets | `php_windows`, `php_unix`, `php_legacy_unix` | yes — P2 |
 | Node.js | 16 – newest, 6 targets | `node` | yes — P3 |
-| Python | 3.10 – newest, 6 targets | `python` | yes — P4, less P4a |
+| Python | 3.10 – newest, 6 targets | `python` | yes — P4 and P4a, less P4b |
 | Ruby | 3.2 – newest, 6 targets | `ruby`, `ruby_unix` | unknown — P5 |
 | Caddy | 2.0 – newest, 6 targets | `caddy` | yes |
 | MariaDB | 10.6 – newest, 6 targets | `mariadb`, `mariadb_deb`, `mariadb_build` | yes — it is where the rule came from |
@@ -35,7 +35,9 @@ rows that were packed before it existed, and P1–P6 are that work. Measured aga
 archives, the gaps were not marginal: PHP 8.3 on Windows was missing two extensions this repository
 fails a Unix build over, which P2 closed; Node.js 24.19.0 was 106 MB on Windows against 198 MB on
 Linux, which P3 closed; and CPython 3.13.15 shipped Tk 8.6 to Windows and Tk 9.0 to Unix under one
-version number, which P4 closed by shipping neither.
+version number, which P4 closed by shipping neither. Twice now the answer has been the *opposite* of
+the one the task expected — P3 kept npm's manual pages after going and reading npm, P4a keeps 30 MiB
+of a shared library nothing in the archive loads — which is what a rule is for.
 
 Nothing below is a rewrite. Every recipe already downloads, verifies, relocates, proves and packs
 correctly; what they do not do is *choose*, and choosing once is the whole of the rule.
@@ -273,7 +275,7 @@ and `prune` run against the real Linux *and* macOS tarballs of each, which is as
 machine reaches. All three manifests validate against the schema. What the gap looks like now, on
 3.13.15: Windows 59.8 MB → 48.1, Linux 93.8 → 83.5, macOS 61.4 → 52.2. What is left of it is P4a.
 
-### [ ] P4a — Python: Unix ships the interpreter twice **(rule)**
+### [x] P4a — Python: Unix ships the interpreter twice **(rule)**
 
 P4 owed an explanation of the Windows/Linux gap line by line, and produced one. After it, 35.4 MB
 of the remaining 35.4 MB is two things, both Unix-only, and neither is a feature:
@@ -296,6 +298,108 @@ database is genuinely wanted; the question is whether these builds look for it b
 at the `/tools/deps` prefix they were built under — in which case the copy in the archive is
 unreachable, the system's own database answers, and this is 1.9 MB of nothing. Settling it needs a
 Linux machine with `TERM` set and the system database moved out of the way. Windows has no `share/`.
+
+**The terminfo half needed no Linux machine after all, and the answer is that the database is
+unreachable.** ncurses does not guess where its database is; the search order is compiled into it,
+and reading the strings out of `bin/python3.13` itself gives the whole of it: `$TERMINFO`, then
+`$TERMINFO_DIRS`, then `~/.terminfo`, then the three absolute paths built in at configure time —
+`/etc/terminfo:/lib/terminfo:/usr/share/terminfo`. **Not one of them is inside the tree**, and no
+`<prefix>/share/terminfo` string exists in the binary to be found. So a MixEngine Python on Linux
+reads the machine's own database, as it would have with or without this directory, and the 2.2 MB
+and 1,833 files it ships are answered by nobody. It is also a directory *four of the six cells do
+not have* — macOS ships `share/man` and nothing else, Windows ships no `share/` at all — so this is
+the rule's first half failing quietly on one platform. The whole of `share/` goes on Unix now rather
+than `share/man` alone, and the deletion took the sweep's exemption list with it: `share/terminfo`
+was the only entry in `NOT_TOOLKIT`, the one path in either tree matching `TOOLKIT` without being
+the toolkit, and an exemption for a directory that no longer ships is exactly the stale claim
+`borrow.declare` was taught to refuse. Better to delete the directory than to keep explaining it.
+
+**The library half closed the other way, and the reversal is the point of the task.**
+`lib/libpython3.13.so.1.0` stays, on all four Unix cells, and the reason is not that the measurement
+was wrong — it is right, nothing in the archive loads that file. It is that *the archive says the
+file is there for something outside itself to link*, in three separate places, and all three are
+upstream's own words rather than an inference:
+
+* `lib/libpython3.13.so` is a **symlink** to it. The runtime loader resolves libraries by `SONAME`
+  and never looks at that name; the only program on a Unix machine that opens `libfoo.so` is a
+  linker. Upstream shipped a file whose sole consumer is `ld`.
+* `bin/python3.13-config` is written to survive relocation — it computes `prefix_real` from its own
+  path with `dirname`/`readlink` before substituting it into every variable — and `--ldflags
+  --embed` prints `-L<tree>/lib -lpython3.13`. Not a build-time path left behind; a path deliberately
+  recomputed for the tree it finds itself in.
+* `PY_ENABLE_SHARED="1"` sits in that same script and in `_sysconfigdata`, and it is the flag that
+  *suppresses* the fallback to the config directory. With it set there is nowhere else to look.
+
+Deleting the library would leave an artifact describing a file it does not carry, on three counts,
+and the only repair would be rewriting `python3-config` and `_sysconfigdata` — editing the
+publisher's record of its own build, which is a worse thing to ship than 30 MiB. Windows settles the
+parity question in the same direction with no choice at all: `python3XX.dll` **is** the interpreter
+there (`python.exe` is a 91 KB launcher) and `libs/python3XX.lib`, kept by P4 so a C extension can
+compile, is the same file an embedder links. Two cells can embed a Python whatever this repository
+decides, so dropping the Unix library would not be a saving but a way of making one version mean two
+things again — the failure P4 had just finished closing.
+
+So it is declared instead. `keeps` gains three entries per Linux cell and one per macOS cell — the
+library, its linker symlink, and `lib/libpython3.so`, the 20 KB stable-ABI forwarder that is what
+`python3.dll` is on Windows — each with the reason travelling in the manifest. **This is the case
+the field was worth building for**, and it is not the one P4 built it for: no per-artifact check
+would ever flag a `.so` in `lib/`, so nothing but a written reason could stop the next person from
+noticing 30 MiB of apparent duplication and deleting it. The smoke test proves it from the far side,
+the way it proves `Python.h`: it computes the path `python3-config` is about to hand a linker and
+requires the file to be there, after the tree has moved.
+
+That check earned itself on its first run, and on the platform it does not apply to. It first asked
+whether `sysconfig` reports an `LDLIBRARY` at all, on the assumption that Windows reports none —
+and Windows reports `python313.dll`, a real file that lives at the root rather than under `lib/`,
+described by a variable meaning *"what a POSIX linker is given"* on a platform with neither a POSIX
+linker nor a `python3-config` to hand anything over. The Windows pack failed on a file it was never
+missing. It asks about the platform now. Two other things worth keeping: `sysconfig`'s own `LIBDIR`
+is still `/install/lib`, the build machine's path, so the check has to reconstruct the directory the
+way the shell script does rather than believe what the interpreter reports; and there is no
+`libpython*.a` in any `install_only` tree, so a static link was never on the table.
+
+**And the gap P4 promised to explain line by line is now explained.** Pruned, on 3.13.15: Windows
+48.1 MiB, macOS 52.2, Linux 81.4. Linux is 33.3 MiB larger than Windows and **30.3 MiB of that is
+the library this task decided to keep**; macOS is 4.1 MiB larger while carrying a 16.7 MiB duplicate
+of its own, which is to say every other part of the macOS tree is *smaller* than its Windows twin.
+What is left over on Linux after the library — about 3 MiB — is not surplus but shape: OpenSSL,
+SQLite and the rest are compiled into the interpreter there and shipped as separate DLLs on Windows,
+which is the same feature set spelled two ways, the way P2's static-versus-shared PHP extensions
+are. There is one thing left that *is* surplus, and it is in the binaries themselves: P4b.
+
+Run against every tarball of 3.10, 3.11, 3.12, 3.13 and 3.14 on all three operating systems —
+fourteen cells, every one clean through `prune`, `keeps` and `borrow.declare` — and packed end to
+end on Windows for 3.10.21, 3.13.15 and 3.14.7, all three validating against the schema.
+
+### [ ] P4b — Python: the stripped variant is not stripped **(rule)**
+
+`tools/python.py` takes `install_only_stripped` and says why at length: *"the same tree without the
+debug symbols, and the saving is not marginal"*. Measured on the tarballs rather than on the
+release notes, that is true of the tree and **not true of the two largest files in it**. Reading
+the ELF section headers of Linux 3.13.15:
+
+| | file | in sections the loader never maps |
+| --- | --- | --- |
+| `lib/libpython3.13.so.1.0` | 31,801,480 | **11,748,357** |
+| `bin/python3.13` | 31,372,864 | **2,790,993** |
+
+14.5 MB of an 85.3 MB tree, in sections with no `SHF_ALLOC` bit — nothing in a running process ever
+reads them. Most of it is one section: `.rela.text`, 6.5 MB, which is a *relocatable object's*
+table appearing in a finished shared library, the signature of a link done with `--emit-relocs` so
+that a post-link optimiser could run. It arrived with 3.12 — 3.10 and 3.11 have none of it and only
+1.6 MB of non-allocated weight altogether — and 3.14 carries 12.2 MB, so this grows rather than
+settles. macOS is milder and the same in kind: `LC_SYMTAB` is 1.5 MB of the 3.13.15 dylib.
+
+The obvious fix is the platform's own `strip`, and it is available: `build-python.yml` runs each
+cell on its own native runner, so binutils is on the Linux legs and the Xcode tools on the macOS
+ones. Two things make it a task rather than a line in P4a. It would be the second recipe to shell
+out to a toolchain binary — PHP's `deplister.exe` is the first — and it would be the first to
+*modify* a borrowed executable rather than delete files around it, which moves the smoke test from
+"proves the archive is complete" to "is the only thing standing behind a mutated interpreter".
+And the smoke test cannot cover what P4a just kept `libpython` for: it runs the interpreter, it
+does not link anything against the library, so a `strip` that damaged the dynamic symbol table
+would pass every check in the file and fail in somebody's `pip install`. Settle what proves a
+stripped library still links before stripping one.
 
 ### [ ] P5 — Ruby: make the two recipes answer the same questions **(rule)**
 
@@ -347,8 +451,12 @@ recipe that legitimately keeps one of them declares it, and the declaration is w
 — so "no more than is needed" becomes a list somebody wrote down rather than a habit somebody
 remembers. That field now exists: P4 added a top-level `keeps`, a mapping of path to reason rather
 than a list, because a check reading a bare path can only report *declared* and the argument is the
-part worth keeping. CPython is its only writer so far — `include/` on six cells and `libs/` on two —
-and this check is what stops it from being the only reader as well.
+part worth keeping. CPython is its only writer so far — `include/` on six cells, `libs/` on two and
+the shared interpreter on four — and this check is what stops it from being the only reader as well.
+The Unix entries are also the reminder that this check will never be the whole of the field: no
+pattern above would flag a `.so` in `lib/`, and P4a declared 30 MiB of one anyway, because the
+reason it is kept is not reconstructable from the file. What the check enforces is that everything
+matching the patterns is declared; what the field is *for* is larger than that, and stays larger.
 
 Run it in `publish-index.yml`, where every artifact of a version is visible at once. An empty cell is
 not a failure — a target upstream never built is already an `exit 75`, and this must keep that
