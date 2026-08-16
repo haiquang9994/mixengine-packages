@@ -1,4 +1,4 @@
-# Redis and Memcached, where the evaluation had nothing to weigh
+# Redis and Memcached, where one cell had nothing to weigh and the other was weighed wrong
 
 *Part of [mixengine-packages](../../README.md), which holds the table of what is packaged.*
 
@@ -7,15 +7,32 @@ Memcached everywhere, and P8 was written to decide between compiling both native
 runner and declaring the cell empty. Asked rather than assumed, **there is no first option**. Redis
 8.10 has no `CMakeLists.txt`, no `win32/` directory and no project file of any kind: it is a
 `src/Makefile` around POSIX `fork()`, `epoll` and `kqueue`, and its own README lists Linux, OSX,
-OpenBSD, NetBSD and FreeBSD. memcached is autotools, with a privilege-dropping source file for each
-Unix — `linux_priv.c`, `darwin_priv.c`, `freebsd_priv.c`, `openbsd_priv.c`, `solaris_priv.c` — and
-none for Windows. Neither is a build that needs the right flags. Neither is a build that exists.
+OpenBSD, NetBSD and FreeBSD. That is not a build that needs the right flags; it is a build that does
+not exist.
+
+**The same paragraph was written about memcached, and about memcached it was wrong.** What it said
+was that memcached is autotools with a privilege-dropping source file for each Unix —
+`linux_priv.c`, `darwin_priv.c`, `freebsd_priv.c`, `openbsd_priv.c`, `solaris_priv.c` — and none for
+Windows. Every word of that describes the source tree correctly. The conclusion drawn from it does
+not follow: each of those files sits behind an `AM_CONDITIONAL` (`Makefile.am:39-57`,
+`configure.ac:841-845`) and is **off by default**, optional hardening rather than a component the
+program needs. Built under Cygwin, the generated `config.h` carries `/* #undef HAVE_DROP_PRIVILEGES
+*/` — along with `#undef` for `eventfd` and `mlockall`, each an `AC_CHECK_FUNCS` with a fallback —
+and the build completes. So the accurate sentence about memcached is **no native Win32 build
+system**, which is a fact about what upstream ships rather than about what the program can be, and
+it leaves a first option to weigh after all.
+
+Weighed, it is worth taking: on the recipe's own configure line, with no flag added and no file in
+either tarball patched, Cygwin produces a `memcached.exe` that runs as an ordinary Windows process
+from a directory the build never named, on a `PATH` holding nothing but the operating system, and
+stops on a terminate. So `windows/x86_64` is **built**, and this row is no longer two empty cells.
 
 | OS / arch | Range | How |
 | --- | --- | --- |
 | macOS aarch64, x86_64 | Redis **7.2 – newest**, memcached **1.6 – newest** | **built** — upstream publishes source only, for every platform |
 | Linux x86_64, aarch64 | ditto | ditto |
-| Windows x86_64, aarch64 | — | **upstream has no Windows build system**, and no fork of either project supplies one |
+| Windows x86_64 | memcached **1.6 – newest** | **built** — Cygwin's toolchain, the same configure line, nothing patched; `cygwin1.dll` travels with it. No Redis: there is nothing to compile it with |
+| Windows aarch64 | — | **no toolchain builds either natively** — Cygwin has no aarch64 port, and emulation is not published under an `aarch64` manifest |
 
 The three ways round it were each asked and each answers no. **Valkey**, which MixEngine's own table
 named as the alternative, is a fork of the same POSIX program and is not supported on Windows
@@ -23,9 +40,24 @@ either; its installation page sends a Windows user to WSL, which [ADR
 0003](https://github.com/haiquang9994/MixEngine/blob/master/.claude/decisions/0003-no-container-isolation.md)
 excludes. **Memurai** is proprietary, and a repository that redistributes what it packs cannot pack
 one. **The community rebuilds** are the fork nobody maintains that the plan already refused. So both
-Windows cells are stated rather than filled — and the Windows legs of both workflows run anyway and
-exit 75, because an empty cell that says so in every run's log is worth a runner minute more than a
-row somebody has to remember is missing.
+of Redis's Windows cells are stated rather than filled — and the Windows legs of its workflow run
+anyway and exit 75, because an empty cell that says so in every run's log is worth a runner minute
+more than a row somebody has to remember is missing.
+
+**memcached's `windows/aarch64` is empty for a different reason, and it is not upstream's.** Cygwin
+has no aarch64 port: the toolchain and runtime are not upstream — `aarch64-pc-cygwin` is waiting on
+GCC — and porting the packages has not started, so there is nothing to build the cell with. MSYS2
+does not answer it either; its `msys2-runtime`, which is the POSIX layer, is x86_64 only and its
+own documentation says the unixy tools go through emulation. `CLANGARM64` is native ARM64 but is
+mingw against UCRT, and memcached has no `#ifdef _WIN32` around a socket anywhere — that route is a
+patch set, and nothing in this repository is patched. What is left is the x86_64 image under
+emulation, which does work and was measured working on a `windows-11-arm` runner. It is still not
+published: an archive whose manifest says `arch: aarch64` and whose payload is x86_64 is a lie in
+the index, which is the refusal `nginx.py` already makes about its own 32-bit payload and the rule
+[building-from-source.md](../building-from-source.md) sets for the whole repository — *nothing here
+cross-compiles and nothing runs under emulation*. Installing the x86_64 archive on a Windows ARM
+machine is a decision the daemon can make in front of the user; it is not one a manifest should make
+behind them.
 
 **Redis is the first row here that spans a licence change, and it is why the floor is 7.2.** Through
 7.2 Redis is BSD-3. 7.4 is RSALv2 or SSPLv1, neither of them OSI-approved; 8.0 added AGPLv3 as a
@@ -48,10 +80,32 @@ code path serves both lines.
 
 **Neither service ships TLS**, and the consequence is the good kind: with `BUILD_TLS` off and
 `--enable-tls` unasked, `redis-server` and `memcached` import nothing outside the C runtime on Linux
-and nothing outside `libSystem` on macOS. These are the only *built* rows here that need no bundled
-libraries at all, and `relocate.verify` is what says so rather than the build flags. What TLS would
-buy is an encrypted loopback connection between two processes on one developer's machine, in
-exchange for an OpenSSL to bundle, to keep current and to measure a floor against.
+and nothing outside `libSystem` on macOS. On those four cells these are the only *built* rows here
+that need no bundled libraries at all, and `relocate.verify` is what says so rather than the build
+flags. What TLS would buy is an encrypted loopback connection between two processes on one
+developer's machine, in exchange for an OpenSSL to bundle, to keep current and to measure a floor
+against.
+
+**The Windows cell is where that sentence stops being true, and the price is one file.** A Cygwin
+binary links `cygwin1.dll` — it is what supplies the POSIX layer memcached is written against — so
+that archive is two files rather than one, 4.7 MB rather than 1.6, and the DLL is **LGPLv3**. That
+licence asks for more than its text: the recipient must be able to obtain the library's source and
+relink against a modified one. Dynamic linking answers the second half by itself, since the DLL sits
+beside the `.exe` and can be replaced; the first half is `licenses/CYGWIN-SOURCE.txt`, which names
+the exact package the file came from and where Cygwin publishes its source. Nothing is patched, so
+naming the package is enough to point at the corresponding source.
+
+**And on Windows `relocate.verify` proves nothing, which is worth stating rather than assuming.**
+`relocate.kind` reads a file's first four bytes and answers `None` for a PE, so `machine_files`
+finds nothing in a Windows tree and `verify` returns no problems — it does not fail, it *passes
+without looking*. Teaching it to read PE would turn that no-op into a real check inside seven other
+recipes at once, since Caddy, Node, Python, nginx, MariaDB and PostgreSQL all call it unconditionally
+on Windows, so `tools/memcached.py` answers the question locally instead: `cygcheck` reads the import
+table at pack time and refuses anything that is neither Cygwin's nor `%SystemRoot%`'s, and the smoke
+test then starts the binary on a `PATH` trimmed to the operating system. That last one is the check
+that matters, and it is not theoretical — the spike that measured this cell passed once with a tree
+containing no DLL at all, because Cygwin's own `bin` was on `PATH` and the loader found the library
+there. The ARM leg, which has no Cygwin, is where it came out, as `STATUS_DLL_NOT_FOUND`.
 
 Three smaller decisions, one per project and one shared.
 

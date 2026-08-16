@@ -66,9 +66,9 @@ index from every release that exists. Two run on a clock rather than on a reques
 and `check-archive.yml` — and [dates](end-of-life-dates.md) and [the archive](the-archive.md) are
 why: both watch something that can go wrong while nothing in this repository is touched.
 
-Three of those keep legs in the matrix that produce nothing by design — both Windows legs for Redis
-and Memcached, the ARM64 one for nginx. An empty cell stated in every run's log is worth a runner
-minute; a row somebody has to remember is missing is not. See
+Three of those keep legs in the matrix that produce nothing by design — both Windows legs for Redis,
+the ARM64 one for Memcached, the ARM64 one for nginx. An empty cell stated in every run's log is
+worth a runner minute; a row somebody has to remember is missing is not. See
 [Redis and Memcached](packages/redis-memcached.md) and [nginx](packages/nginx.md) for why each of
 those cells is empty.
 
