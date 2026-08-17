@@ -114,11 +114,48 @@ LAYOUT = {
     for name in ("redis-server", "redis-cli", "redis-check-rdb", "redis-check-aof")
 }
 
-# Upstream's own `DEPENDENCY_TARGETS`, named here because the Windows build drives `deps` directly
+# Upstream's own `DEPENDENCY_TARGETS`, needed because the Windows build drives `deps` directly
 # rather than letting `persist-settings` do it with a leading `-` that turns a failed dependency
-# into an ignored `Error 2` and a link failure twenty minutes later. `jemalloc` is in `deps/` and is
-# deliberately not in this list: the Makefile only chooses it as the allocator on Linux.
-DEPENDENCY_TARGETS = ("hiredis", "linenoise", "lua", "hdr_histogram", "fpconv", "xxhash", "tre")
+# into an ignored `Error 2` and a link failure twenty minutes later.
+#
+# **Read out of the tarball being packed rather than copied into this file**, because the list is
+# not a property of Redis — it is a property of *this release of* Redis, and a copy is only ever
+# right for the line it was written against. Upstream's own `src/Makefile` across the eight lines
+# this recipe offers:
+#
+#     7.2, 7.4    hiredis linenoise lua hdr_histogram fpconv
+#     8.0, 8.2    hiredis linenoise lua hdr_histogram fpconv fast_float
+#     8.4, 8.6    hiredis linenoise lua hdr_histogram fpconv fast_float xxhash
+#     8.8, 8.10   hiredis linenoise lua hdr_histogram fpconv xxhash tre
+#
+# A copy of the last row is what was here, and it is why `7.2` stopped at `No rule to make target
+# 'xxhash'` — asking a 2023 tarball to build a dependency added in 2026. Nothing weaker than reading
+# the Makefile would have been right for more than two of the eight lines, and the four in the
+# middle would each have been wrong in their own way.
+#
+# `jemalloc` is in `deps/` and appears in none of those rows, which is upstream's decision rather
+# than this recipe's: the Makefile only chooses it as the allocator on Linux, where it is built by
+# the `all` target this function's caller does not drive.
+DEPENDENCY_TARGETS = re.compile(r"^DEPENDENCY_TARGETS\s*=\s*(.+)$", re.MULTILINE)
+
+
+def dependency_targets(source_tree: Path) -> tuple[str, ...]:
+    """Answer the dependencies *this* tarball's ``src/Makefile`` says the core needs.
+
+    Refuses rather than falling back on a default. A Makefile that stopped stating the variable is a
+    change in how upstream builds, and guessing at it here would produce the same failure one link
+    step later with nothing pointing at the cause.
+    """
+    makefile = source_tree / "src" / "Makefile"
+    found = DEPENDENCY_TARGETS.search(makefile.read_text(encoding="utf-8", errors="replace"))
+    if not found:
+        raise SystemExit(
+            f"{makefile} states no DEPENDENCY_TARGETS; upstream changed how deps/ is driven and "
+            f"this recipe has to be read against the new spelling rather than assume the old one"
+        )
+    targets = tuple(found.group(1).split())
+    print(f"deps/ targets, read from src/Makefile: {' '.join(targets)}")
+    return targets
 
 # **Goals, because `all` cannot be one here.** `src/Makefile`'s `all` ends in `module_tests`, which
 # links `tests/modules/*.so` against symbols `redis-server` exports — and a PE image has no
@@ -149,14 +186,22 @@ PRUNE = (f"bin/redis-benchmark{SUFFIX}", f"bin/redis-sentinel{SUFFIX}")
 
 # Every directory under `deps/` is compiled into `redis-server`, so every one of them is
 # redistributed by this archive and its licence has to travel with it. The value is where upstream
-# keeps the notice — a file of its own for seven of the eight, and the header comment of the source
-# file itself for linenoise, which has no licence file and is BSD-2 in `linenoise.c`.
+# keeps the notice — a file of its own for seven of the nine, and the header comment of the source
+# file itself for the other two: linenoise, which has no licence file and is BSD-2 in `linenoise.c`,
+# and fast_float, which is an amalgamation generated with `amalgamate.py --license=MIT` and carries
+# the MIT text at the top of `fast_float.h`.
+#
+# The table spans every line this recipe offers rather than any one of them, and no version has all
+# nine: `fast_float` is in 8.0 through 8.6, `xxhash` from 8.4, `tre` from 8.8, and 7.2 and 7.4 have
+# six. Only what is actually in the tree is looked up, so a row for a dependency this tarball does
+# not carry costs nothing — while a missing row stops the build, which is the direction that matters.
 #
 # It is a table rather than a glob so that a dependency added in a future release **fails the build**
 # instead of shipping unlicensed: `licences` below checks that every directory under `deps/` has a
 # row here. That is the MariaDB lesson in one check — three separate archives shipped GPL binaries
 # with no licence text at all, and no smoke test could ever have shown it.
 DEPS_LICENCES = {
+    "fast_float": "fast_float.h",
     "fpconv": "LICENSE.txt",
     "hdr_histogram": "COPYING.txt",
     "hiredis": "COPYING",
@@ -364,10 +409,11 @@ def build_windows(source_tree: Path, prefix: Path) -> list[str]:
     """
     root = cygwin_root()
     print(f"building under Cygwin at {root}")
+    targets = dependency_targets(source_tree)
     cygwin(
         root,
         f'set -e\n'
-        f'make -C deps -j{jobs()} CFLAGS="{WINDOWS_CFLAGS}" {" ".join(DEPENDENCY_TARGETS)}\n'
+        f'make -C deps -j{jobs()} CFLAGS="{WINDOWS_CFLAGS}" {" ".join(targets)}\n'
         f'make -C src -j{jobs()} CFLAGS="{WINDOWS_CFLAGS}" {" ".join(WINDOWS_TARGETS)}\n',
         cwd=source_tree,
     )
@@ -380,7 +426,7 @@ def build_windows(source_tree: Path, prefix: Path) -> list[str]:
             raise SystemExit(f"the build produced no {built.name}; make reported success")
         shutil.copy2(built, binaries / built.name)
     return [
-        f"make -C deps {' '.join(DEPENDENCY_TARGETS)} (Cygwin)",
+        f"make -C deps {' '.join(targets)} (Cygwin)",
         f"make -C src {' '.join(WINDOWS_TARGETS)} CFLAGS={WINDOWS_CFLAGS!r}",
     ]
 
