@@ -534,9 +534,14 @@ def server(tree: Path, version: str, provides: dict[str, str], windows: bool) ->
     path = borrow.clean_path((tree / provides["postgres"]).parent)
 
     banner = borrow.run(tree / provides["postgres"], "--version", path=path)
-    # `postgres (PostgreSQL) 18.6` — the version is the last word and upstream appends nothing to it
-    # here, but a build carrying a packager's suffix would still match on a prefix.
-    stated = re.search(r"(\d+\.\d+)\s*$", banner)
+    # `postgres (PostgreSQL) 18.6`, and read *after the product name* rather than off the end of the
+    # line. The comment here used to claim a packager's suffix would still match on a prefix, and the
+    # pattern it sat above was anchored with `$`, so a suffix was the one thing that could not match:
+    # Debian's own build says `postgres (PostgreSQL) 18.6 (Ubuntu 18.6-1.pgdg22.04+2)`, which ends in
+    # `+2)` and failed every Linux leg of this workflow with *expected a 18.6 build* while being
+    # exactly an 18.6 build. `postgres_deb` is the recipe for two of the six cells, so this was never
+    # a corner.
+    stated = re.search(r"\(PostgreSQL\)\s+(\d+(?:\.\d+)?)", banner)
     if not stated or stated.group(1) != version:
         raise SystemExit(f"postgres reports {banner!r}, expected a {version} build")
     print(f"postgres version: {banner}")
