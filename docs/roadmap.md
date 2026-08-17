@@ -845,6 +845,61 @@ published it.
 
 The row has to be repacked for any of this to take effect, and only the four compiled cells change.
 
+### [x] P5c — Ruby: what P5b's first run on CI found **(rule)**
+
+That last sentence is the whole of it. P5b was ticked on 2026-08-16 and the workflow was not run
+again until the next day, and when it was, both Unix halves were red — the fourth time in two days
+that a section was ticked on *the recipe is right* and nobody ran it. The last green Ruby build,
+2026-08-15, printed no `stripped` line at all.
+
+Three separate things came out, and only the first was the recipe's.
+
+**It was stripping libraries it had not built.** `strip_symbols` took `relocate.machine_files(tree)`,
+which is every binary in the tree — including the ten `relocate.bundle` had just copied off the build
+machine. A distribution strips before it packages: the debug information is in a separate
+`-debuginfo` package and there is nothing left in the file. The log said so in the line above the
+failure, `stripped lib/libcrypt.so.1 (2,101,249 -> 2,105,768, -4,519 of symbol table)` — a file that
+**grew** under `--strip-all`. The recipe now subtracts what it did not build, told apart by whether
+`bundle` found it inside the work directory, which is the line `collect_licences` was already
+drawing. OpenSSL, libyaml and libffi are built here and still stripped.
+
+**`bin/ruby` lost its code signature to the strip.** It is rewritten by `install_name_tool` and then
+stripped, and `countersigned` reported the ad-hoc signature no longer matching *at page 0* — the
+header and the load commands. CPython's macOS cells never asked this: the x86_64 one carries no
+signature and the arm64 one comes through Apple's `strip` still valid. `strip.resign` puts an ad-hoc
+signature back and `countersigned` is asked again, which is only reachable after `mapped` has proved
+every loadable byte identical.
+
+#### And the check was wrong about `p_offset`
+
+`lib/libcrypto.so.3` — OpenSSL 3.5.7, compiled by this recipe, so no subtraction would have saved it
+— was refused with *changed 3 thing(s) … segment 7, segment 8, segment 9*. That message named a
+segment and not a field, so the first thing done was to make it name fields, and the answer arrived
+in one run:
+
+> segment 7 [p_offset 7204864 -> 6369280], segment 8 [p_offset 7206784 -> 6371200],
+> segment 9 [p_offset 7376528 -> 6540944]
+
+Only `p_offset`, on three segments, each moved down by exactly 835,584 bytes. Same `p_vaddr`, same
+`p_filesz`, same `p_memsz`, same flags: a strip that removed a non-allocated section lying earlier in
+the file and compacted the rest. `p_offset` is where a segment *reads from*, and a loader maps
+`p_filesz` bytes at `p_vaddr` without caring. The artifact was correct and the check called it a
+failure — the same shape as the hard-coded `tree/bin` P6a deleted, and a check nobody can leave on.
+
+Hashing the bytes at that offset was tried first, because *what* is there is the real question, and
+it does not work. The program header table is itself inside the first `PT_LOAD`, so an offset that
+moves changes the contents of `PT_PHDR` and of the segment holding it; that version failed an
+ordinary `strip --strip-all` of an ordinary shared library, which is the check calling its own
+subject a failure for the third time in this file. What takes `p_offset`'s place is
+`strip.unmapped`, asked **again after the operation**: every allocated section must still lie inside
+some `PT_LOAD`. The precondition P4c wrote and the postcondition P5c needs are the same question, and
+together they tie the segment table back to the section table that `p_offset` was tying it to badly.
+
+Checked four ways on Ubuntu 24.04 with binutils 2.42, because a comparison that had just been
+loosened is one nobody should take on trust: the BOLT interpreter is still refused, an ordinary
+shared library and an ordinary executable now pass and still load and run, and a `PT_LOAD` pointed
+deliberately somewhere else is caught by name.
+
 ### [x] P6 — Make the rule something CI can fail on **(rule)**
 
 P2–P5 are one-time corrections; this is what keeps them. `verify.py` already validates each artifact
@@ -1978,7 +2033,10 @@ What a user loses is the OAuth 2.0 device-authorization flow for libpq, which ac
 *server* names `oauth` in `pg_hba.conf` and loads a validator module. MixEngine's own `initdb` writes
 scram-sha-256, and anyone on Windows or Linux never had it.
 
-### [ ] P13 — Every published PHP archive predates P2
+**All five cells green**, which is the first time `build-postgres` has finished: it had run twice in
+its life before today and been red both times, on every leg.
+
+### [x] P13 — Every published PHP archive predates P2
 
 Found by P6a and confirmed against the artefacts rather than argued: all eleven PHP releases were
 published on 2026-08-14 and P2 landed after them, so every one declares `pdo_firebird` in
@@ -1987,11 +2045,21 @@ archive. Measured on the published manifests of 7.4.33, 8.3.33 and 8.5.9: 40, 40
 extensions, `pdo_firebird` in all three. The same recipe today builds 8.5.9 with **30** and without
 it.
 
-Nothing to design. It is eleven `build-php.yml` runs with `release=true`, at the exact versions
-already published so the existing releases are replaced rather than joined by a twelfth:
-7.0.33, 7.1.33, 7.2.34, 7.3.33, 7.4.33, 8.0.30, 8.1.34, 8.2.33, 8.3.33, 8.4.24, 8.5.9. It is here as
-a task because the repository cannot see it: `parity.py` and `permanence.py` read what a manifest
-says, and this manifest says something the archive cannot do.
+Nothing to design. It was eleven `build-php.yml` runs with `release=true`, at the exact versions
+already published so the existing releases were replaced rather than joined by a twelfth. It is here
+as a task because the repository cannot see it: `parity.py` and `permanence.py` read what a manifest
+says, and this manifest said something the archive could not do.
+
+Eleven runs, every leg green, and checked afterwards by reading the **published** manifests back
+rather than the ones the builds uploaded:
+
+| | 7.0.33 | 7.1.33 | 7.2.34 | 7.3.33 | 7.4.33 | 8.0.30 | 8.1.34 | 8.2.33 | 8.3.33 | 8.4.24 | 8.5.9 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| shared extensions | 26 | 26 | 28 | 28 | 28 | 28 | 30 | 31 | 31 | 31 | 30 |
+| `pdo_firebird` | — | — | — | — | — | — | — | — | — | — | — |
+
+8.5.9 is the one with a before to compare against: 36 shared extensions and `pdo_firebird` among
+them, now 30 and gone.
 
 ---
 
