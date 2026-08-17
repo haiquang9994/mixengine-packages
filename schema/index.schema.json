@@ -75,7 +75,8 @@
               "description": "Per branch, not per runtime: PHP 7.0-7.1 are VC14, 7.2-7.3 VC15, 7.4-8.3 VS16, 8.4+ VS17."
             },
             "macos": { "type": "string", "description": "Minimum macOS version, e.g. \"11.0\"." },
-            "glibc": { "type": "string", "description": "Minimum glibc, e.g. \"2.28\"." }
+            "glibc": { "type": "string", "description": "Minimum glibc, e.g. \"2.28\"." },
+            "tzdata": { "type": "string", "description": "Prose rather than a version, because there is no version to compare. The Linux PostgreSQL cells are built from Debian's packages, which configure --with-system-tzdata, so the server reads /usr/share/zoneinfo at an absolute path it will not relocate; the Windows and macOS cells carry their own copy. The value says so, which is what lets a daemon state the precondition instead of meeting it when a zoned timestamp comes back wrong." }
           }
         },
         "extension_dir": {
