@@ -99,3 +99,5 @@ jobs:
         with:
           name: index
           path: dist/index.json*
+
+# (re-indexed after the repository was recreated)

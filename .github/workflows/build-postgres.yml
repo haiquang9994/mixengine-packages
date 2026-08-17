@@ -158,3 +158,5 @@ jobs:
             fi
             gh release upload "$tag" "${assets[@]}" --clobber
           done
+
+# (re-indexed after the repository was recreated)
