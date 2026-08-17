@@ -308,6 +308,19 @@ WINDOWS_DISCARD = (
     "contrib", "docs", "html", "logs", "temp",
 )
 
+# The same decision as :data:`WINDOWS_DISCARD` about files that are **in some of upstream's zips and
+# not others**, which is why they cannot be named there: that list is checked backwards, and a
+# removal declared for a file this version never shipped is exactly the stale claim the check below
+# refuses. Listing the six newest patches this recipe offers says how narrow the category is —
+# `nginx-1.26.3.zip` carries `.hgtags` and 1.27.5, 1.28.3, 1.29.8, 1.30.4 and 1.31.3 carry neither
+# name; `nginx-1.29.4.zip` carries `SUPPORT.md` and the newest patch of its own line does not.
+#
+# Both are the release tooling's leftovers rather than anything nginx reads: `.hgtags` is Mercurial's
+# tag file, and `SUPPORT.md` is a page pointing at the mailing list. So the decision is the same one
+# `docs` already got, and it is made here rather than left to whichever patch is being packed —
+# which is the whole point of the check that sent this file back for a third list.
+WINDOWS_STRAY = (".hgtags", "SUPPORT.md")
+
 
 def check_licences(tree: Path) -> None:
     """Refuse a tree whose ``licenses/`` is not exactly :data:`LICENCES`.
@@ -553,9 +566,9 @@ def borrowed(program: str, home: Path, version: str, work: Path) -> tuple[Path, 
     """Repack upstream's Windows zip into this repository's layout.
 
     Answers ``(tree, upstream block, lacks block)``. Everything upstream shipped is either copied
-    into the new tree or named in :data:`WINDOWS_DISCARD`, and an entry in neither **stops the
-    pack** — an archive that grew a directory since this was written is a change worth reading
-    before it is republished, not one to pass through.
+    into the new tree, named in :data:`WINDOWS_DISCARD`, or named in :data:`WINDOWS_STRAY`, and an
+    entry in none of the three **stops the pack** — an archive that grew a directory since this was
+    written is a change worth reading before it is republished, not one to pass through.
     """
     name = f"nginx-{version}.zip"
     archive, digest, url = download(program, home, name, work)
@@ -586,7 +599,8 @@ def borrowed(program: str, home: Path, version: str, work: Path) -> tuple[Path, 
     # Nothing unaccounted for. `kept` is spelled against the *upstream* tree rather than the new one
     # so that a file this recipe stopped copying shows up as unaccounted rather than as absent.
     kept = {"nginx.exe", *(f"conf/{conf}" for conf in CONF_FILES), *WINDOWS_LICENCES}
-    accounted = kept | set(WINDOWS_DISCARD)
+    strays = [relative for relative in WINDOWS_STRAY if (unpacked / relative).is_file()]
+    accounted = kept | set(WINDOWS_DISCARD) | set(strays)
     unexpected = []
     # Files only. A directory is accounted for by its contents, and the two that have none —
     # `logs/` and `temp/`, which nginx creates for itself under whatever prefix it is given — are
@@ -606,6 +620,9 @@ def borrowed(program: str, home: Path, version: str, work: Path) -> tuple[Path, 
 
     # Checked the other way too: a discard naming something upstream stopped shipping is a claim
     # that has outlived its subject, which is the shape of declaration `borrow.declare` refuses.
+    # :data:`WINDOWS_STRAY` is deliberately not checked this way — a name is on that list *because*
+    # it comes and goes between patches, and only the ones this zip actually holds are declared
+    # below, so the manifest still says nothing that is not true of the archive beside it.
     absent = [relative for relative in WINDOWS_DISCARD if not (unpacked / relative).exists()]
     if absent:
         raise SystemExit(
@@ -625,7 +642,7 @@ def borrowed(program: str, home: Path, version: str, work: Path) -> tuple[Path, 
         # *borrowed* mean something. The four licences are `added` only because they moved out of
         # `docs/` — the same texts, collected where every other archive here keeps them.
         "added": [f"licenses/{shipped}" for shipped in WINDOWS_LICENCES.values()],
-        "removed": list(WINDOWS_DISCARD),
+        "removed": [*WINDOWS_DISCARD, *strays],
     }
 
     # **The one field in this repository that is an admission**, and upstream writes it rather than
