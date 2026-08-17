@@ -66,6 +66,11 @@ index from every release that exists. Two run on a clock rather than on a reques
 and `check-archive.yml` — and [dates](end-of-life-dates.md) and [the archive](the-archive.md) are
 why: both watch something that can go wrong while nothing in this repository is touched.
 
+Dispatching those by hand has two ways to go quietly wrong — `release` and `publish` both default to
+off, and the version input is called `branch` on one workflow, `versions` on two and `version` on the
+rest — so [`release/`](../release/README.md) wraps them. `release/build.sh <kind> <version>` and then
+`release/publish.sh`, which is the whole of what a new patch needs.
+
 Three of those keep legs in the matrix that produce nothing by design — both Windows legs for Redis,
 the ARM64 one for Memcached, the ARM64 one for nginx. An empty cell stated in every run's log is
 worth a runner minute; a row somebody has to remember is missing is not. See
