@@ -26,7 +26,7 @@ tree still had to offer, so a saving of that size cost nothing anybody could arg
 | PHP | 7.0 – newest, 6 targets | `php_windows`, `php_unix`, `php_legacy_unix` | yes — P2 |
 | Node.js | 16 – newest, 6 targets | `node` | yes — P3 |
 | Python | 3.10 – newest, 6 targets | `python` | yes — P4, P4a, P4b and P4c |
-| Ruby | 3.2 – newest, 6 targets | `ruby`, `ruby_unix` | yes — P5, P5a and P5b |
+| Ruby | 3.2 – newest, 6 targets | `ruby`, `ruby_unix` | yes — P5, P5a, P5b; **P5c open on macOS** |
 | Caddy | 2.0 – newest, 6 targets | `caddy` | yes |
 | MariaDB | 10.6 – newest, 6 targets | `mariadb`, `mariadb_deb`, `mariadb_build` | yes — it is where the rule came from |
 | PostgreSQL | 14 – newest, 5 of 6 targets | `postgres`, `postgres_deb` | yes — P7, P7a and P7b, and it is the first row packed under the rule |
@@ -845,7 +845,14 @@ published it.
 
 The row has to be repacked for any of this to take effect, and only the four compiled cells change.
 
-### [x] P5c — Ruby: what P5b's first run on CI found **(rule)**
+### [ ] P5c — Ruby: what P5b's first run on CI found **(rule)**
+
+> **Open on macOS only, and the next step needs a Mac.** Linux and Windows are green and have been
+> across five consecutive runs. What is left is one question about `lib/libruby.3.2-static.a` that
+> cost a CI round trip each time it was asked from a Windows machine, and that a Mac answers in a
+> minute. Read *The static archive, and the one thing still unknown* at the end of this section
+> first — it says exactly what to run and what each answer means.
+
 
 That last sentence is the whole of it. P5b was ticked on 2026-08-16 and the workflow was not run
 again until the next day, and when it was, both Unix halves were red — the fourth time in two days
@@ -899,6 +906,79 @@ Checked four ways on Ubuntu 24.04 with binutils 2.42, because a comparison that 
 loosened is one nobody should take on trust: the BOLT interpreter is still refused, an ordinary
 shared library and an ordinary executable now pass and still load and run, and a `PT_LOAD` pointed
 deliberately somewhere else is caught by name.
+
+**Both Linux legs are green**, across five consecutive runs, as are both Windows legs.
+
+#### The static archive, and the one thing still unknown
+
+Fixing the signature let macOS reach a third failure that nothing had ever got far enough to see:
+
+> `strip -S lib/libruby.3.2-static.a changed 469 thing(s) a linker can resolve …
+> over all 469, what differs is: sections (913), relocations (755), symbols (50)`
+
+470 members, 469 of them different. Most of that is layout and is the same mistake `p_offset` was:
+**`sh_addr` is 0 for every section of an ELF relocatable object, and Apple's assembler lays its
+objects out at real offsets** — measured, `readelf -SW` on a `gcc -c` object gives `Address
+0000000000000000` throughout. So removing a `__DWARF` section moves everything after it, `addr`
+changes, `__LD,__compact_unwind` changes because its payload *is* addresses, and the relocation
+digests change with them. `_elf_object` never sees any of this and `_macho_object` sees all of it.
+
+**`symbols (50)` is the part that is not layout-shaped, and it is the open question.** Fifty members
+differ in what they publish. A `symbols` entry is `(name, type, section, value)` and `value` is an
+address, so this may be the same shift again — but it may not be, and the difference decides
+everything:
+
+- **names all present, only `value` moved** → the comparison is measuring assembler layout, and the
+  fix is to compare a Mach-O member the way `_elf_object` already compares an ELF one: by name.
+  Nothing is dropped from the archive, nothing changes in what ships.
+- **names missing** → `strip -S` is damaging the archive on macOS, and the answer is to stop
+  stripping `libruby-static.a` there and pay the size. That is the only branch in which Ruby gives
+  anything up, and what it gives up is an optimisation rather than a file.
+
+`resolvable` already checks the archive's **index** for lost symbols separately, and that check did
+not fire, which is evidence for the first branch and not proof of it: the index carries global
+*defined* symbols, and `published` also holds undefined externals. `_macho_object` excludes `N_STAB`
+before it builds `published`, so on the face of it `strip -S` has nothing to take — but that is a
+reading of the code, and this section exists because three readings of the code were wrong today.
+
+**To settle it on a Mac**, from a tree this recipe has built:
+
+```bash
+python3 -c '
+import shutil, subprocess, sys; sys.path.insert(0, "tools")
+import strip
+from pathlib import Path
+a = Path("lib/libruby.3.2-static.a")          # in the built tree
+shutil.copy(a, "/tmp/before.a")
+before = strip.resolvable(Path("/tmp/before.a"))
+shutil.copy(a, "/tmp/after.a")
+subprocess.run(["strip", "-S", "/tmp/after.a"], check=True)
+after = strip.resolvable(Path("/tmp/after.a"))
+for key in sorted(set(before) | set(after)):
+    if before.get(key) == after.get(key): continue
+    line = strip.moved(key, before.get(key), after.get(key))
+    if "symbols" in line: print(line)
+' | head -20
+```
+
+`strip.moved` answers in one of two spellings and they are not ambiguous:
+`symbols [all 214 name(s) still there; what moved: value]`, or
+`symbols [3 name(s) gone: _foo, _bar, _baz]`.
+
+**Do not loosen the comparison without that output.** This module refused three *correct* artifacts
+in two days — P6a's hard-coded `tree/bin`, this section's `p_offset`, and an attempt to replace
+`p_offset` with a hash of the bytes at it, which failed an ordinary `strip --strip-all` of an
+ordinary shared library because the program header table lives inside the first `PT_LOAD`. A fourth
+loosening made on a guess is the one that lets a broken archive through, and `libruby-static.a` is
+precisely the file nothing else in this repository would notice: no smoke test loads it, because
+nothing in the tree links against it. What *does* reach it is `smoke()`, which compiles `bigdecimal`
+from the relocated tree and lets `rbconfig.rb` send that link at `-lruby-static` — so once the build
+gets past this, there is a behavioural check on the same file, on the same machine, after the fact.
+
+Everything needed to reproduce is in `tools/strip.py`: `resolvable` builds the comparison, `moved`
+names what differs, `tally` counts it over every member, and both the caller and `moved` now sort
+identity (`symbols`, `index`, `members`) ahead of layout so the four differences printed are the
+four worth reading.
 
 ### [x] P6 — Make the rule something CI can fail on **(rule)**
 

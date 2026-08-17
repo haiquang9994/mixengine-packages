@@ -312,6 +312,10 @@ def moved(key: str, old: object, new: object, depth: int = 2) -> str:
     """
     if isinstance(old, dict) and isinstance(new, dict) and depth:
         inside = [name for name in sorted(set(old) | set(new)) if old.get(name) != new.get(name)]
+        # Identity before layout here too, and for the reason the caller sorts: a member with a
+        # dozen relocations and one changed symbol would otherwise report the relocations and hide
+        # the symbol behind "and 9 more", which is the one line a reader needs.
+        inside.sort(key=lambda name: 0 if name in ("symbols", "index", "members") else 1)
         spelled = ", ".join(moved(name, old.get(name), new.get(name), depth - 1)
                             for name in inside[:3])
         more = f" and {len(inside) - 3} more" if len(inside) > 3 else ""
