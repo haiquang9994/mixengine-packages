@@ -1598,13 +1598,26 @@ in every Cygwin installation, so `if not texts` was answered by somebody else's 
 could ever be reached. The same shape as P6a and P4c, a third time in two days: the check ran, the
 check passed, and the check was not looking at its subject.
 
-Now the package's own doc directory travels, whole, rather than the names in `LICENCE_GLOBS` — GCC
-keeps its exception in `RUNTIME.LIBRARY.EXCEPTION`, which matches no glob here and is precisely the
-document this archive was missing, and a list of spellings has to be right about every project
-Cygwin packages. Cygwin's two documents are shipped once, by `cygwin_runtime_terms`, as the
-runtime's terms rather than as every library's. A DLL with nothing of its own stops the build and
-prints what `cygcheck -l` says its package installed, so the next one of these costs one run rather
-than a guess.
+Now `cygwin_licences` answers for the owning package alone, Cygwin's two documents are shipped once
+by `cygwin_runtime_terms` as the runtime's terms rather than as every library's, and a DLL with
+nothing of its own stops the build.
+
+**Which it immediately did, and the two runs it took to settle are the point.** `libgcc1` installs
+no documentation at all — `cygcheck -l libgcc1-14.4.0-1` lists nothing under `/usr/share/doc`,
+because Cygwin packages the GCC runtime apart from the compiler that carries GCC's licence texts. So
+the failure was taught to list the doc directories matching the package's stem, and the next run
+answered `gcc` — not the `gcc-core` the package is installed from, which is exactly the near-miss a
+derived spelling would have shipped. `CYGWIN_LICENCE_ELSEWHERE` names it, one row, the way
+`redis.DEPS_LICENCES` names its deps.
+
+One more thing was tried and undone by measuring it. Taking the whole doc directory looked like the
+answer that could not go stale; the archive it produced carried 1.2 MB of GCC's `NEWS` and 685 KB of
+its `ChangeLog`, and `RUNTIME.LIBRARY.EXCEPTION` — the document that reasoning was built on — is not
+in that directory at all. `COPYING` and `COPYING.LIB` are, and `LICENCE_GLOBS` already matched them.
+
+`redis-8.10.0-windows-x86_64.zip` now ships 16 licence files, 225 KB, `libgcc1-COPYING` and
+`libgcc1-COPYING.LIB` among them. Six green cells. Memcached, which bundles only `cygwin1.dll`, was
+green through all of it.
 
 ### [x] P9 — nginx
 
