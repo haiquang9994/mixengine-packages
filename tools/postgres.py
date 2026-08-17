@@ -162,7 +162,14 @@ NOT_SHIPPED = (
     # them either: one version meaning different things on different systems, which is what the rule
     # is against. The globs also take `hstore_plperl`, `jsonb_plpython3u` and the rest of the
     # transform modules, which are useless without the language they transform for.
-    "*plperl*", "*plpython3*", "*pltcl*",
+    #
+    # **`*plpython*` rather than `*plpython3*`, and 14 is why.** PostgreSQL carried Python 2 support
+    # until 15 removed it, and EDB's 14 archive ships `plpythonu` and `plpython2u` with the four
+    # transform modules that go with them. Written against 18, the narrower glob left all six on the
+    # Windows cell of 14.24 and on no other cell of it — an interpreter that reached end of life in
+    # 2020, shipped by one cell of one version, which is exactly the shape this entry exists to
+    # prevent.
+    "*plperl*", "*plpython*", "*pltcl*",
     # EDB's own additions, which are the clearest case of all: `plugin_debugger` is the server half
     # of pgAdmin's debugger and `system_stats` reports the *host's* CPU and memory. Neither is in
     # PostgreSQL, neither is in Debian's packages, and the two EDB archives do not even agree with
@@ -180,8 +187,22 @@ NOT_SHIPPED = (
     # directory of their own. `test_decoding` is upstream's *example* logical-decoding plugin —
     # `pgoutput` is the one replication actually uses and it stays — and `test_cloexec` and
     # `testplug` are checks upstream runs at build time.
-    "test_decoding*", "test_cloexec*", "testplug*", "pg_regress*", "isolationtester*",
-    "pg_isolation_regress*",
+    #
+    # **`test_*` rather than the three that had been seen, because EDB stopped shipping the rest and
+    # this recipe was written after it did.** Everything under upstream's `src/test/modules` installs
+    # into the same `lib/` and `share/extension/` as the real extensions, and EDB's Windows archives
+    # for 14.24, 15.19 and 16.15 install all of it: 30 to 36 extensions per version — `test_ext1`
+    # through `test_ext8`, `test_predtest`, `test_rbtree`, `test_shm_mq`, `worker_spi` and the rest.
+    # 17.11 and 18.6 ship none of them, the `.deb` route never did, and the macOS archive does not
+    # either, so the recipe passed every check it ever ran and `parity.py` failed on exactly three
+    # versions of exactly one cell the first time those versions were published.
+    #
+    # The four that do not begin with `test_` are named beside it, and they are from the same place:
+    # `dummy_index_am` and `dummy_seclabel` are stubs the regression tests load, `plsample` is the
+    # sample procedural language upstream keeps for its own tests, and `spgist_name_ops` is an
+    # example operator class. `worker_spi` is a background-worker example and is the fifth.
+    "test_*", "dummy_index_am*", "dummy_seclabel*", "plsample*", "spgist_name_ops*", "worker_spi*",
+    "pg_regress*", "isolationtester*", "pg_isolation_regress*",
     # **StackBuilder, and it takes two entries because it is scattered across three places.**
     # `UNWANTED` keeps its own directory out at unpack time. What that leaves in `bin/` is wxWidgets
     # — eight DLLs, there for StackBuilder's window and for nothing else, sitting beside the server
