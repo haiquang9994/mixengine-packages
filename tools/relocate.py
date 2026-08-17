@@ -850,10 +850,12 @@ CYGWIN_SOURCE = "https://cygwin.com/pub/cygwin/x86_64/release"
 #
 # `libgcc1` is the only row so far and it is not an oversight on Cygwin's part. The GCC runtime
 # library is packaged apart from the compiler, and the licence texts — GPLv3 and the Runtime Library
-# Exception the runtime is actually conveyed under — ship with the compiler. Proved by asking the
-# runner rather than by reading about it: ``cygcheck -l libgcc1-14.4.0-1`` lists **nothing** under
-# `/usr/share/doc`, which is the sentence that made this table necessary.
-CYGWIN_LICENCE_ELSEWHERE = {"libgcc1": "gcc-core"}
+# Exception the runtime is actually conveyed under — ship with the compiler. Both halves of the row
+# were read off the runner rather than reasoned about: ``cygcheck -l libgcc1-14.4.0-1`` lists
+# **nothing** under `/usr/share/doc`, which is what made this table necessary, and the failure's own
+# listing of directories matching `gcc` answered `gcc` — not the `gcc-core` the package is installed
+# from, which is exactly the kind of near-miss a derived spelling would have shipped.
+CYGWIN_LICENCE_ELSEWHERE = {"libgcc1": "gcc"}
 
 
 def dpkg_owner(path: Path) -> str | None:
