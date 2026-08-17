@@ -779,8 +779,24 @@ def scrub(tree: Path, directories: list[Path]) -> list[str]:
     return changed
 
 
-def strip_symbols(tree: Path, operating_system: str) -> str:
+def strip_symbols(tree: Path, operating_system: str, borrowed: set[str]) -> str:
     """Take the debug information out of what this recipe compiled, and prove it took nothing else.
+
+    **`borrowed` is what makes the first sentence true**, and its absence is what P5b shipped. This
+    function took `relocate.machine_files(tree)`, which is every binary in the tree — including the
+    ten libraries `relocate.bundle` had just copied in from the build machine. Those are the distro's
+    own, and a distribution strips before it packages: the debug information lives in a separate
+    `-debuginfo` package and there is nothing here to remove. The first CI run of this step said so
+    twice in two lines — ``stripped lib/libcrypt.so.1 (2,101,249 -> 2,105,768, -4,519 of symbol
+    table)``, a file that grew, and then ``strip --strip-all lib/libcrypto.so.3 changed 3 thing(s) a
+    loader or a linker can see``. Nothing to gain, an already-packaged binary rewritten by BFD to get
+    it, and a refusal to publish as the result.
+
+    A library this recipe *built* is not borrowed even though `bundle` also copies it: OpenSSL,
+    libyaml and libffi come out of `SOURCE_LIBRARIES` with their debug information intact and are
+    exactly what this is for. The line between them is where the file came from, which is the same
+    line `collect_licences` draws a few functions down and for a related reason — origin inside the
+    work directory means this recipe made it.
 
     **This is the asymmetry P5a measured and did not fix**, and it is between the two halves of one
     row: RubyInstaller links with `-s` — visible in the `DLDFLAGS` its own `ruby-3.4.pc` publishes —
@@ -807,7 +823,8 @@ def strip_symbols(tree: Path, operating_system: str) -> str:
     `.dSYM` bundles are deleted there, which is where the compiler put each *executable's* debug
     information and is not where it put the archive's.
     """
-    images, libraries = relocate.machine_files(tree), strip.archives(tree)
+    images = [path for path in relocate.machine_files(tree) if path.name not in borrowed]
+    libraries = strip.archives(tree)
 
     def weigh() -> int:
         return sum(path.stat().st_size for path in images + libraries)
@@ -1022,7 +1039,13 @@ def main() -> None:
     scrub(tree, sorted({work, work.resolve()}))
     # After `relocate.bundle`, which rewrites the load paths of these same files, and before the
     # smoke test, which has to exercise the tree that ships rather than the one that was built.
-    stripped = strip_symbols(tree, operating_system)
+    #
+    # What came off the build machine rather than out of this build. `relocate.bundle` answers with
+    # where each library was copied from, so the two kinds are already told apart here — see
+    # `strip_symbols` for why stripping the borrowed ones gains nothing and costs the build.
+    borrowed = {name for name, origin in bundled.items()
+                if not relocate.inside(origin.resolve(), work)}
+    stripped = strip_symbols(tree, operating_system, borrowed)
 
     libraries = ", ".join(
         f"{name} {recipe['version']}" for name, recipe in SOURCE_LIBRARIES.items()

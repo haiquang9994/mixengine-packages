@@ -95,6 +95,15 @@ LINKEDIT = {
     0x00000029: 1,           # LC_DATA_IN_CODE
 }
 
+# The fields of the tuples :func:`mapped` builds, so that a refusal can say *what* moved instead of
+# only that something did. P4c cost a download of the right distribution and a local reproduction to
+# learn that a strip had changed one program header's `p_offset` and one segment's `p_filesz`; a log
+# that says so costs nothing, and is the difference between diagnosing the next one from a CI run
+# and diagnosing it from a machine somebody has to go and find.
+PROGRAM_HEADER = ("p_type", "p_flags", "p_offset", "p_vaddr", "p_paddr", "p_filesz", "p_memsz",
+                  "p_align")
+SECTION_HEADER = ("sh_type", "sh_flags", "sh_addr", "sh_size", "contents")
+
 ELF_MAGIC = b"\x7fELF"
 MACHO_MAGIC = b"\xcf\xfa\xed\xfe"
 AR_MAGIC = b"!<arch>\n"
@@ -264,6 +273,54 @@ def countersigned(path: Path) -> str | None:
                         f"bytes at page {slot} — on arm64 the kernel answers that with SIGKILL")
         return None
     return f"{path.name} has a code signature with no CodeDirectory in it"
+
+
+def moved(key: str, old: object, new: object) -> str:
+    """*key*, followed by which of its fields differ, where the shape is one this module named.
+
+    A key whose value is not a tuple this can label — a Mach-O section, an `exports` list — comes
+    back as itself, which is what the message said about everything before :data:`PROGRAM_HEADER`
+    existed.
+    """
+    if not (isinstance(old, tuple) and isinstance(new, tuple) and len(old) == len(new)):
+        return key
+    names = None
+    if key.startswith("segment ") and len(old) == len(PROGRAM_HEADER):
+        names = PROGRAM_HEADER
+    elif key.startswith("section ") and len(old) == len(SECTION_HEADER):
+        names = SECTION_HEADER
+    if names is None:
+        return key
+    fields = [f"{name} {was} -> {now}" for name, was, now in zip(names, old, new) if was != now]
+    return f"{key} [{', '.join(fields)}]" if fields else key
+
+
+def resign(path: Path) -> str | None:
+    """Put an ad-hoc signature back on a Mach-O a strip has just resized. ``None`` means it worked.
+
+    **Only reached when :func:`countersigned` says the old one no longer matches**, and only for a
+    file whose loadable content this run has already proved identical — `mapped` runs first and the
+    build is refused before this if anything a loader sees moved. So what is being restored is a
+    hash of bytes that are known to be the right bytes, which is the difference between re-signing
+    here and re-signing to make a complaint go away.
+
+    Ad-hoc, `codesign -s -`, because that is the kind of signature these files arrive with: on arm64
+    the linker signs every binary it produces, there is no identity involved, and the kernel's only
+    question is whether the pages hash to what the CodeDirectory says. P5b needed this and did not
+    have it — `bin/ruby` is rewritten by `install_name_tool` and then stripped, and the first CI run
+    of that step reported the signature no longer matching *at page 0*, which is the header and the
+    load commands. CPython's macOS cells never asked: the x86_64 one carries no signature at all and
+    the arm64 one comes through Apple's `strip` still valid.
+    """
+    tool = shutil.which("codesign")
+    if tool is None:
+        return (f"{path.name} lost its code signature to `strip` and there is no `codesign` on "
+                f"PATH to put one back — on arm64 the kernel answers that with SIGKILL")
+    done = subprocess.run([tool, "--force", "--sign", "-", str(path)],
+                          capture_output=True, text=True)
+    if done.returncode != 0:
+        return f"codesign --force --sign - {path.name} failed: {done.stderr.strip()}"
+    return None
 
 
 def unmapped(path: Path) -> list[str]:
@@ -738,12 +795,20 @@ def symbols(tree: Path, paths: Sequence[Path], flags: Sequence[str],
             differences.remove("index")
 
         if differences:
+            spelled = ", ".join(moved(key, before.get(key), after.get(key))
+                                for key in differences[:4])
             raise SystemExit(
                 f"strip {' '.join(flags)} {relative} changed {len(differences)} thing(s) "
-                f"{seeing} — {', '.join(differences[:4])} — so this is not the {noun} coming out, "
+                f"{seeing} — {spelled} — so this is not the {noun} coming out, "
                 f"and the artifact is not being published"
             )
         wrong = countersigned(path) if operating_system == "macos" and not archive else None
+        if wrong:
+            # Put one back and ask again, rather than refuse. See `resign`: the comparison above has
+            # already proved that everything a loader maps is identical, so a signature that no
+            # longer matches is a hash of the right bytes going stale — and the second call is what
+            # keeps this from being a way of not answering the question.
+            wrong = resign(path) or countersigned(path)
         if wrong:
             raise SystemExit(wrong)
 
