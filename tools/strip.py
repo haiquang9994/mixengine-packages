@@ -340,6 +340,36 @@ def moved(key: str, old: object, new: object, depth: int = 2) -> str:
     return f"{key} [{', '.join(fields)}]" if fields else key
 
 
+def tally(before: dict, after: dict, differences: Sequence[str]) -> str:
+    """What kind of thing differed, counted over *every* difference rather than the first few.
+
+    **A list of four out of 469 is not a diagnosis**, and this is the sentence that turns one into
+    one. `libruby.3.2-static.a` has 470 members; naming four of them says only that a lot changed,
+    while counting what changed *inside* all of them says whether any member stopped publishing a
+    symbol — which is the entire question :func:`resolvable` exists to ask. A tally that does not
+    mention `symbols` is the archive still resolving everything it used to.
+
+    Bucketed by kind, because the names are per-member and per-section: three hundred distinct
+    section names counted once each is the same non-answer as the list of four.
+    """
+    counted: dict[str, int] = {}
+    for key in differences:
+        was, now = before.get(key), after.get(key)
+        if not (isinstance(was, dict) and isinstance(now, dict)):
+            continue
+        for name in sorted(set(was) | set(now)):
+            if was.get(name) == now.get(name):
+                continue
+            kind = ("relocations" if name.startswith("relocations against ")
+                    else "sections" if name.startswith("section ") else name)
+            counted[kind] = counted.get(kind, 0) + 1
+    if not counted:
+        return ""
+    spelled = ", ".join(f"{kind} ({count})" for kind, count in
+                        sorted(counted.items(), key=lambda row: -row[1]))
+    return f" — over all {len(differences)}, what differs is: {spelled}"
+
+
 def resign(path: Path) -> str | None:
     """Put an ad-hoc signature back on a Mach-O a strip has just resized. ``None`` means it worked.
 
@@ -857,8 +887,8 @@ def symbols(tree: Path, paths: Sequence[Path], flags: Sequence[str],
                                 for key in differences[:4])
             raise SystemExit(
                 f"strip {' '.join(flags)} {relative} changed {len(differences)} thing(s) "
-                f"{seeing} — {spelled} — so this is not the {noun} coming out, "
-                f"and the artifact is not being published"
+                f"{seeing} — {spelled}{tally(before, after, differences)} — so this is not the "
+                f"{noun} coming out, and the artifact is not being published"
             )
         wrong = countersigned(path) if operating_system == "macos" and not archive else None
         if wrong:
