@@ -946,11 +946,14 @@ def cygwin_licences(real: Path) -> list[tuple[str, Path]]:
 
     The two runtime documents are still shipped, once, by `cygwin_runtime_terms`, as what they are.
 
-    Everything in the package's doc directory travels, rather than the names in :data:`LICENCE_GLOBS`.
-    That directory holds documentation by construction, the files are small, and the alternative is a
-    list of spellings that has to be right about every project Cygwin packages — GCC keeps its
-    exception in `RUNTIME.LIBRARY.EXCEPTION`, which matches no glob here and is exactly the document
-    a reader of this archive needs.
+    :data:`LICENCE_GLOBS`, and this was tried the other way first. Taking the package's whole doc
+    directory looked like the answer that could not go stale, on the reasoning that such a directory
+    holds documentation by construction and the files are small. Measured on the archive it produced,
+    both halves were wrong: it shipped GCC's `NEWS` at 1.2 MB and its `ChangeLog` at 685 KB, and the
+    document the reasoning was built on — `RUNTIME.LIBRARY.EXCEPTION` — is not in Cygwin's `gcc` doc
+    directory at all. What is there is `COPYING` and `COPYING.LIB`, which the globs already match.
+    81 KB of licence instead of 2 MB of somebody's release notes, and a name nobody here anticipated
+    still stops the build rather than passing quietly.
 
     The root is the parent of the directory the library was taken from — ``<root>/bin/cygwin1.dll``
     — which is the same walk the Homebrew branch does, for the same reason: nothing else on a
@@ -965,10 +968,13 @@ def cygwin_licences(real: Path) -> list[tuple[str, Path]]:
     # The package's own directory, and — for a package that installs none — the one named in
     # :data:`CYGWIN_LICENCE_ELSEWHERE`. Filed under the *owner* either way, because the question the
     # archive answers is what licenses this DLL and not which directory the file was copied from.
-    found = [(owner, text) for text in sorted((shared / owner).glob("*")) if text.is_file()]
+    def texts(place: Path) -> list[tuple[str, Path]]:
+        return [(owner, text) for pattern in LICENCE_GLOBS
+                for text in sorted(place.glob(pattern)) if text.is_file()]
+
+    found = texts(shared / owner)
     if not found and owner in CYGWIN_LICENCE_ELSEWHERE:
-        elsewhere = shared / CYGWIN_LICENCE_ELSEWHERE[owner]
-        found = [(owner, text) for text in sorted(elsewhere.glob("*")) if text.is_file()]
+        found = texts(shared / CYGWIN_LICENCE_ELSEWHERE[owner])
 
     # Cygwin's per-package note, which states where the source came from and under what terms.
     readme = shared / "Cygwin" / f"{owner}.README"
