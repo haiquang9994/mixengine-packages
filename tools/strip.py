@@ -905,8 +905,21 @@ def symbols(tree: Path, paths: Sequence[Path], flags: Sequence[str],
             )
 
         if differences:
+            # **Worst first, not alphabetically first.** Only four of them are printed, and the
+            # four that sort earliest are not the four worth reading: `libruby.3.2-static.a` came
+            # back with 469 differing members of which 50 differed in `symbols`, and the four shown
+            # were `dln.o`, `complex.o` and two of libgcc's, none of which did — so the message
+            # named the layout and hid the identity. A difference in what an object *publishes*
+            # outranks a difference in where it happens to sit.
+            def gravity(key: str) -> int:
+                was, now = before.get(key), after.get(key)
+                if not (isinstance(was, dict) and isinstance(now, dict)):
+                    return 1
+                inner = {name for name in set(was) | set(now) if was.get(name) != now.get(name)}
+                return 0 if inner & {"symbols", "index", "members"} else 1
+
             spelled = ", ".join(moved(key, before.get(key), after.get(key))
-                                for key in differences[:4])
+                                for key in sorted(differences, key=gravity)[:4])
             raise SystemExit(
                 f"strip {' '.join(flags)} {relative} changed {len(differences)} thing(s) "
                 f"{seeing} — {spelled}{tally(before, after, differences)} — so this is not the "
