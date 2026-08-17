@@ -741,8 +741,16 @@ def smoke(tree: Path, version: str, manifest: dict) -> dict:
     # and two of them venv launchers, and passed. Not a check that looked at nothing: a check that
     # looked at somebody else's binaries.
     #
-    # On Unix it names the same set the default does — 15 files on linux-x86_64 and 16 on
-    # macos-aarch64, identical both ways, measured on the published 3.14.7 rather than assumed.
+    # On Unix it names the same set the default does, identically both ways — 9 files on
+    # linux-x86_64, measured on the published 3.14.7 rather than assumed.
+    #
+    # **The two halves of that turned out to be one finding.** Both scans were 15 here until
+    # `relocate.LOADED` landed, and six of the fifteen were those same `distlib` stubs: `t32.exe`,
+    # `t64.exe`, `t64-arm.exe`, `w32.exe`, `w64.exe`, `w64-arm.exe`, shipped on every platform
+    # because `pip` copies one to disk when it writes a Windows console script. On Windows they were
+    # most of what the check read; on Unix they were the part of it no loader would ever open, and
+    # `verify` asked `ldd` about them and got silence. Same six files, both cells, two ways of
+    # asking nothing.
     problems = relocate.verify(elsewhere, directories=("",))
     for problem in problems:
         print(f"error: {problem}", file=sys.stderr)

@@ -92,6 +92,21 @@ MACHO_MAGICS = MACHO_LITTLE | MACHO_BIG | MACHO_FAT
 ELF_TYPES = {2, 3}              # ET_EXEC, ET_DYN
 MACHO_TYPES = {2, 6, 8}         # MH_EXECUTE, MH_DYLIB, MH_BUNDLE
 
+# **Which of the three formats the loader on *this* platform loads**, and a tree is not made of one
+# format merely because it is packed for one operating system. A Unix CPython carries `pip`'s
+# vendored `distlib` launchers — `t32.exe`, `t64.exe`, `w64-arm.exe` — PEs that `pip` copies to disk
+# when it writes a Windows console script, and that nothing on Linux or macOS will ever load.
+#
+# Until P8a taught `kind` to read a PE they were invisible here and the question never came up.
+# Afterwards two callers disagreed about what a machine file is, and neither said so. `dependencies`
+# has always dispatched on the *host* rather than on the file, so on Linux it asked `ldd` about a
+# launcher stub, `ldd` answered "not a dynamic executable", and `verify` passed over it in silence —
+# a check asking nothing, again. `strip.mapped` is not silent: it refuses to write over a file it
+# cannot read, and P4b's first run on CI died on `t32.exe` in three of the four Unix cells.
+#
+# Answered once, here, because `machine_files` is where both of them get their list.
+LOADED = {"linux": "elf", "darwin": "macho", "win32": "pe"}
+
 
 class Unbundleable(SystemExit):
     """Raised where continuing would publish an archive that cannot work on another machine."""
@@ -180,13 +195,18 @@ def loadable(path: Path) -> bool:
 
 
 def machine_files(tree: Path, directories: Sequence[str] = BINARY_DIRECTORIES) -> list[Path]:
-    """Every ELF or Mach-O in the tree the loader will load, in a stable order, symlinks skipped.
+    """Every binary in the tree *this platform's* loader will load, in a stable order, symlinks
+    skipped.
 
     *directories* is where to look, and a tree whose payload sits at its own root has to say so —
     ``machine_files(tree, ("",))``. The default finds nothing in such a tree, which would make
     `verify` return no problems and `floor` return no floor, both of them for the reason that
     neither looked: a check that passes by asking nothing is the failure this argument exists to
     prevent. Caddy is the first archive here shaped that way and the reason it is an argument.
+
+    The format is not an argument, because nothing here packs a tree for an operating system it is
+    not running on — `dependencies` asks `ldd`, `otool` or `cygcheck`, and none of the three can
+    answer for another one. See `LOADED` for what that excludes and what it cost to find out.
     """
     found = []
     for directory in directories:
@@ -196,7 +216,7 @@ def machine_files(tree: Path, directories: Sequence[str] = BINARY_DIRECTORIES) -
         for path in sorted(root.rglob("*")):
             if path.is_symlink() or not path.is_file():
                 continue
-            if kind(path) and loadable(path) and path not in found:
+            if kind(path) == LOADED.get(sys.platform) and loadable(path) and path not in found:
                 found.append(path)
     return found
 

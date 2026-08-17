@@ -78,6 +78,7 @@ ARCHIVES = {"linux": ["--strip-debug"], "macos": ["-S"]}
 # the file, and the four kinds of section header a static library is read through.
 SHF_ALLOC = 0x2
 SHT_NOBITS = 0x8
+PT_LOAD = 0x1
 SHT_SYMTAB, SHT_RELA, SHT_REL = 0x2, 0x4, 0x9
 STB_LOCAL, STT_SECTION = 0, 3
 
@@ -263,6 +264,70 @@ def countersigned(path: Path) -> str | None:
                         f"bytes at page {slot} — on arm64 the kernel answers that with SIGKILL")
         return None
     return f"{path.name} has a code signature with no CodeDirectory in it"
+
+
+def unmapped(path: Path) -> list[str]:
+    """Allocated sections whose bytes lie outside every ``PT_LOAD``, which is the two tables
+    disagreeing.
+
+    **A precondition, and the only one here that stops the operation instead of judging it.** An ELF
+    says what it contains twice — the section headers, which a *linker* reads, and the program
+    headers, which the *loader* reads — and nothing enforces that the two describe the same file.
+    GNU `strip` works from the section table and writes a new program header table out of it, so
+    where the two disagree it does not preserve the disagreement: it resolves it, in the section
+    table's favour, and whatever the loader was reaching through the old segments stops being
+    mapped.
+
+    That is not hypothetical and it is not rare enough to leave to chance. python-build-standalone
+    runs BOLT over the `x86_64-unknown-linux-gnu` interpreter, and BOLT moves `.dynstr`'s 45 KB of
+    bytes to the end of the file while leaving its `sh_addr` at ``0x3ff5a0``, inside the first
+    ``PT_LOAD`` — where the bytes are not. `strip --strip-all` says so itself, in a warning nobody
+    reads (``allocated section `.dynstr' not in segment``), shrinks that segment from ``0x1000`` to
+    ``0x5a0``, and produces an interpreter whose ``DT_STRTAB`` points at unmapped memory: every
+    dynamic symbol name reads back as the empty string and the process dies before `main` with
+    ``undefined symbol: , version``. Measured on binutils 2.42, the version ubuntu-24.04 runs, by
+    running the binary before and after and restoring it in between. `lib/libpython3.14.so.1.0` in
+    the same archive has a consistent layout, strips cleanly, and is worth four times the saving.
+    :func:`mapped` catches the damage after the fact — it is what caught this — but by then the only
+    copy of the file has been overwritten, so the answer has to be asked first.
+
+    Read from the file, not from `strip`'s warning, because a warning is a string on stderr that a
+    future binutils may reword and because this has to be true of a file rather than of a tool.
+    Mach-O gets an empty list: it has no second table to disagree with, and the two macOS cells of
+    this same release strip without complaint.
+    """
+    blob = path.read_bytes()
+    if blob[:4] != ELF_MAGIC:
+        return []
+    end = "<" if blob[5] == 1 else ">"
+    e_phoff, e_shoff = struct.unpack_from(end + "QQ", blob, 0x20)
+    e_phentsize, e_phnum = struct.unpack_from(end + "HH", blob, 0x36)
+    e_shentsize, e_shnum, e_shstrndx = struct.unpack_from(end + "HHH", blob, 0x3A)
+    if not e_shoff or not e_shnum or e_shstrndx >= e_shnum:
+        return []
+
+    loads = []
+    for index in range(e_phnum):
+        head = struct.unpack_from(end + "IIQQQQQQ", blob, e_phoff + index * e_phentsize)
+        if head[0] == PT_LOAD:
+            loads.append((head[2], head[5]))                          # p_offset, p_filesz
+
+    def header(index: int) -> tuple:
+        return struct.unpack_from(end + "IIQQQQ", blob, e_shoff + index * e_shentsize)
+
+    names_at = header(e_shstrndx)[4]
+    astray = []
+    for index in range(e_shnum):
+        name, kind, flags, _addr, offset, size = header(index)
+        # `.bss` and its kind occupy address space and no file, so there is nothing for a segment to
+        # cover and nothing for a strip to strand.
+        if not flags & SHF_ALLOC or kind == SHT_NOBITS or not size:
+            continue
+        if any(at <= offset and offset + size <= at + length for at, length in loads):
+            continue
+        stop = blob.index(b"\0", names_at + name)
+        astray.append(blob[names_at + name:stop].decode())
+    return astray
 
 
 # ------------------------------------------------------------------------- what a linker sees ---
@@ -624,6 +689,21 @@ def symbols(tree: Path, paths: Sequence[Path], flags: Sequence[str],
         relative = path.relative_to(tree).as_posix()
         with path.open("rb") as handle:
             archive = handle.read(8) == AR_MAGIC
+
+        # Asked before the file is opened for writing, because the proof below is made by comparing
+        # against a copy this does not keep. See :func:`unmapped`: where the section table and the
+        # segment table disagree, `strip` resolves the disagreement rather than preserving it, and
+        # the file it hands back is the one it broke. Skipped rather than refused — the archive
+        # ships either way and upstream's binary is the one that works, which is the same trade
+        # `IMAGES` makes by having no `windows` row — and named rather than passed over, because a
+        # file quietly left out of `upstream.changed` is a saving nobody can account for.
+        astray = [] if archive else unmapped(path)
+        if astray:
+            print(f"leaving {relative} unstripped: {', '.join(astray)} is allocated but sits "
+                  f"outside every PT_LOAD, so `strip` would rebuild the program headers without "
+                  f"it and publish a binary that cannot resolve a symbol")
+            continue
+
         proof = resolvable if archive else mapped
         noun = "debug information" if archive else "symbol table"
         seeing = "a linker can resolve" if archive else "a loader or a linker can see"

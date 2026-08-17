@@ -25,7 +25,7 @@ tree still had to offer, so a saving of that size cost nothing anybody could arg
 | --- | --- | --- | --- |
 | PHP | 7.0 – newest, 6 targets | `php_windows`, `php_unix`, `php_legacy_unix` | yes — P2 |
 | Node.js | 16 – newest, 6 targets | `node` | yes — P3 |
-| Python | 3.10 – newest, 6 targets | `python` | yes — P4, P4a and P4b |
+| Python | 3.10 – newest, 6 targets | `python` | yes — P4, P4a, P4b and P4c |
 | Ruby | 3.2 – newest, 6 targets | `ruby`, `ruby_unix` | yes — P5, P5a and P5b |
 | Caddy | 2.0 – newest, 6 targets | `caddy` | yes |
 | MariaDB | 10.6 – newest, 6 targets | `mariadb`, `mariadb_deb`, `mariadb_build` | yes — it is where the rule came from |
@@ -530,6 +530,74 @@ is not published unless the mapped image is identical. And extracting a Unix tar
 symlinks into copies, so the local run stripped `bin/python` and `bin/python3` as well; on a runner
 `relocate.machine_files` skips them and the four paths above are what `upstream.changed` will name.
 
+### [x] P4c — Python: what P4b's first run on CI found **(rule)**
+
+P4b was ticked on 2026-08-16 and its workflow was not run again until the next day. When it was, all
+four Unix cells were red, for two unrelated reasons, and the second one is the reason this section is
+not a footnote to P4b.
+
+#### `machine_files` was answering for three loaders at once
+
+Three of the four cells died on `t32.exe is neither a 64-bit ELF nor a thin 64-bit Mach-O`. That file
+is one of six PE launcher stubs `pip` vendors from `distlib` and ships on *every* platform, because
+`pip` copies one to disk whenever it writes a Windows console script. They are in
+`lib/python3.X/site-packages/pip/_vendor/distlib/`, which is under `lib`, so they were in
+`machine_files` on Unix as well.
+
+They had been invisible until P8a taught `relocate.kind` to read a PE, and after it the two callers
+of `machine_files` disagreed without either saying so. `dependencies` dispatches on the **host**, not
+on the file, so on Linux it asked `ldd` about a Windows stub, `ldd` answered "not a dynamic
+executable", and `verify` passed over six files in silence — the same failure as P6a, in the opposite
+direction and on the cells P6a was not looking at. `strip.mapped` is not silent: it refuses to write
+over a file it cannot read, which is how this surfaced at all.
+
+Fixed in `relocate.LOADED`, one table, at the only place both callers get their list. Nothing here
+packs a tree for an operating system it is not running on — `ldd`, `otool` and `cygcheck` each answer
+for one — so the format is not an argument. On linux-x86_64 the scan goes from 15 files to **9**,
+identically under the default directories and under `("",)`; the six that go are the six stubs. The
+comment P6a left in `python.py` claiming 15 was right about the count and wrong about what was in it,
+and now says so.
+
+#### GNU strip destroys the x86_64 interpreter, and P4b caught it
+
+`linux-x86_64` died earlier, in `strip`, on `bin/python3.14`: *changed 2 thing(s) a loader or a
+linker can see — segment 1, segment 2*. That is not a false alarm and the check is not too strict.
+Run on ubuntu-24.04 with binutils 2.42, upstream's own binary, and one variable at a time:
+
+| | |
+| --- | --- |
+| as upstream published it | `runs: 3.14.7 \| OpenSSL 3.5.7`, exit 0 |
+| after `strip --strip-all bin/python3.14` | `undefined symbol: , version`, **exit 127** |
+| the same file restored, nothing else changed | exit 0 |
+| after `strip --strip-all lib/libpython3.14.so.1.0` | exit 0 |
+
+python-build-standalone runs BOLT over this one cell, and BOLT moves `.dynstr`'s 45 KB to the end of
+the file while leaving its `sh_addr` at `0x3ff5a0` — inside the first `PT_LOAD`, where the bytes are
+not. An ELF says what it holds twice and nothing enforces that the two agree. GNU `strip` works from
+the section table and writes a new program header table out of it, so it does not preserve that
+disagreement, it resolves it: the first `PT_LOAD` shrinks from `0x1000` to `0x5a0`, `DT_STRTAB` ends
+up pointing at unmapped memory, every dynamic symbol name reads back as the empty string, and the
+process dies before `main`. `strip` says so itself — ``allocated section `.dynstr' not in segment`` —
+in a warning going to stderr that nobody was reading.
+
+**P4b's own stated limit is what hid this.** Its validation ran `llvm-objcopy`, because a runner's
+`strip` cannot be run from a Windows machine, and llvm-objcopy carries the program header table
+across instead of rebuilding it. The reasoning offered for the substitution — that `mapped` makes the
+tool irrelevant, since the artifact is not published unless the mapped image is identical — was
+sound, and it is exactly what happened: the artifact was not published. It just took until the real
+tool ran to find out which tool that sentence was protecting us from.
+
+So `strip.unmapped` asks first, out of the file rather than out of the warning, and the file is left
+alone when the answer is yes. Skipped and named, not refused: upstream's binary is the one that
+works, the archive ships either way, and this is the same trade `strip.IMAGES` already makes by
+having no `windows` row. It costs 2.99 MB of a 100.8 MB tree. `lib/libpython3.14.so.1.0`, whose
+layout is consistent, still strips and is worth 12.2 MB — four times as much — and the two macOS
+cells and linux-aarch64 are unaffected.
+
+Verified by running the recipe itself, `tools/python.py --version 3.14`, on Ubuntu 24.04: pruned,
+stripped three files, left `bin/python3.14` alone with the reason printed, passed `verify`, passed
+the smoke test through `pip` and a live TLS chain, and packed.
+
 ### [x] P5 — Ruby: make the two recipes answer the same questions **(rule)**
 
 `ruby_smoke.py` exists precisely so that a borrowed Ruby and a compiled Ruby make the same claim, and
@@ -981,12 +1049,12 @@ Measured, not argued: every claim above comes from a packed archive — the publ
 and 1.30.4, and an 18.6, an 8.5.9 and a 1.30.4 built on this machine — and each recipe was re-run
 with its cell open before the change was written down.
 
-Two things this turned up that are **not** P6a and are not fixed here. Both are the same shape as the
-gap itself — work that landed and was ticked without the workflow ever being run again — and both are
-now first-class open items: P4b's strip check has never once run in CI and fails on all four Unix
-Python cells; and every published PHP archive predates P2, so `pdo_firebird` is in them, declared in
-`extensions.shared` and unable to load. The PostgreSQL smoke test also cannot pass on a GitHub
-Windows runner at all, which runs as an administrator; that one blocks P12 rather than this.
+Two things this turned up that are **not** P6a. Both are the same shape as the gap itself — work that
+landed and was ticked without the workflow ever being run again — and both became first-class open
+items: P4b's strip check had never once run in CI and failed on all four Unix Python cells, which is
+**P4c** and is fixed; and every published PHP archive predates P2, so `pdo_firebird` is in them,
+declared in `extensions.shared` and unable to load, which is **P13**. The PostgreSQL smoke test also
+cannot pass on a GitHub Windows runner at all, which runs as an administrator; that is **P12a**.
 
 ---
 
