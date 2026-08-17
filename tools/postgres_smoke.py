@@ -296,9 +296,188 @@ def said(log: Path, tail: int = 8000) -> str:
     return text[-tail:] if text else "(the server wrote nothing)"
 
 
+def elevated() -> bool:
+    """Whether this process carries Administrators, which is the thing `postgres` refuses to be."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (AttributeError, OSError, ImportError):
+        return False
+
+
+class Restricted:
+    """A process started under a restricted token, with the four things `Popen` is used for here.
+
+    `poll`, `wait`, `kill` and `returncode` — deliberately not a `Popen` subclass, because it is not
+    one and pretending would invite the rest of that interface to be used.
+    """
+
+    def __init__(self, handle: int, pid: int) -> None:
+        import ctypes
+        from ctypes import wintypes
+        self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        self._kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE,
+                                                      ctypes.POINTER(wintypes.DWORD)]
+        self._kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        self._handle, self.pid, self.returncode = handle, pid, None
+
+    def _exit_code(self) -> int | None:
+        import ctypes
+        from ctypes import wintypes
+        if self._kernel32.WaitForSingleObject(wintypes.HANDLE(self._handle), 0) != 0:
+            return None                                              # not WAIT_OBJECT_0
+        code = wintypes.DWORD()
+        self._kernel32.GetExitCodeProcess(wintypes.HANDLE(self._handle), ctypes.byref(code))
+        return int(code.value)
+
+    def poll(self) -> int | None:
+        if self.returncode is None:
+            self.returncode = self._exit_code()
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        from ctypes import wintypes
+        span = 0xFFFFFFFF if timeout is None else int(timeout * 1000)
+        if self._kernel32.WaitForSingleObject(wintypes.HANDLE(self._handle), span) != 0:
+            raise subprocess.TimeoutExpired("postgres", timeout or 0)
+        return self.poll()
+
+    def kill(self) -> None:
+        from ctypes import wintypes
+        self._kernel32.TerminateProcess(wintypes.HANDLE(self._handle), 1)
+
+
+def unelevated(argv: list[str], cwd: Path, environment: dict[str, str], sink) -> Restricted:
+    """Start *argv* with Administrators disabled in its token, the way PostgreSQL starts itself.
+
+    **The runner is the anomaly here, not the check.** `postgres` refuses to run from a token holding
+    Administrators — *Execution of PostgreSQL by a user with administrative permissions is not
+    permitted* — and GitHub's `windows-2022` image runs its steps elevated, so every leg of
+    `build-postgres` has died at this line since the workflow existed. Nothing was wrong with the
+    archive: `verify` passes on the runner before this, and a user's machine never reaches it, because
+    an interactive Windows account is a *filtered* token and `pgwin32_is_admin` answers no.
+
+    The tempting fixes both cost the thing being tested. Starting through `pg_ctl start` would work —
+    that is exactly what `pg_ctl` does on Windows — but the claim this function makes is that the
+    server runs as a **direct, supervised child**, which is how MixEngine will run it and which
+    `pg_ctl` deliberately is not. Skipping the smoke test on Windows would publish the one cell no
+    smoke test had ever covered.
+
+    So the environment is corrected instead: the same two SIDs PostgreSQL's own
+    `src/common/restricted_token.c` drops — Administrators and Power Users — are disabled in a
+    restricted copy of this process's token, and the server is started with it. `CreateProcessAsUser`
+    needs no privilege for this, because the token is a restricted version of the caller's own; that
+    special case is the whole reason `initdb` and `pg_ctl` can already do it and this can too.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    class SidAndAttributes(ctypes.Structure):
+        _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", wintypes.DWORD)]
+
+    class Authority(ctypes.Structure):
+        _fields_ = [("Value", ctypes.c_byte * 6)]
+
+    class StartupInfo(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD), ("lpReserved", wintypes.LPWSTR),
+            ("lpDesktop", wintypes.LPWSTR), ("lpTitle", wintypes.LPWSTR),
+            ("dwX", wintypes.DWORD), ("dwY", wintypes.DWORD),
+            ("dwXSize", wintypes.DWORD), ("dwYSize", wintypes.DWORD),
+            ("dwXCountChars", wintypes.DWORD), ("dwYCountChars", wintypes.DWORD),
+            ("dwFillAttribute", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+            ("wShowWindow", wintypes.WORD), ("cbReserved2", wintypes.WORD),
+            ("lpReserved2", ctypes.POINTER(ctypes.c_byte)),
+            ("hStdInput", wintypes.HANDLE), ("hStdOutput", wintypes.HANDLE),
+            ("hStdError", wintypes.HANDLE),
+        ]
+
+    class ProcessInformation(ctypes.Structure):
+        _fields_ = [("hProcess", wintypes.HANDLE), ("hThread", wintypes.HANDLE),
+                    ("dwProcessId", wintypes.DWORD), ("dwThreadId", wintypes.DWORD)]
+
+    def complain(what: str) -> None:
+        raise SystemExit(f"{what} failed: {ctypes.WinError(ctypes.get_last_error())}")
+
+    # Declared rather than left to ctypes' defaults, because the default return type is a 32-bit
+    # int and `GetCurrentProcess` answers the pseudo-handle ``(HANDLE)-1``: truncated, it becomes a
+    # handle Windows rejects, and the first thing this function did failed with *The handle is
+    # invalid*. Everything taking a HANDLE is spelled out for the same reason.
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.SetHandleInformation.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                          ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.CreateRestrictedToken.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(SidAndAttributes),
+        wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p,
+        ctypes.POINTER(wintypes.HANDLE)]
+
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0xF01FF, ctypes.byref(token)):
+        complain("OpenProcessToken")
+
+    # S-1-5-32-544 and S-1-5-32-547, named the way the SID is actually built rather than spelled.
+    nt = Authority((ctypes.c_byte * 6)(0, 0, 0, 0, 0, 5))
+    drop = (SidAndAttributes * 2)()
+    advapi32.AllocateAndInitializeSid.argtypes = [
+        ctypes.POINTER(Authority), ctypes.c_byte, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+        wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p)]
+    for slot, alias in enumerate((0x220, 0x223)):                    # ADMINS, POWER_USERS
+        sid = ctypes.c_void_p()
+        if not advapi32.AllocateAndInitializeSid(ctypes.byref(nt), 2, 0x20, alias, 0, 0, 0, 0, 0, 0,
+                                                 ctypes.byref(sid)):
+            complain("AllocateAndInitializeSid")
+        drop[slot].Sid, drop[slot].Attributes = sid.value, 0
+
+    restricted = wintypes.HANDLE()
+    if not advapi32.CreateRestrictedToken(token, 0, 2, drop, 0, None, 0, None,
+                                          ctypes.byref(restricted)):
+        complain("CreateRestrictedToken")
+
+    # The log file the parent already opened, made inheritable so the child writes into the same
+    # file rather than a second one; stdin is the null device, because a server that reads from a
+    # console handle it inherited is a hang nobody can see.
+    import msvcrt
+    handle = msvcrt.get_osfhandle(sink.fileno())
+    kernel32.SetHandleInformation(wintypes.HANDLE(handle), 1, 1)
+    devnull = open(os.devnull, "rb")
+    quiet = msvcrt.get_osfhandle(devnull.fileno())
+    kernel32.SetHandleInformation(wintypes.HANDLE(quiet), 1, 1)
+
+    started = StartupInfo()
+    started.cb = ctypes.sizeof(StartupInfo)
+    started.dwFlags = 0x100                                          # STARTF_USESTDHANDLES
+    started.hStdInput, started.hStdOutput, started.hStdError = quiet, handle, handle
+
+    block = "".join(f"{name}={value}\0" for name, value in sorted(environment.items())) + "\0"
+    running = ProcessInformation()
+    advapi32.CreateProcessAsUserW.argtypes = [
+        wintypes.HANDLE, wintypes.LPCWSTR, wintypes.LPWSTR, ctypes.c_void_p, ctypes.c_void_p,
+        wintypes.BOOL, wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR,
+        ctypes.POINTER(StartupInfo), ctypes.POINTER(ProcessInformation)]
+    made = advapi32.CreateProcessAsUserW(
+        restricted, None, ctypes.create_unicode_buffer(subprocess.list2cmdline(argv)), None, None,
+        True, 0x400, ctypes.create_unicode_buffer(block), str(cwd),                # UNICODE_ENVIRONMENT
+        ctypes.byref(started), ctypes.byref(running))
+    devnull.close()
+    if not made:
+        complain("CreateProcessAsUser")
+    for spent in (running.hThread, restricted, token):
+        kernel32.CloseHandle(spent)
+    return Restricted(running.hProcess, int(running.dwProcessId))
+
+
 def await_ready(
-    tree: Path, provides: dict[str, str], port: int, process: subprocess.Popen, log: Path,
-    path: str, seconds: float = 120,
+    tree: Path, provides: dict[str, str], port: int, process: subprocess.Popen | Restricted,
+    log: Path, path: str, seconds: float = 120,
 ) -> None:
     """Wait for ``pg_isready``, or say what the server said instead.
 
@@ -370,12 +549,19 @@ def server(tree: Path, version: str, provides: dict[str, str], windows: bool) ->
     port = free_port()
     conf = configuration(work, port, windows)
     log = work / "postgres.log"
+    argv = [str(tree / provides["postgres"]), f"--config-file={conf}"]
+    environment = {**os.environ, "PATH": path}
     with log.open("wb") as sink:
-        process = subprocess.Popen(
-            [str(tree / provides["postgres"]), f"--config-file={conf}"],
-            stdout=sink, stderr=subprocess.STDOUT, cwd=str(work),
-            env={**os.environ, "PATH": path},
-        )
+        # A direct child either way, which is the claim; the token is the only thing that differs,
+        # and only where this process has one `postgres` will not accept. See `unelevated`.
+        if elevated():
+            print("dropping Administrators from the server's token: this process is elevated, "
+                  "and postgres refuses to start from a token that is")
+            process = unelevated(argv, work, environment, sink)
+        else:
+            process = subprocess.Popen(
+                argv, stdout=sink, stderr=subprocess.STDOUT, cwd=str(work), env=environment,
+            )
 
     try:
         await_ready(tree, provides, port, process, log, path)

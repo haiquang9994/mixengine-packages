@@ -1864,6 +1864,41 @@ Two things to do while running them, both of which get easier the fewer versions
   everything just published. It is the one moment when a full sweep is cheap and the one time the
   artifacts have never been read back from the releases page by anything.
 
+### [x] P12a — PostgreSQL cannot be smoke-tested on a runner that is an administrator
+
+One of the four could not be built at all, and it is the only one of P12's blockers that was a
+defect rather than an errand. `build-postgres` has run twice in its life and been red both times, on
+every leg, at the same line:
+
+> Execution of PostgreSQL by a user with administrative permissions is not permitted. The server
+> must be started under an unprivileged user ID…
+
+Nothing is wrong with the archive. `relocate.verify` passes on the runner immediately before this,
+and no user ever reaches it: an interactive Windows account gets a *filtered* token, so
+`pgwin32_is_admin` answers no even for someone in the Administrators group. GitHub's `windows-2022`
+image runs its steps **elevated**, which is the one configuration PostgreSQL refuses.
+
+`initdb` and `pg_ctl` never hit it because they re-execute themselves under a restricted token —
+`src/common/restricted_token.c` — so the only casualty is the smoke test's own line, which starts
+`postgres --config-file=` directly with `subprocess.Popen`.
+
+Two fixes were available and both cost the thing being tested. Starting through `pg_ctl start` works
+and is one line, but the claim this smoke test makes is that the server runs as a **direct,
+supervised child**, which is how MixEngine will run it and which `pg_ctl` deliberately is not.
+Skipping Windows would leave unpublished the one cell no smoke test had ever covered. So the runner
+is corrected instead of the check: `postgres_smoke.unelevated` disables the same two SIDs
+PostgreSQL's own code disables — Administrators and Power Users — in a restricted copy of this
+process's token, and starts the server with it. `CreateProcessAsUser` needs no privilege for that,
+because the token is a restricted version of the caller's own, which is the same special case
+`initdb` relies on. It runs only when `elevated()` is true, so a developer's machine takes the
+`Popen` path unchanged.
+
+Verified locally for everything except the privilege drop — spawn, log redirection, working
+directory, environment, an exit code of 7 read back, `poll()` before exit, `TimeoutExpired` at the
+timeout the caller catches, and `kill()`. The drop itself cannot be shown from an unelevated shell,
+where UAC has already marked Administrators deny-only in both children; the runner is what answers
+that, and it is why this is ticked against a build rather than a local run.
+
 ---
 
 ## Working on this file
