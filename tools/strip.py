@@ -38,6 +38,7 @@ recipe knows what it built. Python 3 stdlib only, like everything else in this d
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import shutil
 import struct
@@ -104,8 +105,20 @@ PROGRAM_HEADER = ("p_type", "p_flags", "p_vaddr", "p_paddr", "p_filesz", "p_mems
 SECTION_HEADER = ("sh_type", "sh_flags", "sh_addr", "sh_size", "contents")
 MACHO_SECTION = ("addr", "length", "flags", "contents")
 # What :func:`_macho_object` and :func:`_elf_object` put in a `symbols` entry, told apart by length.
-MACHO_SYMBOL = ("name", "type", "section", "value")
+# The Mach-O row carries no address: see that function for why a `value` there is the assembler's
+# layout rather than the object's content.
+MACHO_SYMBOL = ("name", "type", "section", "contents", "references")
 ELF_SYMBOL = ("name", "bind", "type", "section", "value", "size")
+
+# The two structured sections a Mach-O strip rewrites wholesale, and the section types whose whole
+# licence is that identical entries may be merged. Each is read by its own rule below, because a
+# comparison that reads them as flat bytes is comparing where the assembler put things.
+UNWIND = "__LD,__compact_unwind"
+UNWIND_RECORD = 32
+FRAME = "__TEXT,__eh_frame"
+LITERAL_SECTIONS = {0x2: 0, 0x3: 4, 0x4: 8, 0x5: 8, 0xE: 16}     # cstring, 4/8/pointer/16-byte
+ZEROFILL_SECTIONS = {0x1, 0xC, 0x12}
+CPU_ARM64, CPU_X86_64 = 0x0100000C, 0x01000007
 
 ELF_MAGIC = b"\x7fELF"
 MACHO_MAGIC = b"\xcf\xfa\xed\xfe"
@@ -325,11 +338,11 @@ def moved(key: str, old: object, new: object, depth: int = 2) -> str:
         return key
 
     # **A list of symbols, compared by name before anything else.** That order is the whole of what
-    # `resolvable` is asking — a name that is gone cannot be linked against, and a name that is
-    # still there with a different address in a relocatable object has not gone anywhere. The ELF
-    # branch of `_elf_object` normalises this by construction and the Mach-O branch cannot: `sh_addr`
-    # is 0 for every section of an ELF object and Apple's assembler lays its objects out at real
-    # offsets, so a symbol's `value` moves whenever a `__DWARF` section ahead of it is removed.
+    # `resolvable` is asking — a name that is gone cannot be linked against, and a name still there
+    # describing the same bytes has not gone anywhere, wherever those bytes now sit. Which of the
+    # remaining fields moved is worth saying after that and not before it: `contents` is the atom a
+    # name stands for and `references` is what that atom reaches out to, and the two read very
+    # differently in a refusal.
     if old and new and isinstance(old[0], tuple) and old[0] and isinstance(old[0][0], str):
         was, now = {item[0] for item in old}, {item[0] for item in new}
         gone, fresh = sorted(was - now), sorted(now - was)
@@ -387,7 +400,9 @@ def tally(before: dict, after: dict, differences: Sequence[str]) -> str:
             if was.get(name) == now.get(name):
                 continue
             kind = ("relocations" if name.startswith("relocations against ")
-                    else "sections" if name.startswith("section ") else name)
+                    else "sections" if name.startswith("section ")
+                    else "atoms" if name.startswith("atoms in ")
+                    else "literals" if name.startswith("literals in ") else name)
             counted[kind] = counted.get(kind, 0) + 1
     if not counted:
         return ""
@@ -672,15 +687,100 @@ def _elf_object(blob: bytes) -> dict[str, object]:
     return seen
 
 
-def _macho_object(blob: bytes) -> dict[str, object]:
-    """A relocatable Mach-O reduced to the same three things, where the format spells them
-    otherwise.
+def _cfi_entries(body: bytes, addr: int) -> list[int]:
+    """The start address of every CIE and FDE in an `__eh_frame`, off its own length prefixes."""
+    here, at = [], 0
+    while at + 4 <= len(body):
+        length, = struct.unpack_from("<I", body, at)
+        here.append(addr + at)
+        if length == 0:                                          # the terminator, and the end
+            break
+        if length == 0xFFFFFFFF or at + 4 + length > len(body):  # 64-bit form, or a walk gone wrong
+            return []
+        at += 4 + length
+    return here
 
-    There is no `SHF_ALLOC` and no separate debug section flag, so the line is drawn where the
-    compiler drew it: DWARF on this platform lives in sections whose *segment* name is `__DWARF`,
-    and everything else is what will be linked. Debug symbols are the `N_STAB` entries, which is the
-    same distinction the symbol table makes itself, and they are dropped before the comparison for
-    the reason ELF's locals are — `strip -S` exists to remove exactly those.
+
+def _frame_opaque(entry: bytes) -> int:
+    """How far into a `__eh_frame` entry the layout reaches, past which its bytes are its own.
+
+    An FDE says where the function is, how far it runs, and — in a block that is there to be skipped
+    without understanding it — where its exception table is. Every one of those is an address or a
+    span, spelled as a constant before this operation and as a relocation after it, so all of them
+    are read once, by name, rather than compared as bytes. The block's length is a LEB128 the format
+    puts there precisely so a reader that does not know the CIE can step over it.
+    """
+    if len(entry) < 8 or not struct.unpack_from("<I", entry, 0)[0]:
+        return 4                                                 # a terminator has nothing after it
+    if not struct.unpack_from("<I", entry, 4)[0]:
+        return 8                                                 # a CIE: only the id above is ours
+    at, shift, size = 24, 0, 0
+    while at < len(entry):
+        byte = entry[at]
+        size |= (byte & 0x7F) << shift
+        at, shift = at + 1, shift + 7
+        if not byte & 0x80:
+            return min(len(entry), at + size)
+    return min(len(entry), 24)
+
+
+def _literal_starts(body: bytes, addr: int, kind: int) -> list[int]:
+    """The start address of every literal in a literal section, by that section's own rule."""
+    width = LITERAL_SECTIONS[kind]
+    if width:
+        return list(range(addr, addr + len(body), width))
+    here, at = [], 0                                             # C strings, NUL-terminated
+    while at < len(body):
+        here.append(addr + at)
+        stop = body.find(b"\0", at)
+        at = len(body) if stop < 0 else stop + 1
+    return here
+
+
+def _macho_object(blob: bytes) -> dict[str, object]:
+    """A relocatable Mach-O reduced to what a linker resolves through it, and to nothing a strip is
+    entitled to rebuild.
+
+    **`strip -S` on macOS does not remove debug information from an object; it reassembles the
+    object without it.** That is the thing P5c cost three CI round trips to learn, and it is not a
+    detail — measured on the published `ruby-3.2.11-macos-aarch64` archive, the operation reorders
+    the sections, reorders the *functions inside* `__text` (`_rb_warn` moves from `0x850` to
+    `0xa540`), renames every local label (`l_.str` becomes `LC1`), coalesces duplicate literals,
+    turns section-relative relocations into references to the symbol sitting there, and rewrites
+    `__eh_frame`'s internal distances as explicit relocations. Stripping the same object outside the
+    archive reproduces all of it byte for byte, so it is `strip`'s behaviour and not the archive's.
+
+    Nothing a linker resolves is lost in any of that: across all 496 Mach-O members of that archive,
+    all 6,159 defined external symbols survive, every atom is identical byte for byte once its
+    relocated fields are read as the names they point at, and no member's set of undefined externals
+    changes. So the comparison is made of what survives, and made in a way that cannot see the rest:
+
+    * an atom, not a section, is the unit — bounded by the symbols in it, or for the three kinds of
+      section that carry their own structure, by that structure;
+    * a reference is what it *names*, never where its target sat: an external symbol by name, one of
+      this object's own places by the contents of the atom it lands in, since a local label's name
+      is not preserved either;
+    * a `SUBTRACTOR` pair encodes a distance from an anchor the two assemblers put in different
+      places, so it is read as the thing it names and the distance is dropped;
+    * addresses, section order, atom order and the assembler's section flags are absent.
+
+    The line for debug information is where the compiler drew it: DWARF lives in sections whose
+    *segment* is `__DWARF`, and debug symbols are the `N_STAB` entries — the same distinction the
+    symbol table makes itself, and exactly what `strip -S` exists to remove.
+
+    What this gives up, stated rather than discovered later, and all of it in the unwind tables:
+    which CIE an FDE belongs to, how far an FDE or a `__compact_unwind` record says its function
+    runs, and where either says the exception table is. Each of those is a distance or an address,
+    each is a bare constant before this operation and a relocation after it — and a span there
+    covers the function *and* the padding behind it, which an alignment moves. The function every
+    one of them is about is compared, by name, and so is everything else in them.
+
+    Everything a linker can reach is still compared, which seven deliberate corruptions of a real
+    member confirm on both macOS cells: a flipped instruction byte, a renamed global, an altered
+    unwind encoding, a relocation aimed at the next symbol, a changed C string, a changed CFI
+    instruction and sixteen zeroed bytes of `__const` are each refused. The one edit that is *not*
+    refused is a byte inside a relocated field, which is the point of blanking them: the linker
+    overwrites those bytes on its way in, so what they hold here is not what anything runs.
     """
     cpu, ncmds = struct.unpack_from("<I", blob, 4)[0], struct.unpack_from("<I", blob, 16)[0]
     # `ARM64_RELOC_ADDEND` puts a *literal* in the field every other relocation type fills with a
@@ -689,7 +789,8 @@ def _macho_object(blob: bytes) -> dict[str, object]:
     # and on 50 of the 116 members of `libruby.3.4-static.a` the twelfth section is one of the
     # `__DWARF` ones this operation removes — so the check reported the strip it had just performed
     # correctly as having damaged the archive.
-    addend = 10 if cpu == 0x0100000C else None                       # CPU_TYPE_ARM64
+    addend = 10 if cpu == CPU_ARM64 else None
+    subtractor = 1 if cpu == CPU_ARM64 else 5 if cpu == CPU_X86_64 else None
     offset, symtab, found = 32, None, []
     for _ in range(ncmds):
         command, size = struct.unpack_from("<II", blob, offset)
@@ -709,7 +810,7 @@ def _macho_object(blob: bytes) -> dict[str, object]:
         offset += size
 
     names: list[str] = []
-    published = []
+    table: list[tuple[str, int, int, int]] = []
     if symtab:
         _, _, symoff, nsyms, stroff, _strsize = symtab
         for index in range(nsyms):
@@ -719,35 +820,261 @@ def _macho_object(blob: bytes) -> dict[str, object]:
             stop = blob.index(b"\0", stroff + strx)
             spelling = blob[stroff + strx:stop].decode("ascii", "replace")
             names.append(spelling)
-            if kind & 0xE0 or not kind & 0x01:                       # N_STAB, or not N_EXT
-                continue
-            where = found[sect - 1][0] + "," + found[sect - 1][1] if 0 < sect <= len(found) else ""
-            published.append((spelling, kind & 0x0E, where, value))
+            if not kind & 0xE0:                                      # not N_STAB
+                table.append((spelling, kind, sect, value))
 
-    seen: dict[str, object] = {}
-    for segment, name, addr, length, where, reloff, nreloc, flags in found:
-        if segment == "__DWARF":
-            continue
-        body = b"" if flags & 0xFF in (0x1, 0xC, 0x12) else blob[where:where + length]
-        seen[f"section {segment},{name}"] = (addr, length, flags,
-                                             hashlib.sha256(body).hexdigest())
-        digest = hashlib.sha256()
+    label = {si: f"{s[0]},{s[1]}" for si, s in enumerate(found, start=1)}
+    live = {si for si, s in enumerate(found, start=1) if s[0] != "__DWARF"}
+
+    # Where each atom begins. Three kinds of section say so themselves and the rest are told by
+    # their symbols — and for those three the symbols are precisely what does not survive: a strip
+    # reorders `__compact_unwind`'s records, relabels `__eh_frame`'s entries and merges literals.
+    bounds: dict[int, list[int]] = {}
+    content: dict[int, bytes] = {}
+    for si in live:
+        _seg, _nm, addr, length, where, _ro, _nr, flags = found[si - 1]
+        content[si] = b"" if flags & 0xFF in ZEROFILL_SECTIONS else blob[where:where + length]
+        if label[si] == UNWIND:
+            here = list(range(addr, addr + length, UNWIND_RECORD))
+        elif label[si] == FRAME:
+            here = _cfi_entries(content[si], addr)
+        elif flags & 0xFF in LITERAL_SECTIONS:
+            here = _literal_starts(content[si], addr, flags & 0xFF)
+        else:
+            here = sorted({value for _n, _k, sect, value in table if sect == si})
+        bounds[si] = here + [addr + length]
+
+    relocations: dict[int, list[tuple]] = {}
+    for si in live:
+        _seg, _nm, _addr, _len, _off, reloff, nreloc, _flags = found[si - 1]
+        rows = []
         for index in range(nreloc):
             address, packed = struct.unpack_from("<II", blob, reloff + index * 8)
-            number, extern = packed & 0xFFFFFF, (packed >> 27) & 1
-            kind = (packed >> 28) & 0xF
-            if extern:
-                spelling = names[number] if number < len(names) else f"symbol #{number}"
-            elif kind == addend:
-                spelling = f"addend {number}"
-            elif 0 < number <= len(found):
-                spelling = f"{found[number - 1][0]},{found[number - 1][1]}"
+            rows.append((address, packed & 0xFFFFFF, (packed >> 27) & 1, (packed >> 28) & 0xF,
+                         (packed >> 24) & 1, 1 << ((packed >> 25) & 3)))
+        relocations[si] = rows
+
+    def piece(si: int, start: int, stop: int) -> bytearray:
+        base = found[si - 1][2]
+        return bytearray(content[si][start - base:stop - base]) if content[si] else bytearray()
+
+    def touching(si: int, start: int, stop: int) -> list[tuple]:
+        base = found[si - 1][2]
+        return [row for row in relocations.get(si, []) if start <= base + row[0] < stop]
+
+    # **What an atom is made of, with every relocated field blanked.** Those fields hold addresses
+    # in a layout this operation rebuilds; what they point at is recovered by name below, so nothing
+    # is given up by refusing to read them as numbers. An `__eh_frame` entry's second word is
+    # blanked with them: it says which CIE the entry belongs to, as a distance before the strip and
+    # as a relocation after it.
+    plain: dict[tuple[int, int], str] = {}
+    for si in bounds:
+        base, flags = found[si - 1][2], found[si - 1][7]
+        for index, start in enumerate(bounds[si][:-1]):
+            stop = bounds[si][index + 1]
+            if not content[si]:
+                plain[(si, start)] = f"zerofill {stop - start}"
+                continue
+            here = piece(si, start, stop)
+            # Read before anything is blanked: an entry's own length and kind are the first two
+            # words, and a relocation lands on the second of them.
+            stops = _frame_opaque(bytes(here)) if label[si] == FRAME else 0
+            for address, _n, _e, _k, _p, width in touching(si, start, stop):
+                at = base + address - start
+                here[at:at + width] = bytes(min(width, max(0, len(here) - at)))
+            if label[si] == FRAME:
+                # Before a strip, on x86_64, those fields are *constants* — a difference between two
+                # addresses the assembler already knows needs no relocation — and the re-layout is
+                # what makes them need one. Both spellings are blanked here, and what they name is
+                # recovered below.
+                here[4:stops] = bytes(max(0, min(stops, len(here)) - 4))
+            # An atom runs to wherever the next one starts, so it carries whatever the assembler put
+            # between them: the last function of `compar.o` is 81 bytes before this operation and 96
+            # after, the fifteen being `nop`. Padding is not content, and trimming it from both
+            # sides is what lets the content compare.
+            if flags & 0x80000400:                               # some or all of it is instructions
+                here = here.rstrip(b"\x90\x00")
+            plain[(si, start)] = hashlib.sha256(bytes(here)).hexdigest()
+
+    def atom_at(si: int, address: int) -> int | None:
+        pick = None
+        for start in bounds.get(si, []):
+            if start > address:
+                break
+            pick = start
+        return pick
+
+    exported = {name for name, kind, _sect, _v in table if kind & 0x01}
+    seated = {name: (sect, atom_at(sect, value), value)
+              for name, _k, sect, value in table if sect in bounds}
+    standing = {(sect, value): name for name, kind, sect, value in table if kind & 0x01}
+
+    def by_name(name: str) -> str:
+        """A symbol a linker can see is its own identity; one it cannot see has none.
+
+        A local falls through to the place it marks, and to the *same* spelling
+        :func:`by_place` gives that place — a strip turns section-relative references into
+        references to the symbol standing there, so one object says by name what the other says by
+        address and neither is a change.
+        """
+        if name in exported:
+            return name
+        seat = seated.get(name)
+        if seat is None or seat[1] is None:
+            return f"local {name}"
+        return by_place(seat[0], seat[2])
+
+    def by_place(si: int, address: int) -> str:
+        """A place in this object, said in a way a re-layout cannot change. A strip rewrites a
+        section-relative reference as a reference to the symbol sitting there, so both spellings
+        have to come out the same or every one of them reads as a change."""
+        if (si, address) in standing:
+            return standing[(si, address)]
+        start = atom_at(si, address)
+        if start is None:
+            return f"{label[si]}+{address - found[si - 1][2]}"
+        if (si, start) in standing:
+            return f"{standing[(si, start)]}+{address - start}"
+        return f"{label[si]} {plain.get((si, start), '?')}+{address - start}"
+
+    def by_address(address: int) -> str:
+        for si in bounds:
+            base, length = found[si - 1][2], found[si - 1][3]
+            if base <= address < base + length:
+                return by_place(si, address)
+        return f"nowhere in this object +{address}"
+
+    def _described(si: int, start: int, here: bytearray, rows: list[tuple]) -> str:
+        """The function an `__eh_frame` entry is about, however this object happens to say it.
+
+        A relocation names it after a strip. Before one, on x86_64, it is a bare number: the
+        assembler knew both addresses and a difference of two knowns needs no relocation. The two
+        are the same fact and have to read as the same fact.
+        """
+        for address, number, extern, kind, _pcrel, _width in rows:
+            if found[si - 1][2] + address - start != 8 or kind == subtractor:
+                continue
+            if extern and number < len(names):
+                seat = seated.get(names[number])
+                return by_place(seat[0], seat[2]) if seat else names[number]
+            if not extern and number in bounds:
+                return label[number]
+        if len(here) >= 16:
+            reach = int.from_bytes(here[8:16], "little", signed=True)
+            return by_address((start + 8 + reach) % (1 << 64))
+        return "unsaid"
+
+    seen: dict[str, object] = {}
+    atoms: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    literals: dict[str, set] = collections.defaultdict(set)
+    unwind: collections.Counter = collections.Counter()
+    frame: collections.Counter = collections.Counter()
+    published: dict[str, tuple] = {}
+    owner: dict[tuple[int, int], list[tuple[str, int]]] = collections.defaultdict(list)
+    for name, kind, sect, value in table:
+        if sect in bounds:
+            owner[(sect, value)].append((name, kind))
+
+    for si in bounds:
+        base, flags = found[si - 1][2], found[si - 1][7]
+        for index, start in enumerate(bounds[si][:-1]):
+            stop = bounds[si][index + 1]
+            here = piece(si, start, stop)
+            rows = touching(si, start, stop)
+            anchored = {base + row[0] for row in rows if row[3] == subtractor}
+            refs = []
+            for address, number, extern, kind, pcrel, width in rows:
+                at = base + address
+                if label[si] == FRAME and 4 <= at - start < _frame_opaque(bytes(here)):
+                    # Everything the layout reaches into, blanked above and said once, below, in the
+                    # one spelling both layouts share.
+                    continue
+                if at in anchored and extern and number < len(names):
+                    # One half of a difference. The end it is measured *from* is an anchor the two
+                    # assemblers put in different places, and that it is the anchor is all it says.
+                    seat = seated.get(names[number])
+                    refs.append((at - start, kind, width, pcrel,
+                                 "here" if seat and seat[0] == si and names[number] not in exported
+                                 else by_name(names[number])))
+                    continue
+                # What the field carries, and the two architectures do not agree. arm64 keeps a
+                # relocation's addend in a *separate* `ARM64_RELOC_ADDEND` and fills a pc-relative
+                # field with instruction bits, so only the eight-byte absolute ones can be read as a
+                # number at all. x86_64 has no such pseudo-relocation and puts the addend in the
+                # field — signed, and layout-free wherever the relocation names a symbol.
+                # `None` is not a field reading zero: address zero is a section's first atom.
+                carried = None
+                if here and at - start + width <= len(here):
+                    if cpu == CPU_ARM64:
+                        if width == 8 and not pcrel:
+                            carried = struct.unpack_from("<Q", bytes(here), at - start)[0]
+                    else:
+                        carried = int.from_bytes(here[at - start:at - start + width],
+                                                 "little", signed=True)
+                if not extern and kind == addend:
+                    target = f"addend {number}"                   # a literal, not a place
+                elif extern and number < len(names):
+                    # `SIGNED_1/2/4` say how many bytes of the instruction follow the field, and a
+                    # field holding an addend is short by exactly that. Read without the bias, a
+                    # reference to a literal lands one byte inside the literal before it.
+                    reach = (carried or 0) + ({6: 1, 7: 2, 8: 4}.get(kind, 0) if pcrel else 0)
+                    seat = seated.get(names[number])
+                    target = by_place(seat[0], (seat[2] + reach) % (1 << 64)) if seat \
+                        else names[number] + (f"+{reach}" if reach else "")
+                elif not extern and number in bounds and carried is not None:
+                    # Where the field is pc-relative it holds the distance from the end of the
+                    # instruction, and `SIGNED_1/2/4` say how many bytes of that instruction follow
+                    # the field itself — so the place it names is recovered rather than the distance
+                    # compared.
+                    ahead = at + width + ({6: 1, 7: 2, 8: 4}.get(kind, 0) if pcrel else 0)
+                    target = by_place(number, (carried + (ahead if pcrel else 0)) % (1 << 64))
+                elif not extern and 0 < number <= len(found):
+                    target = label[number]
+                else:
+                    target = f"symbol #{number}" if extern else f"section #{number}"
+                refs.append((at - start, kind, width, pcrel, target))
+
+            # A CIE says how to unwind and an FDE says what to unwind, and only the second names a
+            # function. Told apart the way the format tells them apart, by whether the second word
+            # is zero — and the answer is kept, so one turning into the other is a difference.
+            role = ""
+            if label[si] == FRAME and len(here) >= 8:
+                span, second = struct.unpack_from("<II", bytes(here), 0)
+                role = "terminator" if not span else "CIE" if not second else "FDE"
+                if role == "FDE" and len(here) >= 16:
+                    refs.append((8, 0, 8, 0, _described(si, start, here, rows)))
+
+            made = (plain[(si, start)], tuple(sorted(refs)))
+            if label[si] == UNWIND:
+                # The function this record describes, and how it is unwound. Not how far it runs:
+                # that field covers the function *and the padding after it*, so it moves with an
+                # alignment rather than with anything the record says. Not its personality or LSDA
+                # either — those a strip copies in from the FDE that carried them, and that FDE is
+                # compared below.
+                encoding, = struct.unpack_from("<I", bytes(here), 12) if len(here) >= 16 else (0,)
+                unwind[(tuple(sorted(row for row in refs if not row[0])), encoding)] += 1
+            elif label[si] == FRAME:
+                frame[(role,) + made] += 1
+            elif flags & 0xFF in LITERAL_SECTIONS:
+                literals[label[si]].add(made)                     # a set: merging them is licensed
+            elif any(kind & 0x01 for _n, kind in owner.get((si, start), [])):
+                for name, kind in owner[(si, start)]:
+                    if kind & 0x01:
+                        published[name] = (kind & 0x0E, label[si]) + made
             else:
-                spelling = f"section #{number}"
-            digest.update(f"{address} {kind} {(packed >> 24) & 7} {spelling}\n".encode())
-        if nreloc:
-            seen[f"relocations against {segment},{name}"] = digest.hexdigest()
-    seen["symbols"] = tuple(sorted(published))
+                atoms[label[si]][made] += 1
+
+    seen["symbols"] = tuple(sorted((name,) + rest for name, rest in published.items()))
+    seen["undefined"] = tuple(sorted(name for name, kind, sect, _v in table
+                                     if not sect and kind & 0x01))
+    for name, counted in atoms.items():
+        seen[f"atoms in {name}"] = tuple(sorted(counted.items()))
+    for name, kept in literals.items():
+        seen[f"literals in {name}"] = tuple(sorted(kept))
+    if unwind:
+        seen["unwind records"] = tuple(sorted(unwind.items()))
+    if frame:
+        seen["frame entries"] = tuple(sorted(frame.items()))
     return seen
 
 
@@ -920,7 +1247,7 @@ def symbols(tree: Path, paths: Sequence[Path], flags: Sequence[str],
                 if not (isinstance(was, dict) and isinstance(now, dict)):
                     return 1
                 inner = {name for name in set(was) | set(now) if was.get(name) != now.get(name)}
-                return 0 if inner & {"symbols", "index", "members"} else 1
+                return 0 if inner & {"symbols", "undefined", "index", "members"} else 1
 
             spelled = ", ".join(moved(key, before.get(key), after.get(key))
                                 for key in sorted(differences, key=gravity)[:4])
