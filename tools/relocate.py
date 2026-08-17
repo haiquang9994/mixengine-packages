@@ -848,14 +848,30 @@ CYGWIN_SOURCE = "https://cygwin.com/pub/cygwin/x86_64/release"
 # trailing digit off `libgcc1` to arrive at `gcc` would be a spelling convention this repository
 # does not control, and it would be silently wrong the first time it was.
 #
-# `libgcc1` is the only row so far and it is not an oversight on Cygwin's part. The GCC runtime
+# `libgcc1` was the first row and it is not an oversight on Cygwin's part. The GCC runtime
 # library is packaged apart from the compiler, and the licence texts — GPLv3 and the Runtime Library
 # Exception the runtime is actually conveyed under — ship with the compiler. Both halves of the row
 # were read off the runner rather than reasoned about: ``cygcheck -l libgcc1-14.4.0-1`` lists
 # **nothing** under `/usr/share/doc`, which is what made this table necessary, and the failure's own
 # listing of directories matching `gcc` answered `gcc` — not the `gcc-core` the package is installed
 # from, which is exactly the kind of near-miss a derived spelling would have shipped.
-CYGWIN_LICENCE_ELSEWHERE = {"libgcc1": "gcc"}
+#
+# The other three arrived together, from **one C++ dependency in a C program**. Redis vendors
+# `fast_float` in 8.0 through 8.6, so those four lines link `cygstdc++-6.dll`, which imports
+# `cygiconv-2.dll` and `cygintl-8.dll` — four bundled libraries where 7.2, 7.4, 8.8 and 8.10 have
+# one. Cygwin splits the runtime out of its source package in all three cases, so all three list
+# nothing of their own. The destinations are read off Cygwin's published file lists rather than
+# inferred from the names: `libstdc++6` and `libgcc1` are both the compiler's, and
+# `usr/share/doc/gcc/` holds `COPYING` and `COPYING.LIB`; `libiconv2` is GNU libiconv's, whose
+# `libiconv` package installs the same two; `libintl8` is gettext-runtime's, filed under `gettext`.
+# The last two are only *installed* if a workflow asks for them, which is why `build-redis.yml`
+# names `libiconv` and `gettext` in a package list that otherwise holds only what compiles.
+CYGWIN_LICENCE_ELSEWHERE = {
+    "libgcc1": "gcc",
+    "libstdc++6": "gcc",
+    "libiconv2": "libiconv",
+    "libintl8": "gettext",
+}
 
 
 def dpkg_owner(path: Path) -> str | None:

@@ -61,7 +61,15 @@ jobs:
           # rather than answering no. `gcc-g++` is what the spike installed and therefore what the
           # build has actually been measured with; whether any dependency needs the C++ front end
           # has not been tested, and a package list is not the place to find out.
-          packages: make gcc-core gcc-g++ pkg-config
+          #
+          # `libiconv` and `gettext` compile nothing and are here for their licence texts. 8.0
+          # through 8.6 vendor `fast_float`, which is C++, so the binaries link `cygstdc++-6.dll`
+          # and it imports `cygiconv-2.dll` and `cygintl-8.dll`. All three travel inside the archive
+          # and none of the three Cygwin packages that install them carries a document, so without
+          # these two the pack stops at `no licence text found for a bundled library` — which is
+          # `relocate.bundled_licences` working. See `CYGWIN_LICENCE_ELSEWHERE` for where each one
+          # is filed.
+          packages: make gcc-core gcc-g++ pkg-config libiconv gettext
           # **Load-bearing, and `build-memcached.yml` found it first.** On PATH, Cygwin's bash wins
           # over Git for Windows and `shell: bash` silently changes meaning for every later step —
           # which then chokes on the CRLF that Actions writes into each step script, reporting
