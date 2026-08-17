@@ -103,6 +103,9 @@ LINKEDIT = {
 PROGRAM_HEADER = ("p_type", "p_flags", "p_vaddr", "p_paddr", "p_filesz", "p_memsz", "p_align")
 SECTION_HEADER = ("sh_type", "sh_flags", "sh_addr", "sh_size", "contents")
 MACHO_SECTION = ("addr", "length", "flags", "contents")
+# What :func:`_macho_object` and :func:`_elf_object` put in a `symbols` entry, told apart by length.
+MACHO_SYMBOL = ("name", "type", "section", "value")
+ELF_SYMBOL = ("name", "bind", "type", "section", "value", "size")
 
 ELF_MAGIC = b"\x7fELF"
 MACHO_MAGIC = b"\xcf\xfa\xed\xfe"
@@ -317,11 +320,30 @@ def moved(key: str, old: object, new: object, depth: int = 2) -> str:
     if not (isinstance(old, tuple) and isinstance(new, tuple)):
         return key
 
-    # A list of things rather than a record of fields — the symbols an object publishes, an
-    # archive's index, the exported names of a dylib. What matters is what left, and a strip that
-    # removed nothing a linker resolves is what this whole module is trying to establish.
-    if old and new and isinstance(old[0], (tuple, str)) and len(old) != len(new):
-        gone = [str(item) for item in old if item not in set(new)]
+    # **A list of symbols, compared by name before anything else.** That order is the whole of what
+    # `resolvable` is asking — a name that is gone cannot be linked against, and a name that is
+    # still there with a different address in a relocatable object has not gone anywhere. The ELF
+    # branch of `_elf_object` normalises this by construction and the Mach-O branch cannot: `sh_addr`
+    # is 0 for every section of an ELF object and Apple's assembler lays its objects out at real
+    # offsets, so a symbol's `value` moves whenever a `__DWARF` section ahead of it is removed.
+    if old and new and isinstance(old[0], tuple) and old[0] and isinstance(old[0][0], str):
+        was, now = {item[0] for item in old}, {item[0] for item in new}
+        gone, fresh = sorted(was - now), sorted(now - was)
+        if gone or fresh:
+            return (f"{key} [{len(gone)} name(s) gone: {', '.join(gone[:3]) or '—'}"
+                    f"{f'; {len(fresh)} new' if fresh else ''}]")
+        # Every name survived, so say which *field* of them moved rather than leaving a reader to
+        # assume the worst about a difference that may be a layout number.
+        names = MACHO_SYMBOL if len(old[0]) == len(MACHO_SYMBOL) else ELF_SYMBOL
+        seen_before = {item[0]: item for item in old}
+        fields = {names[index] for item in new for index in range(1, len(item))
+                  if item[0] in seen_before and seen_before[item[0]][index] != item[index]}
+        return (f"{key} [all {len(was)} name(s) still there; what moved: "
+                f"{', '.join(sorted(fields)) or 'nothing but the order'}]")
+
+    # Any other list — an archive's index, the exported names of a dylib.
+    if old and new and isinstance(old[0], str) and len(old) != len(new):
+        gone = [item for item in old if item not in set(new)]
         added = len(new) - len(old) + len(gone)
         summary = f"{len(gone)} gone" + (f", {added} new" if added else "")
         return f"{key} [{summary}: {', '.join(gone[:2]) or '—'}]"
