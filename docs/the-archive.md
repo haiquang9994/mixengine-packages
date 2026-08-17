@@ -27,13 +27,36 @@ Recovering means publishing a *different* artifact under the same version and re
 that now describes it differently, which anyone who pinned the old hash is entitled to read as
 tampering. There is no quiet repair for this. There is only how long it takes to find out.
 
+## The archive was reset on 2026-08-17, and this is the record of it
+
+The repository itself was deleted and recreated, which took every release with it — 35 packages and
+194 archives, the whole of what the previous index described. Nothing above was wrong about what that
+costs; it is what happened, written down here because a promise this document makes in the present
+tense has a date on it now.
+
+Everything was rebuilt the same day, from the same recipes, at the same version of each line: 55
+packages this time, because the four kinds [P12](roadmap.md) was open about — PostgreSQL, Redis,
+memcached and nginx — were published in the same pass. Every version number that existed before
+exists again. **None of the bytes are the same ones.** They were packed at a different minute by a
+different runner, so every sha256 in the index is new, and any blueprint that pinned a hash from
+before this date will read the artifact it names as a different file — which is exactly the failure
+this document says has no quiet repair, arriving by a route it did not anticipate: not a deleted
+asset, but a deleted repository.
+
+Two things did survive, and they are why a client is not left guessing. The signing key is unchanged
+— `minisign.pub` in this repository is the key the new index is signed with, and it is the key
+compiled into MixEngine — so a verification that passed before passes now. And the version catalogue
+is unchanged, so a blueprint that pins `php-8.1.34` rather than a digest installs exactly what it
+asked for.
+
 GitHub cannot be told any of the above. Tag protection, if you turn it on in the repository settings,
 stops a tag being deleted and does not stop a release or an individual asset being deleted under it,
 which is the failure mode this section is about. So the rule is written here and the enforcement is
 detection: `check-archive.yml` runs `tools/permanence.py` every Wednesday against the published,
 signature-verified index, and asks two questions of it.
 
-*Is every asset still there* — one `HEAD` for each of the 388 URLs the current index implies, which
+*Is every asset still there* — one `HEAD` for each URL the current index implies, 586 of them since
+the archive was rebuilt and 388 before it, which
 costs seconds and no bandwidth. The `Content-Length` that comes back for free is compared to the size
 the index recorded, and that catches the second-most-likely accident after deletion: a build workflow
 re-run against an existing tag, uploading a rebuilt archive over the old one with `--clobber`. Same

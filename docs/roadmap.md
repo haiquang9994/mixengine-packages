@@ -2100,6 +2100,16 @@ the version it was written against and has never been asked about another. Three
 build and the fourth by the check that stands between a build and a signature, which is the order
 those two are in for exactly this reason.
 
+Then `verify.py` refused twice more, and neither was a recipe: **the two schemas had come apart.**
+`schema/artifact.schema.json` has carried `extensions.enabled` since P2 wrote it and types `requires`
+as a bare object, while `schema/index.schema.json` lists `static` and `shared` with
+`additionalProperties: false` and allows exactly `vcredist`, `macos` and `glibc`. So every PHP
+package and both Linux PostgreSQL cells stated something true that the index was not allowed to
+carry — invisible until an index was generated over manifests written after those fields existed,
+which is to say until today. Both fields are in the index schema now, and the second one was found
+by generating the index locally over all 293 manifests and validating it rather than by spending a
+CI round per field.
+
 The fifth finding is not a defect in anything here and is P12b: Redis 7.2 compiles on Windows and
 cannot start there.
 

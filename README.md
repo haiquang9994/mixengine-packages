@@ -36,13 +36,16 @@ line**, and every patch release ever published on that line stays in the index �
 | Mark | Means |
 | :---: | --- |
 | ✅ | an archive for that cell is in the published, signed index today |
-| ○ | the recipe covers the cell and nothing is published yet — [P12](docs/roadmap.md) |
 | — | no artifact is offered there, for the reason on that package's page |
 
-The ✅ marks are what the index actually contains; the ○ and — marks are what the recipe that would
-produce the cell says about it. Where the two could disagree, the index wins and this table is
-wrong — `tools/permanence.py` is what re-reads the index, and each package's page is what explains
-the shape.
+**No cell below is a recipe waiting to be run.** There used to be a third mark for that — a kind
+whose recipe was finished and whose releases page held nothing — and [P12](docs/roadmap.md) was the
+task of running the four builds it stood for. It is closed, and the mark is gone with it: every cell
+here is either an archive or a stated absence.
+
+The ✅ marks are what the index actually contains; the — marks are what the recipe that would produce
+the cell says about it. Where the two could disagree, the index wins and this table is wrong —
+`tools/permanence.py` is what re-reads the index, and each package's page is what explains the shape.
 
 ### [PHP](docs/packages/php.md)
 
@@ -132,11 +135,11 @@ else, so three recipes stand behind this row and three of the cells are compiled
 
 | Version | macOS aarch64 | macOS x86_64 | Linux x86_64 | Linux aarch64 | Windows x86_64 | Windows aarch64 |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **14** | ○ | ○ | ○ | ○ | ○ | — |
-| **15** | ○ | ○ | ○ | ○ | ○ | — |
-| **16** | ○ | ○ | ○ | ○ | ○ | — |
-| **17** | ○ | ○ | ○ | ○ | ○ | — |
-| **18** | ○ | ○ | ○ | ○ | ○ | — |
+| **14** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| **15** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| **16** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| **17** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| **18** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 
 Windows on ARM is upstream's answer rather than this repository's: PostgreSQL does not compile there
 on any version offered here, and the cell opens when 19 ships.
@@ -145,25 +148,31 @@ on any version offered here, and the cell opens when 19 ships.
 
 | Version | macOS aarch64 | macOS x86_64 | Linux x86_64 | Linux aarch64 | Windows x86_64 | Windows aarch64 |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **7.2** | ○ | ○ | ○ | ○ | ○ | — |
-| **7.4** | ○ | ○ | ○ | ○ | ○ | — |
-| **8.0** | ○ | ○ | ○ | ○ | ○ | — |
-| **8.2** | ○ | ○ | ○ | ○ | ○ | — |
-| **8.4** | ○ | ○ | ○ | ○ | ○ | — |
-| **8.6** | ○ | ○ | ○ | ○ | ○ | — |
-| **8.8** | ○ | ○ | ○ | ○ | ○ | — |
-| **8.10** | ○ | ○ | ○ | ○ | ○ | — |
+| **7.2** | ✅ | ✅ | ✅ | ✅ | — | — |
+| **7.4** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| **8.0** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| **8.2** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| **8.4** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| **8.6** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| **8.8** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| **8.10** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 
 The floor is 7.2 because that is the oldest line upstream still patches *and* the last one under a
 BSD licence. Windows x86_64 is the same source compiled against Cygwin rather than ported, with
 `cygwin1.dll` beside the binaries under LGPLv3; the ARM cell is empty because there is no Cygwin
 for it and an aarch64 archive may not hold x86_64 binaries.
 
+**7.2 is the one empty cell in this table that is a version rather than an architecture.** It
+compiles under Cygwin and then faults in its own startup — an access violation between `time()` and
+the version banner, traced on the runner — while the same code runs in 7.4. Neither patching the
+source nor building that one line at a different optimisation level is something this repository
+will do, so Windows starts at 7.4 and 7.2 ships the four cells it can.
+
 ### [Memcached](docs/packages/redis-memcached.md)
 
 | Version | macOS aarch64 | macOS x86_64 | Linux x86_64 | Linux aarch64 | Windows x86_64 | Windows aarch64 |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **1.6** | ○ | ○ | ○ | ○ | ○ | — |
+| **1.6** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 
 One line, because 1.6 is the only one upstream still tags. Windows x86_64 is **not** the same empty
 cell as Redis's, and the reason once given for it — a privilege-dropping source file per Unix and
@@ -176,12 +185,12 @@ cell is compiled under Cygwin on the same configure line with nothing patched, a
 
 | Version | macOS aarch64 | macOS x86_64 | Linux x86_64 | Linux aarch64 | Windows x86_64 | Windows aarch64 |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **1.26** | ○ | ○ | ○ | ○ | ○ | — |
-| **1.27** | ○ | ○ | ○ | ○ | ○ | — |
-| **1.28** | ○ | ○ | ○ | ○ | ○ | — |
-| **1.29** | ○ | ○ | ○ | ○ | ○ | — |
-| **1.30** | ○ | ○ | ○ | ○ | ○ | — |
-| **1.31** | ○ | ○ | ○ | ○ | ○ | — |
+| **1.26** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| **1.27** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| **1.28** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| **1.29** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| **1.30** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| **1.31** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 
 Upstream's only Windows build is a 32-bit x86 one, which runs natively under WOW64 and is what the
 x86_64 cell borrows. Putting it in an archive whose manifest says `aarch64` would be a lie in the
