@@ -62,8 +62,8 @@ the index recorded, and that catches the second-most-likely accident after delet
 re-run against an existing tag, uploading a rebuilt archive over the old one with `--clobber`. Same
 URL, same name, different file.
 
-*Is it still the bytes we signed* — which cannot be answered without downloading the whole thing, six
-gigabytes today and growing with every version published. So a fixed **fraction** is hashed each run
+*Is it still the bytes we signed* — which cannot be answered without downloading the whole thing,
+7.17 GiB today and growing with every version published. So a fixed **fraction** is hashed each run
 rather than a fixed count, and the difference matters: a count keeps the weekly bill flat and lets
 coverage rot as the archive grows, a fraction keeps coverage flat and lets the bill grow with the
 thing it is insuring. At the default of eight slices every asset is hashed within eight weeks however
