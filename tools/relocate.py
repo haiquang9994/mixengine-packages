@@ -843,6 +843,18 @@ LICENCE_GLOBS = ("LICENSE*", "LICENCE*", "COPYING*", "COPYRIGHT*", "copyright")
 # not this file.
 CYGWIN_SOURCE = "https://cygwin.com/pub/cygwin/x86_64/release"
 
+# **A Cygwin package that installs no documentation, and the package that carries its licence.**
+# Named rather than guessed, the way `redis.DEPS_LICENCES` is: a rule that strips `lib` and a
+# trailing digit off `libgcc1` to arrive at `gcc` would be a spelling convention this repository
+# does not control, and it would be silently wrong the first time it was.
+#
+# `libgcc1` is the only row so far and it is not an oversight on Cygwin's part. The GCC runtime
+# library is packaged apart from the compiler, and the licence texts — GPLv3 and the Runtime Library
+# Exception the runtime is actually conveyed under — ship with the compiler. Proved by asking the
+# runner rather than by reading about it: ``cygcheck -l libgcc1-14.4.0-1`` lists **nothing** under
+# `/usr/share/doc`, which is the sentence that made this table necessary.
+CYGWIN_LICENCE_ELSEWHERE = {"libgcc1": "gcc-core"}
+
 
 def dpkg_owner(path: Path) -> str | None:
     """Which Debian package installed this file, if the machine can say."""
@@ -948,7 +960,14 @@ def cygwin_licences(real: Path) -> list[tuple[str, Path]]:
     if not owner:
         return []
 
+    # The package's own directory, and — for a package that installs none — the one named in
+    # :data:`CYGWIN_LICENCE_ELSEWHERE`. Filed under the *owner* either way, because the question the
+    # archive answers is what licenses this DLL and not which directory the file was copied from.
     found = [(owner, text) for text in sorted((shared / owner).glob("*")) if text.is_file()]
+    if not found and owner in CYGWIN_LICENCE_ELSEWHERE:
+        elsewhere = shared / CYGWIN_LICENCE_ELSEWHERE[owner]
+        found = [(owner, text) for text in sorted(elsewhere.glob("*")) if text.is_file()]
+
     # Cygwin's per-package note, which states where the source came from and under what terms.
     readme = shared / "Cygwin" / f"{owner}.README"
     if readme.is_file():
@@ -987,8 +1006,18 @@ def cygwin_documents(root: Path, real: Path) -> str:
     except (OSError, subprocess.SubprocessError) as refusal:
         return f"and `cygcheck -l {package}` could not be run: {refusal}"
     docs = [line.strip() for line in listed.splitlines() if "/share/doc/" in line]
-    return (f"`cygcheck -l {package}` lists under /usr/share/doc: "
-            f"{', '.join(docs) if docs else '(nothing)'}")
+    if docs:
+        return f"`cygcheck -l {package}` lists under /usr/share/doc: {', '.join(docs)}"
+
+    # Nothing of its own, which is the case :data:`CYGWIN_LICENCE_ELSEWHERE` exists for — so say
+    # which directories *do* exist that plausibly hold it, and the next row costs a reading rather
+    # than another build. `libgcc1` -> `gcc`, and `/usr/share/doc/gcc-core` is what turns up.
+    stem = re.sub(r"\d.*$", "", re.sub(r"^lib", "", package)) or package
+    shared = root / "usr" / "share" / "doc"
+    nearby = sorted(place.name for place in shared.glob(f"*{stem}*") if place.is_dir())
+    return (f"`cygcheck -l {package}` lists nothing under /usr/share/doc; directories there "
+            f"matching '{stem}': {', '.join(nearby) if nearby else '(none)'} — add a row to "
+            f"CYGWIN_LICENCE_ELSEWHERE naming the one that carries its licence")
 
 
 def cygwin_source_note(licences: Path, bundled: dict[str, Path]) -> None:
