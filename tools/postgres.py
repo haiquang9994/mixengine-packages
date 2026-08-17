@@ -196,6 +196,25 @@ NOT_SHIPPED = (
     # local development environment installs — and the pair is written on one entry now so that
     # deleting one of them again means deleting the sentence that explains the other.
     "stackbuilder*", "wx*.dll", "wxbase*", "wxmsw*",
+    # **`libpq-oauth`, which is `stackbuilder.exe` again on the other operating system.** PostgreSQL
+    # 18 adds an OAuth 2.0 device-authorization flow for libpq, loaded out of a module of its own, and
+    # EDB's macOS archive ships the module without the libcurl it is built against. Its only
+    # `LC_RPATH` is `@loader_path`, so `@rpath/libcurl.4.dylib` can mean exactly one file —
+    # `lib/libcurl.4.dylib` — and that file is not in the archive. Read out of the published
+    # `postgresql-18.6-1-osx-binaries.zip` rather than inferred, both slices of the universal binary
+    # alike.
+    #
+    # **Dropping it closes a difference between the cells instead of opening one**, which is the fact
+    # that decided this. The Windows archive carries `bin/libcurl.dll` and no `libpq-oauth` at all;
+    # the Linux cells, built from the project's own `.deb`s, carry neither. macOS was the only one of
+    # the six with the module, and it was the one that could not load it — so this is not a feature
+    # being taken away from a row, it is a row being made to say what the other two already say.
+    #
+    # The alternative was to bundle libcurl and re-sign, and it costs the property `thin` exists to
+    # keep: EDB signs these binaries and this recipe changes which bytes ship without ever changing
+    # one. Apple's libcurl is not a file on disk to copy either — it lives in the dyld shared cache —
+    # so bundling would mean Homebrew's, and its OpenSSL behind it.
+    "libpq-oauth*",
 )
 
 # Debug information, by extension, wherever it sits — the same list `mariadb.DEBRIS` carries and for
@@ -704,6 +723,12 @@ def main() -> None:
     # `NOT_SHIPPED` — so the cell that was assumed to have nothing to say had been shipping an
     # unloadable binary. The default `directories` is right here: this tree keeps its binaries in
     # `bin` and `lib`, measured at 135 files either way against a root scan.
+    #
+    # It has now caught the same thing on macOS — `libpq-oauth-18.dylib` against a libcurl EDB does
+    # not ship — and the answer was the same one, for the same reason, in `NOT_SHIPPED`. Two of the
+    # three routes have been checked and corrected by *removal* rather than by rewriting, which is
+    # what "checked and not corrected" was always going to mean in practice: the correction available
+    # to a recipe that must not touch a signature is to decline to ship the file.
     problems = relocate.verify(elsewhere)
     for problem in problems:
         print(f"error: {problem}", file=sys.stderr)

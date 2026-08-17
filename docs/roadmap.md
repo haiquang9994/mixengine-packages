@@ -1957,12 +1957,26 @@ Two of six still fail, and they are the same failure on the two macOS cells:
 That is `verify` working. PostgreSQL 18 adds `libpq-oauth`, which links libcurl, and EDB's macOS
 archive does not carry one — so the answer the recipe wrote down for this case in P7 has come true:
 *EDB's archive is not self-contained after all, and this recipe would have to bundle and re-sign it.*
-Both ways out are decisions rather than fixes. Bundling libcurl means rewriting load commands, which
-invalidates EDB's signature and makes this repository the signer of every macOS binary it ships —
-the exact thing `thin` was designed to avoid. Dropping `libpq-oauth-18.dylib` is P6a's
-`stackbuilder.exe` argument applied again, a module that cannot load being worse than one that is
-absent, and it costs the OAuth device flow that nothing in a local development environment uses.
-Not chosen here, because it is a product decision and not a bug.
+
+**Dropped, and what decided it was the other two cells rather than the argument about signing.** The
+module's only `LC_RPATH` is `@loader_path`, so `@rpath/libcurl.4.dylib` can mean exactly one file,
+`lib/libcurl.4.dylib`, and that file is not in the archive — read out of the published
+`postgresql-18.6-1-osx-binaries.zip` over HTTP ranges, both slices of the universal binary alike, for
+4.6 MB of a 445 MB download. Then the comparison nobody had made: the Windows archive carries
+`bin/libcurl.dll` and **no `libpq-oauth` at all**, and the Linux cells, built from the project's own
+`.deb`s, carry neither. macOS was the only one of the six cells with the module and the only one that
+could not load it. Removing it makes the row say what two thirds of it already said, which is the
+opposite of the parity cost that made this look like a product decision.
+
+So it is `stackbuilder.exe` again, in another operating system's spelling, and settled the same way.
+The alternative was never cheap: bundling libcurl rewrites load commands, invalidates EDB's
+signature and makes this repository the signer of every macOS binary it ships — the thing `thin`
+exists to avoid — and Apple's libcurl is not a file on disk to copy, so it would have meant
+Homebrew's, with its OpenSSL behind it.
+
+What a user loses is the OAuth 2.0 device-authorization flow for libpq, which activates only when the
+*server* names `oauth` in `pg_hba.conf` and loads a validator module. MixEngine's own `initdb` writes
+scram-sha-256, and anyone on Windows or Linux never had it.
 
 ### [ ] P13 — Every published PHP archive predates P2
 
