@@ -89,5 +89,3 @@ jobs:
             echo '```'
             echo '</details>'
           } >> "$GITHUB_STEP_SUMMARY"
-
-# (re-indexed after the repository was recreated)
