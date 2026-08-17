@@ -58,9 +58,11 @@ time: every difference it reports is real, and every one is against an archive p
 task that already closes it.
 
 *Packed* above means the recipe is written and runs, which is not the same as published, and the two
-had quietly come apart: the releases page holds PHP, Node.js, Python, Ruby, Caddy and MariaDB, while
-PostgreSQL, Redis, Memcached and nginx have recipes and nothing to install. P12 is that gap, found by
-P11 while counting the archive.
+had quietly come apart: the releases page held PHP, Node.js, Python, Ruby, Caddy and MariaDB, while
+PostgreSQL, Redis, Memcached and nginx had recipes and nothing to install. P12 was that gap, found by
+P11 while counting the archive, and it is closed — every kind here is now published. The releases
+page holds 55 packages, and it was rebuilt from empty on 2026-08-17 after the repository was deleted
+and recreated; [the archive](the-archive.md) carries the record of what that cost.
 
 Nothing below is a rewrite. Every recipe already downloads, verifies, relocates, proves and packs
 correctly; what they do not do is *choose*, and choosing once is the whole of the rule.
@@ -2026,7 +2028,7 @@ underneath it was run repeatedly against the live releases from a developer mach
 hash path, so what is unproven is the workflow — the `minisign -V` step and the summary — and not the
 check.
 
-### [ ] P12 — Four kinds exist as recipes and not as artifacts
+### [x] P12 — Four kinds exist as recipes and not as artifacts
 
 Found by P11 while counting what the archive holds, and it is a gap in the *releases* rather than in
 any code here. PostgreSQL, Redis, Memcached and nginx have finished recipes, green sections in this
@@ -2051,6 +2053,55 @@ Two things to do while running them, both of which get easier the fewer versions
 - **Then `check-archive.yml` by hand with `slices: 1`**, which hashes the whole archive including
   everything just published. It is the one moment when a full sweep is cheap and the one time the
   artifacts have never been read back from the releases page by anything.
+
+#### What running them found, which is the argument for having run them
+
+Closed on 2026-08-17, and not on its own terms: the repository was deleted and recreated, so this
+stopped being four builds and became **all** of them — 47 `workflow_dispatch` runs across ten kinds,
+one patch of every line in the table. Everything that had been published came back at the same
+version number and none of it at the same bytes; [the archive](the-archive.md) says what that costs
+and what survived it.
+
+The four kinds nobody had ever run produced **four defects in four recipes**, each of which had been
+green in every run it had ever had, because every run it had ever had was against the newest line:
+
+- **`nginx` stopped on `.hgtags`.** Upstream's 1.26.3 Windows zip carries a Mercurial tag file that
+  1.27.5, 1.28.3, 1.29.8, 1.30.4 and 1.31.3 do not, and a file in neither the kept set nor
+  `WINDOWS_DISCARD` stops the pack by design. It could not join `WINDOWS_DISCARD` either — that list
+  is checked backwards, and declaring the removal of a file five of six lines never shipped is the
+  stale claim the same function refuses. `WINDOWS_STRAY` is the third category: discarded where
+  present, declared only where present. `SUPPORT.md` is on it for the same reason, measured the same
+  way — 1.29.4 ships one and 1.29.8 does not.
+- **`redis` asked a 2023 tarball for a 2026 dependency.** `DEPENDENCY_TARGETS` was a copy of what 8.8
+  and 8.10 state, so 7.2 stopped at `No rule to make target 'xxhash'`. Upstream moves that list per
+  release — five targets for 7.2 and 7.4, `fast_float` added at 8.0, `xxhash` at 8.4, `fast_float`
+  dropped and `tre` added at 8.8 — so it is read out of the tarball's own `src/Makefile` now. A copy
+  could not have been right for more than two of the eight lines.
+- **`redis` would have shipped four unlicensed libraries.** Reading that list turned up the next
+  one: 8.0 through 8.6 vendor `fast_float`, which is C++, so those lines link `cygstdc++-6.dll` and
+  pull `cygiconv-2.dll` and `cygintl-8.dll` in behind it — four bundled DLLs where the other lines
+  have one — and Cygwin packages all three runtimes apart from their source, so none carries a
+  licence document. `relocate.bundled_licences` stopped the build, which is what it is for. Three
+  rows in `CYGWIN_LICENCE_ELSEWHERE`, read off Cygwin's published file lists, and two packages named
+  in `build-redis.yml` that nothing in it compiles with.
+
+- **`postgres` would have published three versions that mean two things.** This one was not caught
+  by a build — all five legs were green — but by `parity.py` inside `publish-index.yml`, which
+  refused to sign an index over it: 412 refusals, all of them the Windows cell of 14.24, 15.19 and
+  16.15 carrying extensions the other four cells do not. Upstream's whole `src/test/modules` set
+  installs into the same `lib/` and `share/extension/` as the real extensions, EDB ships it on those
+  three versions and not on 17 or 18, and Debian's packages never did — so `test_ext1` through
+  `test_ext8`, `test_predtest`, `worker_spi` and thirty more were on one cell of three versions. 14
+  added six of its own: `plpythonu`, `plpython2u` and their transform modules, for a Python that
+  reached end of life in 2020, which `*plpython3*` was too narrow to catch.
+
+All four are the same shape as the audit P6 turned into a program: a recipe that is correct about
+the version it was written against and has never been asked about another. Three were caught by the
+build and the fourth by the check that stands between a build and a signature, which is the order
+those two are in for exactly this reason.
+
+The fifth finding is not a defect in anything here and is P12b: Redis 7.2 compiles on Windows and
+cannot start there.
 
 ### [x] P12a — PostgreSQL cannot be smoke-tested on a runner that is an administrator
 
@@ -2131,6 +2182,45 @@ scram-sha-256, and anyone on Windows or Linux never had it.
 
 **All five cells green**, which is the first time `build-postgres` has finished: it had run twice in
 its life before today and been red both times, on every leg.
+
+### [x] P12b — Redis 7.2 builds on Windows and cannot start there
+
+The fourth thing P12 found, and the only one that is not a defect in anything here. Redis 7.2.15
+compiles under Cygwin, links, installs, relocates and passes `relocate.verify` — and then
+`redis-server.exe --version` prints nothing and dies. Cygwin puts a POSIX wait status in the Windows
+exit code, so the `2816` the recipe reported is `11 << 8`: killed by SIGSEGV.
+
+Traced on a `windows-2022` runner with Cygwin's own `strace`, on a branch, so master never carried
+the instrument. The last system call is `time(0)` and the next line is `exception c0000005` — an
+access violation — at which point Cygwin raises signal 11 and exits `0xB00`. Three things were
+measured beside it, and each removes an explanation:
+
+- **`redis-cli.exe` runs.** Same compiler, same flags, same `cygwin1.dll` beside it, in the same
+  directory: `redis-cli 7.2.15`, exit 0. So it is not the toolchain and not the bundling.
+- **The unmoved tree faults identically.** So it is not `borrow.moved`, and not the space this
+  repository deliberately puts in that directory's name.
+- **`cygcheck` reads the import table as `cygwin1.dll` and Windows API sets, and nothing else.** So
+  nothing is missing; the process starts and then walks into memory it does not own.
+
+And the code it dies in — `tzset`, `gettimeofday`, `srand`, `init_genrand64`, `crc64_init`, between
+`time()` and the banner — is **byte for byte identical in 7.4.10**, which builds and runs on this
+cell. Whatever this is, no evidence here places it in Redis, in Cygwin, or in the recipe: it is a
+2023 source and a 2026 toolchain disagreeing.
+
+**Not fixed, and the two available fixes are why.** Patching the source is the thing `nothing in it
+is patched` exists to refuse — it is the sentence that makes *borrowed* and *built* mean anything
+here. Compiling this one line at a different optimisation level is the subtler one and is worse in a
+specific way: it would make 7.2's Windows artifact a different build from 7.2's own four Unix cells,
+which is the rule this repository is named after, in exchange for a cell nobody has asked for.
+
+So `tools/redis.py` grew `WINDOWS_FLOOR = (7, 4)` beside `FLOOR = (7, 2)`, the cell is declared
+empty the same way `windows/aarch64` is, and 7.2 publishes the four cells it can. A user who wants
+Redis on Windows starts at 7.4; a user who will not accept a source-available licence still has 7.2
+on macOS and Linux, which is what the floor was for.
+
+Worth naming for what it did *not* cost: the check that caught this is the smoke test, running the
+artifact from a directory it had never been in. `redis-server --version` is the weakest thing that
+test does, and it is the one that fired.
 
 ### [x] P13 — Every published PHP archive predates P2
 

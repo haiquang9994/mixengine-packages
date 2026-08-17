@@ -96,6 +96,11 @@
               "type": "array",
               "items": { "type": "string" },
               "description": "Loadable modules shipped inside this archive."
+            },
+            "enabled": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Which of `shared` an installer is expected to switch on, so that the cells of one version behave alike. It exists because Windows and Unix cannot express the same decision the same way: curl, openssl, mbstring, intl, gd, zip, sodium, sqlite3 and fileinfo are compiled into the Unix builds and are loadable modules on Windows, and no Windows build exists with them static. A subset of `shared`; saying which extensions are present never said this."
             }
           }
         }
