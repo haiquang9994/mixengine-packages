@@ -102,6 +102,7 @@ LINKEDIT = {
 # and diagnosing it from a machine somebody has to go and find.
 PROGRAM_HEADER = ("p_type", "p_flags", "p_vaddr", "p_paddr", "p_filesz", "p_memsz", "p_align")
 SECTION_HEADER = ("sh_type", "sh_flags", "sh_addr", "sh_size", "contents")
+MACHO_SECTION = ("addr", "length", "flags", "contents")
 
 ELF_MAGIC = b"\x7fELF"
 MACHO_MAGIC = b"\xcf\xfa\xed\xfe"
@@ -298,20 +299,41 @@ def countersigned(path: Path) -> str | None:
     return f"{path.name} has a code signature with no CodeDirectory in it"
 
 
-def moved(key: str, old: object, new: object) -> str:
-    """*key*, followed by which of its fields differ, where the shape is one this module named.
+def moved(key: str, old: object, new: object, depth: int = 2) -> str:
+    """*key*, followed by which of its fields differ, as far down as this module can label them.
 
-    A key whose value is not a tuple this can label — a Mach-O section, an `exports` list — comes
-    back as itself, which is what the message said about everything before :data:`PROGRAM_HEADER`
-    existed.
+    A key whose value is a shape this cannot name comes back as itself, which is what every message
+    said before :data:`PROGRAM_HEADER` existed. Two levels by default, because :func:`resolvable`
+    keys a whole object by member and the useful sentence is inside it — *which member* is 469
+    repetitions of nothing, and *which member and what about it* is a diagnosis.
     """
-    if not (isinstance(old, tuple) and isinstance(new, tuple) and len(old) == len(new)):
+    if isinstance(old, dict) and isinstance(new, dict) and depth:
+        inside = [name for name in sorted(set(old) | set(new)) if old.get(name) != new.get(name)]
+        spelled = ", ".join(moved(name, old.get(name), new.get(name), depth - 1)
+                            for name in inside[:3])
+        more = f" and {len(inside) - 3} more" if len(inside) > 3 else ""
+        return f"{key} {{{spelled}{more}}}"
+
+    if not (isinstance(old, tuple) and isinstance(new, tuple)):
         return key
+
+    # A list of things rather than a record of fields — the symbols an object publishes, an
+    # archive's index, the exported names of a dylib. What matters is what left, and a strip that
+    # removed nothing a linker resolves is what this whole module is trying to establish.
+    if old and new and isinstance(old[0], (tuple, str)) and len(old) != len(new):
+        gone = [str(item) for item in old if item not in set(new)]
+        added = len(new) - len(old) + len(gone)
+        summary = f"{len(gone)} gone" + (f", {added} new" if added else "")
+        return f"{key} [{summary}: {', '.join(gone[:2]) or '—'}]"
+
     names = None
-    if key.startswith("segment ") and len(old) == len(PROGRAM_HEADER):
-        names = PROGRAM_HEADER
-    elif key.startswith("section ") and len(old) == len(SECTION_HEADER):
-        names = SECTION_HEADER
+    if len(old) == len(new):
+        if key.startswith("segment ") and len(old) == len(PROGRAM_HEADER):
+            names = PROGRAM_HEADER
+        elif key.startswith("section ") and len(old) == len(SECTION_HEADER):
+            names = SECTION_HEADER
+        elif key.startswith("section ") and len(old) == len(MACHO_SECTION):
+            names = MACHO_SECTION
     if names is None:
         return key
     fields = [f"{name} {was} -> {now}" for name, was, now in zip(names, old, new) if was != now]
