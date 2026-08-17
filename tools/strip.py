@@ -100,8 +100,7 @@ LINKEDIT = {
 # learn that a strip had changed one program header's `p_offset` and one segment's `p_filesz`; a log
 # that says so costs nothing, and is the difference between diagnosing the next one from a CI run
 # and diagnosing it from a machine somebody has to go and find.
-PROGRAM_HEADER = ("p_type", "p_flags", "p_offset", "p_vaddr", "p_paddr", "p_filesz", "p_memsz",
-                  "p_align")
+PROGRAM_HEADER = ("p_type", "p_flags", "p_vaddr", "p_paddr", "p_filesz", "p_memsz", "p_align")
 SECTION_HEADER = ("sh_type", "sh_flags", "sh_addr", "sh_size", "contents")
 
 ELF_MAGIC = b"\x7fELF"
@@ -117,8 +116,10 @@ def mapped(path: Path) -> dict[str, object]:
 
     On ELF, `.dynsym`, `.dynstr`, `.gnu.hash`, `.dynamic` and the `.rela.dyn`/`.rela.plt` a loader
     applies are all allocated; `.symtab`, `.strtab` and the `.rela.text` a post-link optimiser
-    wanted are not. Program headers are compared whole and separately, because they are what the
-    kernel actually reads and a section header could in principle be tidy while a segment moved.
+    wanted are not. Program headers are compared separately from the sections, because they are what
+    the kernel actually reads and a section header could in principle be tidy while a segment moved
+    — every field of one except `p_offset`, which is compared as the bytes it points at instead of
+    as the number it is. See the comment on that line for the artifact that taught the difference.
 
     Mach-O has no such bit, so the line is drawn at `__LINKEDIT` — the one segment that legitimately
     shrinks, since the symbol table is inside it. Everything else in there that a strip must not
@@ -139,8 +140,30 @@ def mapped(path: Path) -> dict[str, object]:
         e_shentsize, e_shnum, e_shstrndx = struct.unpack_from(end + "HHH", blob, 0x3A)
         seen["elf"] = (kind, machine, e_phnum)
         for index in range(e_phnum):
-            seen[f"segment {index}"] = struct.unpack_from(
-                end + "IIQQQQQQ", blob, e_phoff + index * e_phentsize)
+            p_type, p_flags, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align = \
+                struct.unpack_from(end + "IIQQQQQQ", blob, e_phoff + index * e_phentsize)
+            # **`p_offset` is left out, and it is the only field that is**, which is P5c. It says
+            # where a segment's contents sit *in the file*; a loader maps `p_filesz` bytes at
+            # `p_vaddr` and does not care which part of the file they were read from. A strip that
+            # removes a non-allocated section lying before a segment compacts everything after it,
+            # so the number moves and nothing about the process image does — measured on a freshly
+            # built OpenSSL 3.5.7, where three segments of `lib/libcrypto.so.3` each moved down by
+            # exactly 835,584 bytes and this refused to publish an artifact that was correct.
+            #
+            # It was tried as a hash of the bytes at that offset first, which is the obvious way to
+            # keep asking *what* is there, and it does not work: the program header table is itself
+            # inside the first `PT_LOAD`, so any offset that moves changes the contents of `PT_PHDR`
+            # and of the segment containing it. That version failed an ordinary `strip --strip-all`
+            # of an ordinary shared library — the check calling its own subject a failure again.
+            #
+            # What ties the segments back to the file is :func:`unmapped`, asked a second time after
+            # the operation: every allocated section still has to lie inside some `PT_LOAD`. The
+            # sections are already compared here by address, size and contents, so a segment table
+            # that still covers all of them, at the same addresses and sizes, is mapping the same
+            # image. The CPython case P4c found is caught here regardless, by `p_filesz` and
+            # `p_memsz` — a segment mapping *less* than it did, which no offset arithmetic explains.
+            seen[f"segment {index}"] = (p_type, p_flags, p_vaddr, p_paddr, p_filesz, p_memsz,
+                                        p_align)
 
         def header(index: int) -> tuple:
             return struct.unpack_from(end + "IIQQQQ", blob, e_shoff + index * e_shentsize)
@@ -793,6 +816,19 @@ def symbols(tree: Path, paths: Sequence[Path], flags: Sequence[str],
                 )
             grew = len(after["index"]) - len(before["index"])
             differences.remove("index")
+
+        # The postcondition to the precondition above, and what took `p_offset`'s place. `mapped`
+        # compares every allocated section by address, size and contents, and every segment by
+        # everything except where it reads from; this is the sentence that joins the two tables back
+        # together — a segment table that no longer covers a section is one that stopped describing
+        # the file, whatever its own fields say.
+        astray = [] if archive else unmapped(path)
+        if astray:
+            raise SystemExit(
+                f"strip {' '.join(flags)} {relative} left {', '.join(astray)} allocated and "
+                f"outside every PT_LOAD, so the segment table no longer covers what the section "
+                f"table says the file holds, and the artifact is not being published"
+            )
 
         if differences:
             spelled = ", ".join(moved(key, before.get(key), after.get(key))
