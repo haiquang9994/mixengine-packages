@@ -918,13 +918,25 @@ def cygwin_owner(root: Path, path: Path) -> str | None:
 
 
 def cygwin_licences(real: Path) -> list[tuple[str, Path]]:
-    """What has to travel with a DLL taken out of a Cygwin installation.
+    """The documents of the Cygwin package that installed this DLL — **its own, and nobody else's**.
 
-    Two documents, and the first is not optional: **cygwin1.dll is LGPLv3**, so an archive that
-    redistributes it has to carry its terms. ``/usr/share/doc/Cygwin/`` holds `COPYING` and
-    `CYGWIN_LICENSE` — the second states the runtime exception, which is the part a reader actually
-    needs and which no glob in :data:`LICENCE_GLOBS` would have matched. The package's own directory
-    is added when it has one, so `libgcc1` is licensed as libgcc rather than as Cygwin.
+    It used to answer with Cygwin's two runtime documents as well, and that quietly made the caller's
+    check unfireable. ``/usr/share/doc/Cygwin/COPYING`` and ``CYGWIN_LICENSE`` are in every Cygwin
+    installation, so every bundled DLL came back licensed whether or not anything of its own had been
+    found, and `bundled_licences` — which exists to stop a build when a library has no licence —
+    could not stop one. `redis-8.10.0-windows-x86_64.zip` was built that way: it carries
+    `cyggcc_s-seh-1.dll` with `cygwin-COPYING` and `cygwin-CYGWIN_LICENSE` and nothing else, while
+    libgcc is **GPLv3 with the GCC Runtime Library Exception** — a different licence, making a
+    different promise, from a different project. The archive did not fail to state terms; it stated
+    the wrong ones, which is worse and which nothing here could have noticed.
+
+    The two runtime documents are still shipped, once, by `cygwin_runtime_terms`, as what they are.
+
+    Everything in the package's doc directory travels, rather than the names in :data:`LICENCE_GLOBS`.
+    That directory holds documentation by construction, the files are small, and the alternative is a
+    list of spellings that has to be right about every project Cygwin packages — GCC keeps its
+    exception in `RUNTIME.LIBRARY.EXCEPTION`, which matches no glob here and is exactly the document
+    a reader of this archive needs.
 
     The root is the parent of the directory the library was taken from — ``<root>/bin/cygwin1.dll``
     — which is the same walk the Homebrew branch does, for the same reason: nothing else on a
@@ -932,23 +944,51 @@ def cygwin_licences(real: Path) -> list[tuple[str, Path]]:
     """
     root = real.parent.parent
     shared = root / "usr" / "share" / "doc"
-    found: list[tuple[str, Path]] = []
-
-    for name in ("COPYING", "CYGWIN_LICENSE"):
-        text = shared / "Cygwin" / name
-        if text.is_file():
-            found.append(("cygwin", text))
-
     owner = cygwin_owner(root, real)
-    if owner:
-        for pattern in LICENCE_GLOBS:
-            found.extend((owner, text) for text in sorted((shared / owner).glob(pattern))
-                         if text.is_file())
-        # Cygwin's per-package note, which states where the source came from and under what terms.
-        readme = shared / "Cygwin" / f"{owner}.README"
-        if readme.is_file():
-            found.append((owner, readme))
+    if not owner:
+        return []
+
+    found = [(owner, text) for text in sorted((shared / owner).glob("*")) if text.is_file()]
+    # Cygwin's per-package note, which states where the source came from and under what terms.
+    readme = shared / "Cygwin" / f"{owner}.README"
+    if readme.is_file():
+        found.append((owner, readme))
     return found
+
+
+def cygwin_runtime_terms(licences: Path, root: Path) -> None:
+    """Cygwin's own two documents, shipped once, because they are the runtime's and not any
+    library's.
+
+    **cygwin1.dll is LGPLv3**, so an archive redistributing it has to carry its terms, and
+    `CYGWIN_LICENSE` states the exception that is the part a reader actually needs. Both used to be
+    copied once per bundled library, which put the right files in the archive for the wrong reason —
+    see `cygwin_licences` for what that reason cost.
+    """
+    shared = root / "usr" / "share" / "doc" / "Cygwin"
+    for name in ("COPYING", "CYGWIN_LICENSE"):
+        text = shared / name
+        if text.is_file():
+            shutil.copy2(text, licences / f"cygwin-{name}")
+
+
+def cygwin_documents(root: Path, real: Path) -> str:
+    """What the owning package installed under ``/usr/share/doc``, asked of `cygcheck`.
+
+    For an error message only. A build that stops because it cannot find a licence should say where
+    the licence *is*, and the installation on the runner is the only thing that knows.
+    """
+    package = cygwin_package(root, real)
+    if not package:
+        return "and cygcheck cannot name its package either"
+    try:
+        listed = subprocess.run([str(root / "bin" / "cygcheck.exe"), "-l", package],
+                                capture_output=True, text=True, timeout=120).stdout
+    except (OSError, subprocess.SubprocessError) as refusal:
+        return f"and `cygcheck -l {package}` could not be run: {refusal}"
+    docs = [line.strip() for line in listed.splitlines() if "/share/doc/" in line]
+    return (f"`cygcheck -l {package}` lists under /usr/share/doc: "
+            f"{', '.join(docs) if docs else '(nothing)'}")
 
 
 def cygwin_source_note(licences: Path, bundled: dict[str, Path]) -> None:
@@ -1052,7 +1092,11 @@ def bundled_licences(tree: Path, bundled: dict[str, Path]) -> None:
         rows.append(f"{name}\t{origin}")
         texts = licence_texts(origin)
         if not texts:
-            unlicensed.append(f"{name} (from {origin})")
+            said = ""
+            if sys.platform == "win32":
+                real = origin.resolve()
+                said = " — " + cygwin_documents(real.parent.parent, real)
+            unlicensed.append(f"{name} (from {origin}){said}")
             continue
         for owner, text in texts:
             shutil.copy2(text, licences / f"{owner}-{text.name}")
@@ -1061,6 +1105,7 @@ def bundled_licences(tree: Path, bundled: dict[str, Path]) -> None:
         "library\tbuilt from\n" + "\n".join(rows) + "\n", encoding="utf-8"
     )
     if sys.platform == "win32":
+        cygwin_runtime_terms(licences, next(iter(bundled.values())).resolve().parent.parent)
         cygwin_source_note(licences, bundled)
     if unlicensed:
         raise SystemExit(
