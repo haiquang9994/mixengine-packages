@@ -36,15 +36,31 @@ a `PATH` holding nothing but the operating system.
 | --- | --- | --- |
 | macOS aarch64, x86_64 | Redis **7.2 – newest**, memcached **1.6 – newest** | **built** — upstream publishes source only, for every platform |
 | Linux x86_64, aarch64 | ditto | ditto |
-| Windows x86_64 | Redis **7.2 – newest**, memcached **1.6 – newest** | **built** — Cygwin's toolchain, the same recipes, nothing patched; `cygwin1.dll` travels with each |
+| Windows x86_64 | Redis **7.4 – newest**, memcached **1.6 – newest** | **built** — Cygwin's toolchain, the same recipes, nothing patched; `cygwin1.dll` travels with each |
 | Windows aarch64 | — | **no toolchain builds either natively** — Cygwin has no aarch64 port, and emulation is not published under an `aarch64` manifest |
 
 Cygwin rather than MSYS2, and the choice is about redistribution rather than about which compiles.
 MSYS2's own documentation says its runtime is for its build tools rather than for programs to be
 shipped; Cygwin publishes `CYGWIN_LICENSE` and `COPYING` as documents, so an archive carrying
-`cygwin1.dll` under LGPLv3 can carry its terms too. Both DLLs that travel — `cygwin1.dll` and
-`cyggcc_s-seh-1.dll` — were read off the binary's own import table rather than copied from anyone's
-list, and they are the only two things outside `C:\Windows` the result loads.
+`cygwin1.dll` under LGPLv3 can carry its terms too. Whatever travels is read off the binary's own
+import table rather than copied from anyone's list, and is the only thing outside `C:\Windows` the
+result loads. How many that is belongs to the line and not to the recipe: one for memcached and for
+Redis 7.4, 8.8 and 8.10, and **five** for Redis 8.0 through 8.6, which vendor the C++ `fast_float`
+and so link `cygstdc++-6.dll` with `cygiconv-2.dll`, `cygintl-8.dll` and `cyggcc_s-seh-1.dll` behind
+it. Cygwin packages the runtime apart from its source in all three of those cases, so their licence
+texts are installed by `libiconv`, `gettext` and `gcc-core` — which is why `build-redis.yml` asks
+for two packages nothing in it compiles with.
+
+**Redis 7.2 is the one row of this table that is a version and not an architecture.** It compiles
+under Cygwin, links, installs, and then `redis-server.exe --version` takes an access violation
+between `time()` and its banner and is killed by SIGSEGV, having printed nothing — traced with
+Cygwin's own `strace` on a `windows-2022` runner. `redis-cli` from the same build answers normally,
+the unmoved tree faults exactly as the relocated one does, and `cygcheck` reads the import table as
+`cygwin1.dll` and Windows API sets alone; the startup code it dies in is byte for byte what 7.4.10
+runs. Patching the source is what *nothing in it is patched* refuses, and building this one line at
+a different optimisation level would make its Windows artifact a different build from its own four
+Unix cells. So that cell is empty, `tools/redis.py`'s `WINDOWS_FLOOR` says so, and 7.2 ships the
+four cells it can.
 
 **What it costs, said plainly.** The event loop is `select` rather than `epoll`, because Cygwin has
 no `epoll` and `ae.c` falls through to it. `maxclients` settles at about 3168 instead of 10000,
@@ -98,7 +114,9 @@ AGPLv3 option is the one that makes an 8.x artifact easy to be honest about: com
 the corresponding source, and every artifact's `recipe` field already names the exact upstream
 tarball and the SHA-256 it was checked against, because nothing in it is patched. The floor is at 7.2
 rather than lower because that is the oldest line upstream still patches *and* the last one a user
-who will not accept a source-available licence can install.
+who will not accept a source-available licence can install. That user gets it on four cells rather
+than five: the BSD-3 line is exactly the one Windows cannot run, which is a coincidence of dates and
+not a consequence of the licence, and it is stated above.
 
 **Core Redis, and none of the modules the tarball vendors.** Since 8.0 the release archive ships
 RediSearch, RedisJSON, RedisTimeSeries, RedisBloom and vector-sets — 6,671 files, and the reason
