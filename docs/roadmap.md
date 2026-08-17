@@ -26,7 +26,7 @@ tree still had to offer, so a saving of that size cost nothing anybody could arg
 | PHP | 7.0 – newest, 6 targets | `php_windows`, `php_unix`, `php_legacy_unix` | yes — P2 |
 | Node.js | 16 – newest, 6 targets | `node` | yes — P3 |
 | Python | 3.10 – newest, 6 targets | `python` | yes — P4, P4a, P4b and P4c |
-| Ruby | 3.2 – newest, 6 targets | `ruby`, `ruby_unix` | yes — P5, P5a, P5b; **P5c open on macOS** |
+| Ruby | 3.2 – newest, 6 targets | `ruby`, `ruby_unix` | yes — P5, P5a, P5b, P5c |
 | Caddy | 2.0 – newest, 6 targets | `caddy` | yes |
 | MariaDB | 10.6 – newest, 6 targets | `mariadb`, `mariadb_deb`, `mariadb_build` | yes — it is where the rule came from |
 | PostgreSQL | 14 – newest, 5 of 6 targets | `postgres`, `postgres_deb` | yes — P7, P7a and P7b, and it is the first row packed under the rule |
@@ -845,19 +845,18 @@ published it.
 
 The row has to be repacked for any of this to take effect, and only the four compiled cells change.
 
-### [ ] P5c — Ruby: what P5b's first run on CI found **(rule)**
+### [x] P5c — Ruby: what P5b's first run on CI found **(rule)**
 
-> **Open on macOS only, and the next step needs a Mac.** Linux and Windows are green and have been
-> across five consecutive runs. What is left is one question about `lib/libruby.3.2-static.a` that
-> cost a CI round trip each time it was asked from a Windows machine, and that a Mac answers in a
-> minute. Read *The static archive, and the one thing still unknown* at the end of this section
-> first — it says exactly what to run and what each answer means.
+> **Closed on a Mac, and the answer was larger than either branch this section predicted.** The
+> question was whether `strip -S` drops symbols from `lib/libruby-static.a`. It does not — but it
+> does *reassemble the object*, and that is what four red runs were actually reporting. See *The
+> static archive, and what a strip on macOS really does* at the end of this section. All six legs
+> of all four Ruby lines are green, with the strip proved to have run on each.
 
-
-That last sentence is the whole of it. P5b was ticked on 2026-08-16 and the workflow was not run
-again until the next day, and when it was, both Unix halves were red — the fourth time in two days
-that a section was ticked on *the recipe is right* and nobody ran it. The last green Ruby build,
-2026-08-15, printed no `stripped` line at all.
+P5b was ticked on 2026-08-16 and the workflow was not run again until the next day, and when it was,
+both Unix halves were red — the fourth time in two days that a section was ticked on *the recipe is
+right* and nobody ran it. The last green Ruby build, 2026-08-15, printed no `stripped` line at all,
+which is the reason the tick below carries a table of what each cell actually removed.
 
 Three separate things came out, and only the first was the recipe's.
 
@@ -907,78 +906,95 @@ loosened is one nobody should take on trust: the BOLT interpreter is still refus
 shared library and an ordinary executable now pass and still load and run, and a `PT_LOAD` pointed
 deliberately somewhere else is caught by name.
 
-**Both Linux legs are green**, across five consecutive runs, as are both Windows legs.
+**Both Linux legs are green**, across five consecutive runs, as are both Windows legs. What was left
+after that is the macOS half, and it is the rest of this section.
 
-#### The static archive, and the one thing still unknown
+#### The static archive, and what a strip on macOS really does
 
 Fixing the signature let macOS reach a third failure that nothing had ever got far enough to see:
 
 > `strip -S lib/libruby.3.2-static.a changed 469 thing(s) a linker can resolve …
 > over all 469, what differs is: sections (913), relocations (755), symbols (50)`
 
-470 members, 469 of them different. Most of that is layout and is the same mistake `p_offset` was:
-**`sh_addr` is 0 for every section of an ELF relocatable object, and Apple's assembler lays its
-objects out at real offsets** — measured, `readelf -SW` on a `gcc -c` object gives `Address
-0000000000000000` throughout. So removing a `__DWARF` section moves everything after it, `addr`
-changes, `__LD,__compact_unwind` changes because its payload *is* addresses, and the relocation
-digests change with them. `_elf_object` never sees any of this and `_macho_object` sees all of it.
+470 members, 469 of them different. This section spent three CI round trips reading that as layout
+noise around one real question — *are those 50 members dropping symbols?* — and the reading was
+wrong twice over. The answer, settled on a Mac against the published `ruby-3.2.11` macOS archives
+with the platform's own `strip`, is that **no symbol is dropped and almost nothing else is what it
+appears to be**.
 
-**`symbols (50)` is the part that is not layout-shaped, and it is the open question.** Fifty members
-differ in what they publish. A `symbols` entry is `(name, type, section, value)` and `value` is an
-address, so this may be the same shift again — but it may not be, and the difference decides
-everything:
+**`strip -S` does not remove debug information from a relocatable Mach-O. It reassembles the object
+without it.** Measured, on those archives:
 
-- **names all present, only `value` moved** → the comparison is measuring assembler layout, and the
-  fix is to compare a Mach-O member the way `_elf_object` already compares an ELF one: by name.
-  Nothing is dropped from the archive, nothing changes in what ships.
-- **names missing** → `strip -S` is damaging the archive on macOS, and the answer is to stop
-  stripping `libruby-static.a` there and pay the size. That is the only branch in which Ruby gives
-  anything up, and what it gives up is an optimisation rather than a file.
+* the sections come back in a different order;
+* the *functions inside* `__text` come back in a different order — `_rb_warn` moves from `0x850` to
+  `0xa540` and `_rb_enc_warn` takes its place;
+* every local label is renamed, `l_.str` to `LC1`;
+* duplicate literals are coalesced, so a `__literal16` of three entries comes back with two;
+* section-relative relocations become references to the symbol standing at the target;
+* `__eh_frame`'s internal distances, which were constants an assembler could compute, become
+  explicit relocations — 5,416 of them become 9,666;
+* the LSDA pointer an FDE carried is *copied into* the matching `__compact_unwind` record;
+* the last function of a section gains alignment padding, so the span `__compact_unwind` records for
+  it grows from 142 bytes to 144.
 
-`resolvable` already checks the archive's **index** for lost symbols separately, and that check did
-not fire, which is evidence for the first branch and not proof of it: the index carries global
-*defined* symbols, and `published` also holds undefined externals. `_macho_object` excludes `N_STAB`
-before it builds `published`, so on the face of it `strip -S` has nothing to take — but that is a
-reading of the code, and this section exists because three readings of the code were wrong today.
+Stripping one extracted member outside the archive reproduces all of it byte for byte, so this is
+`strip`'s behaviour and not something the archive did. It is also why *every* one of the three
+readings this section made from the code was wrong: none of them predicted an object being rebuilt.
 
-**To settle it on a Mac**, from a tree this recipe has built:
+**And nothing a linker resolves is lost in any of it.** Across all 496 Mach-O members: 6,159 defined
+external symbols, none missing; every atom identical byte for byte once its relocated fields are
+read as the names they point at; no member's set of undefined externals changed. `resolvable`'s
+index check not firing was evidence for this and is now proof of it.
 
-```bash
-python3 -c '
-import shutil, subprocess, sys; sys.path.insert(0, "tools")
-import strip
-from pathlib import Path
-a = Path("lib/libruby.3.2-static.a")          # in the built tree
-shutil.copy(a, "/tmp/before.a")
-before = strip.resolvable(Path("/tmp/before.a"))
-shutil.copy(a, "/tmp/after.a")
-subprocess.run(["strip", "-S", "/tmp/after.a"], check=True)
-after = strip.resolvable(Path("/tmp/after.a"))
-for key in sorted(set(before) | set(after)):
-    if before.get(key) == after.get(key): continue
-    line = strip.moved(key, before.get(key), after.get(key))
-    if "symbols" in line: print(line)
-' | head -20
-```
+So the branch this section called *"the comparison is measuring assembler layout"* was right, and
+the fix it proposed — compare by name — was too small by half. What landed instead rebuilds
+`_macho_object` around what survives a re-layout:
 
-`strip.moved` answers in one of two spellings and they are not ambiguous:
-`symbols [all 214 name(s) still there; what moved: value]`, or
-`symbols [3 name(s) gone: _foo, _bar, _baz]`.
+* **an atom is the unit, not a section.** Bounded by the symbols in it, except for the three kinds of
+  section that carry their own structure and whose symbols are exactly what does not survive:
+  `__compact_unwind` is read by 32-byte record, `__eh_frame` by CFI entry off its length prefixes,
+  and a literal section by literal — as a *set*, because coalescing them is that section type's
+  whole licence.
+* **a reference is what it names, never where its target sat.** An external symbol by name; one of
+  this object's own places by the contents of the atom it lands in, since a local label's name is
+  not preserved either; a `SUBTRACTOR` pair by the thing it names, since the distance it encodes is
+  measured from an anchor the two assemblers put in different places.
+* **addresses, section order, atom order and the assembler's section flags are gone from it.**
 
-**Do not loosen the comparison without that output.** This module refused three *correct* artifacts
-in two days — P6a's hard-coded `tree/bin`, this section's `p_offset`, and an attempt to replace
-`p_offset` with a hash of the bytes at it, which failed an ordinary `strip --strip-all` of an
-ordinary shared library because the program header table lives inside the first `PT_LOAD`. A fourth
-loosening made on a guess is the one that lets a broken archive through, and `libruby-static.a` is
-precisely the file nothing else in this repository would notice: no smoke test loads it, because
-nothing in the tree links against it. What *does* reach it is `smoke()`, which compiles `bigdecimal`
-from the relocated tree and lets `rbconfig.rb` send that link at `-lruby-static` — so once the build
-gets past this, there is a behavioural check on the same file, on the same machine, after the fact.
+x86_64 is not aarch64 here and checking only one would have left CI half red: it keeps a
+relocation's addend in the field instead of in a separate `ARM64_RELOC_ADDEND`, uses section-relative
+pc-relative relocations where aarch64 has none, biases a field by the `SIGNED_1/2/4` bytes that
+follow it, and pads a trailing atom with `nop`. Both cells are checked and both are clean.
 
-Everything needed to reproduce is in `tools/strip.py`: `resolvable` builds the comparison, `moved`
-names what differs, `tally` counts it over every member, and both the caller and `moved` now sort
-identity (`symbols`, `index`, `members`) ahead of layout so the four differences printed are the
-four worth reading.
+**What this gives up is stated in the docstring rather than left to be found**, and all of it is in
+the unwind tables: which CIE an FDE belongs to, how far an FDE or a `__compact_unwind` record says
+its function runs, and where either says the exception table is. Each is a bare constant before the
+operation and a relocation after it, and a span there covers the function *and* its padding. The
+function every one of them is about is still compared, by name.
+
+**The comparison still refuses damage**, which is the half a loosening has to earn. Seven deliberate
+corruptions of a real member, on both cells: a flipped instruction byte, a renamed global, an
+altered unwind encoding, a relocation aimed at the next symbol, a changed C string, a changed CFI
+instruction, and sixteen zeroed bytes of `__const`. The one edit that is *not* refused is a byte
+inside a relocated field, which is the point of blanking them — the linker overwrites those bytes on
+its way in.
+
+#### Verified
+
+Not by rehearsal this time. All four Ruby lines were dispatched after the fix and **all six legs of
+each came back green**, 24 for 24, and the macOS logs carry the `stripped` line that the last green
+build before P5b did not:
+
+| | aarch64 | x86_64 |
+|---|---|---|
+| `libruby.3.2-static.a` | 46.1 → 18.5 MB | 43.6 → 18.9 MB |
+| `libruby.3.3-static.a` | 25.8 → 8.3 MB | 23.5 → 8.8 MB |
+| `libruby.3.4-static.a` | 28.3 → 9.2 MB | 25.8 → 9.8 MB |
+| `libruby.4.0-static.a` | 66.6 → 45.4 MB | 65.4 → 47.3 MB |
+
+`bin/ruby` is stripped and re-signed on both cells alongside them. Ruby is the only recipe this
+reaches: `python.py` strips images and goes through `mapped`, `mariadb.py` strips ELF on Linux only,
+and `postgres.py` borrows `countersigned` and nothing else.
 
 ### [x] P6 — Make the rule something CI can fail on **(rule)**
 
