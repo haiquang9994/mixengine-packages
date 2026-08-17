@@ -1582,6 +1582,30 @@ and unifying them surfaced the second: `CYGWIN-SOURCE.txt` had been written for 
 while Redis shipped `cygwin1.dll` under the identical LGPLv3 obligation with its licence text and no
 route to the source. It lives in `relocate.bundled_licences` now and both archives carry it.
 
+### [x] P8b — The licence check that could not fail
+
+The other half of that, found by reading `redis-8.10.0-windows-x86_64.zip` instead of the code.
+`licenses/` holds Redis, its eight bundled deps, and — for **both** Cygwin DLLs together —
+`cygwin-COPYING` and `cygwin-CYGWIN_LICENSE`. Nothing for `libgcc1`, which is what installed
+`cyggcc_s-seh-1.dll`, and libgcc is **GPLv3 with the GCC Runtime Library Exception**: a different
+licence, from a different project, making a different promise. The archive did not fail to state
+terms. It stated the wrong ones, which is worse, and it is the kind of wrong a reader trusts.
+
+`bundled_licences` has stopped a build over a missing licence since P7a, and it says so: *a library
+whose licence cannot be found is a failure and not a warning*. It could not stop this one.
+`cygwin_licences` returned Cygwin's two runtime documents for **every** DLL, and those two files are
+in every Cygwin installation, so `if not texts` was answered by somebody else's licence before it
+could ever be reached. The same shape as P6a and P4c, a third time in two days: the check ran, the
+check passed, and the check was not looking at its subject.
+
+Now the package's own doc directory travels, whole, rather than the names in `LICENCE_GLOBS` — GCC
+keeps its exception in `RUNTIME.LIBRARY.EXCEPTION`, which matches no glob here and is precisely the
+document this archive was missing, and a list of spellings has to be right about every project
+Cygwin packages. Cygwin's two documents are shipped once, by `cygwin_runtime_terms`, as the
+runtime's terms rather than as every library's. A DLL with nothing of its own stops the build and
+prints what `cygcheck -l` says its package installed, so the next one of these costs one run rather
+than a guess.
+
 ### [x] P9 — nginx
 
 nginx publishes a Windows zip itself and nothing relocatable for macOS or Linux, so the shape is
@@ -1897,7 +1921,50 @@ Verified locally for everything except the privilege drop — spawn, log redirec
 directory, environment, an exit code of 7 read back, `poll()` before exit, `TimeoutExpired` at the
 timeout the caller catches, and `kill()`. The drop itself cannot be shown from an unelevated shell,
 where UAC has already marked Administrators deny-only in both children; the runner is what answers
-that, and it is why this is ticked against a build rather than a local run.
+that, and it is why this is ticked against a build rather than a local run. The runner answered:
+`pack (18, windows-2022, windows, x86_64, postgres.py)` is green.
+
+#### And the version banner, which had never been read on the two Linux cells
+
+Unblocking Windows let both Linux legs run to the same line and fail there:
+
+> postgres reports 'postgres (PostgreSQL) 18.6 (Ubuntu 18.6-1.pgdg22.04+2)', expected a 18.6 build
+
+The pattern was `(\d+\.\d+)\s*$`, under a comment claiming that a build carrying a packager's suffix
+would still match on a prefix. Anchored at the end, a suffix was the one thing that could not match,
+and `postgres_deb` — which packs two of the six cells and appends exactly such a suffix — had never
+been run far enough to say so. Read after the product name instead. Both Linux legs are green.
+
+#### What is left, and it is not this
+
+Two of six still fail, and they are the same failure on the two macOS cells:
+
+> error: libpq-oauth-18.dylib: @rpath/libcurl.4.dylib does not resolve
+
+That is `verify` working. PostgreSQL 18 adds `libpq-oauth`, which links libcurl, and EDB's macOS
+archive does not carry one — so the answer the recipe wrote down for this case in P7 has come true:
+*EDB's archive is not self-contained after all, and this recipe would have to bundle and re-sign it.*
+Both ways out are decisions rather than fixes. Bundling libcurl means rewriting load commands, which
+invalidates EDB's signature and makes this repository the signer of every macOS binary it ships —
+the exact thing `thin` was designed to avoid. Dropping `libpq-oauth-18.dylib` is P6a's
+`stackbuilder.exe` argument applied again, a module that cannot load being worse than one that is
+absent, and it costs the OAuth device flow that nothing in a local development environment uses.
+Not chosen here, because it is a product decision and not a bug.
+
+### [ ] P13 — Every published PHP archive predates P2
+
+Found by P6a and confirmed against the artefacts rather than argued: all eleven PHP releases were
+published on 2026-08-14 and P2 landed after them, so every one declares `pdo_firebird` in
+`extensions.shared` and none can load it — the DLL needs an `fbclient.dll` that is not in the
+archive. Measured on the published manifests of 7.4.33, 8.3.33 and 8.5.9: 40, 40 and 36 shared
+extensions, `pdo_firebird` in all three. The same recipe today builds 8.5.9 with **30** and without
+it.
+
+Nothing to design. It is eleven `build-php.yml` runs with `release=true`, at the exact versions
+already published so the existing releases are replaced rather than joined by a twelfth:
+7.0.33, 7.1.33, 7.2.34, 7.3.33, 7.4.33, 8.0.30, 8.1.34, 8.2.33, 8.3.33, 8.4.24, 8.5.9. It is here as
+a task because the repository cannot see it: `parity.py` and `permanence.py` read what a manifest
+says, and this manifest says something the archive cannot do.
 
 ---
 
