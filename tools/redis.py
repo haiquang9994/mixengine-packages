@@ -13,9 +13,11 @@ of the routes that supply POSIX on Windows compile this source unmodified, and t
 the more conservative of them: **Cygwin**, whose runtime is documented for redistribution and whose
 licence and runtime exception ship as files an archive can carry, over MSYS2, whose own
 documentation says its runtime is for its build tools rather than for programs to be distributed.
-``cygwin1.dll`` and ``cyggcc_s-seh-1.dll`` travel beside the binaries — measured off the import
-table, not copied from anyone's list — and are the only two things outside ``C:\\Windows`` the
-result loads.
+Whatever the build actually imports travels beside the binaries — measured off the import table, not
+copied from anyone's list — and is the only thing outside ``C:\\Windows`` the result loads. How many
+that is depends on the line rather than on this recipe: one, ``cygwin1.dll``, for 7.2, 7.4, 8.8 and
+8.10, and five for 8.0 through 8.6, which vendor the C++ ``fast_float`` and so pull in
+``cygstdc++-6.dll`` with ``cygiconv-2.dll``, ``cygintl-8.dll`` and ``cyggcc_s-seh-1.dll`` behind it.
 
 The alternatives are still no, and for the reasons P8 gave. **Valkey** is the same POSIX program
 forked and sends a Windows user to WSL, which
@@ -31,6 +33,10 @@ What that costs, stated rather than smoothed over. Cygwin has no ``epoll``, so `
 developer's own machine, which is the only thing MixEngine runs. And ``windows/aarch64`` stays empty:
 neither Cygwin nor MSYS2 has an ARM64 build, x86_64 under emulation would work, and an artifact
 labelled ``aarch64`` may not hold binaries that are not.
+
+One more Windows cell is empty and it is a *version* rather than an architecture: 7.2 builds there
+and then faults in its own startup, which :data:`WINDOWS_FLOOR` states in full. Its four Unix cells
+are packed as usual.
 
 What the five cells get:
 
@@ -102,6 +108,28 @@ AGENT = {"User-Agent": "mixengine-packages (+https://github.com/haiquang9994/mix
 # source-available licence still has a supported Redis. See docs/packages/redis-memcached.md for
 # what shipping the newer ones obliges this repository to do.
 FLOOR = (7, 2)
+
+# **Windows starts one line higher, and it is Redis 7.2 that says so rather than Cygwin.** 7.2.15
+# compiles cleanly under Cygwin, links, installs, and then `redis-server.exe --version` dies before
+# it prints anything. Traced on a `windows-2022` runner with Cygwin's own `strace`: the last system
+# call is `time(0)`, then `exception c0000005` — an access violation — which Cygwin turns into
+# signal 11 and exits with `0xB00`, the wait status of a process killed by SIGSEGV.
+#
+# Everything that could have made it an accident was ruled out on the same runner. `redis-cli.exe`,
+# from the same compiler, the same flags and the same `cygwin1.dll` beside it, answers
+# `redis-cli 7.2.15` and exits 0. The unmoved tree faults identically to the relocated one, so it is
+# not `borrow.moved`. `cygcheck` reads the import table as `cygwin1.dll` and Windows API sets and
+# nothing else, so nothing is missing. And the code it dies in — `tzset`, `gettimeofday`, `srand`,
+# `init_genrand64`, `crc64_init`, between `time()` and the banner — is **byte for byte the same in
+# 7.4.10**, which builds and runs on this cell. So it is the older source and this toolchain
+# disagreeing, in a way that no evidence here places in Redis, in Cygwin, or in the recipe.
+#
+# What is not done about it, and why. Patching the source is what "nothing in it is patched" exists
+# to refuse. Compiling this one line differently — a lower `-O`, another `-f` — would make the
+# 7.2 Windows artifact a different build from the four Unix cells of its own version, which is the
+# rule this repository is named after. So the cell is empty and says which line opens it, the same
+# answer `windows/aarch64` gets one paragraph up for a different reason.
+WINDOWS_FLOOR = (7, 4)
 
 # What `make -C src install` puts in `bin/`, and what MixEngine will run. The last two are symlinks
 # to `redis-server` that upstream's install target creates — a running instance's supervisor wants
@@ -719,6 +747,22 @@ def main() -> None:
 
     work = Path(tempfile.mkdtemp(prefix="mixengine-redis-"))
     version, source_tree, digest, url = source(arguments.version, work)
+
+    # After the resolution rather than beside the `windows/aarch64` check above, because that cell is
+    # empty for every version and this one is empty for a version — which cannot be known until a
+    # line like `7.2` has been turned into `7.2.15`.
+    if operating_system == "windows" and tuple(
+        int(part) for part in version.split(".")[:2]
+    ) < WINDOWS_FLOOR:
+        borrow.unavailable(
+            f"Redis {version} compiles under Cygwin and then faults in its own startup: "
+            f"`redis-server --version` takes an access violation between `time()` and the banner "
+            f"and is killed by SIGSEGV, while `redis-cli` from the same build runs. The four Unix "
+            f"cells of this version are unaffected and are packed. Windows starts at "
+            f"{'.'.join(str(part) for part in WINDOWS_FLOOR)} — see WINDOWS_FLOOR in tools/redis.py "
+            f"for what was measured and why neither patching nor another -O is the answer."
+        )
+
     print(f"building Redis {version} for {operating_system}/{arch}")
 
     # Installed into a prefix nothing will ever look at again — Redis compiles no path into any
