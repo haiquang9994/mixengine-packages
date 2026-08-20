@@ -227,8 +227,12 @@ def build_openssl(work: Path) -> Path:
         environment["LDFLAGS"] = (
             "-Wl,-headerpad_max_install_names " + environment.get("LDFLAGS", "")
         ).strip()
+    # `no-docs` is **not** passed, and the omission is load-bearing rather than an oversight:
+    # OpenSSL grew that option in 3.0, and 1.1.1's own `./config` answers `***** Unsupported
+    # options: no-docs` and exits 255 without writing a makefile. Nothing is lost by leaving it out
+    # — `install_sw` below is what skips the documentation, and it skips it either way.
     run("./config", f"--prefix={prefix}", f"--openssldir={prefix}/ssl", "--libdir=lib",
-        "shared", "no-tests", "no-docs", cwd=unpacked, env=environment)
+        "shared", "no-tests", cwd=unpacked, env=environment)
     run("make", f"-j{jobs()}", cwd=unpacked, env=environment)
     run("make", "install_sw", cwd=unpacked, env=environment)
 
