@@ -1,0 +1,204 @@
+name: build mysql
+
+# Asked for, never automatic — the same rule every other workflow here keeps.
+#
+# **One run covers five lines.** MySQL 5.6 through 9.7 are all packed, with end-of-life dates years
+# apart and an application pinned to 5.6 as ordinary as one pinned to 9.7, so a workflow taking a
+# single version would have to be invoked five times and would miss one.
+#
+# **And which recipe a cell uses depends on the version rather than only on the cell.** Upstream
+# withdrew macOS from the 5.x lines while they were alive and never built ARM for either, so 5.6 and
+# 5.7 are compiled on all four Unix cells while 8.0, 8.4 and 9.7 are borrowed on five. That is a fact
+# about the catalogue, so it is decided by `tools/mysql.py --plan` and read here rather than written
+# out as an `if:` that would be the same fact in a second place.
+#
+# The plan also resolves each line to **one exact version for every cell at once**, which matters
+# more than it sounds: 8.0.45 published its Linux tarballs without signatures while its macOS and
+# Windows assets have them, so a per-leg resolution would put three cells of 8.0.45 and two of
+# 8.0.44 in two releases, each with a table three-fifths empty.
+on:
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: "'all' for every line this repository packs, or a comma-separated list (5.6,8.4)."
+        required: true
+        default: 'all'
+        type: string
+      release:
+        description: 'Publish as a GitHub release. Off means build and keep the artifacts for inspection only.'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    # Which versions exist, which of them are completely signed, and which cell goes to which
+    # recipe: all three are upstream's answer rather than a list kept here, and all three come out
+    # of one command so that they cannot disagree.
+    runs-on: ubuntu-24.04
+    outputs:
+      borrow: ${{ steps.expand.outputs.borrow }}
+      macos: ${{ steps.expand.outputs.macos }}
+      linux: ${{ steps.expand.outputs.linux }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - id: expand
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Everything explanatory goes to stdout before the JSON — which version each line resolved
+          # to and what was refused on the way — so the log is readable and the last line is the
+          # answer.
+          python -u tools/mysql.py --version "${{ inputs.versions }}" --plan | tee plan.txt
+          tail -1 plan.txt > legs.json
+          for key in borrow macos linux; do
+            echo "$key=$(python -c "import json; print(json.dumps(json.load(open('legs.json'))['$key']))")" >> "$GITHUB_OUTPUT"
+          done
+          python -c "import json; d = json.load(open('legs.json')); print('::notice::' + ', '.join(f'{k}: {len(v)} legs' for k, v in d.items()))"
+
+  borrow:
+    needs: plan
+    if: ${{ needs.plan.outputs.borrow != '[]' }}
+    # Every leg runs on the operating system and architecture it packs for, because no recipe here
+    # merely unpacks what it downloaded: each one bootstraps a data directory, starts the server,
+    # pings it, writes a row through InnoDB and shuts it down through `mysqladmin`. None of that can
+    # be cross-packed, and it is the half worth having.
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.borrow) }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: pack ${{ matrix.version }}
+        id: pack
+        # bash on every leg, Windows included, so the exit code is read the same way everywhere
+        # rather than in two dialects that could disagree. 75 is "upstream publishes nothing for
+        # this cell at this version", which is an empty cell of the table and not a failure; every
+        # other non-zero code is real and is passed on.
+        shell: bash
+        run: |
+          code=0
+          python -u tools/mysql_borrow.py --version "${{ matrix.version }}" --out dist || code=$?
+          if [ "$code" -eq 75 ]; then
+            echo "::notice::no MySQL ${{ matrix.version }} for ${{ matrix.os }}/${{ matrix.arch }}; nothing to pack"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit "$code"
+        timeout-minutes: 120
+      - uses: actions/upload-artifact@v4
+        if: steps.pack.outputs.skipped != 'true'
+        with:
+          # The version is in the name because one run produces five of them, and two legs uploading
+          # `mysql-linux-x86_64` would be one artifact overwriting another.
+          name: mysql-${{ matrix.version }}-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  build-macos:
+    # 5.6 and 5.7, compiled. Upstream's last release of each line offers no macOS asset at all.
+    needs: plan
+    if: ${{ needs.plan.outputs.macos != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.macos) }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: build ${{ matrix.version }} from source
+        run: python3 -u tools/mysql_build.py --version "${{ matrix.version }}" --out dist
+        # Four hours: a full MySQL server from source on a runner, with no ccache to fall back on,
+        # and on 5.6 an OpenSSL 1.1.1 built first because 5.6's own CMake will not accept a newer
+        # one.
+        timeout-minutes: 240
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mysql-${{ matrix.version }}-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  build-linux:
+    # The same two lines, compiled inside AlmaLinux 8 rather than on the runner — the same
+    # `manylinux_2_28` image build-php.yml compiles PHP 7 in, and for the same two reasons. The
+    # glibc floor that falls out of it is 2.28 rather than the runner's 2.39, and the image's
+    # toolchain is closer to the one a 2021 source tree was written against.
+    needs: plan
+    if: ${{ needs.plan.outputs.linux != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.linux) }}
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: build ${{ matrix.version }} from source
+        # AlmaLinux 8's own python is 3.6, which these recipes do not run on. The image ships current
+        # interpreters for its actual purpose; the newest of those is used rather than installing
+        # another one.
+        run: |
+          set -euo pipefail
+          python="$(ls -d /opt/python/cp31*/bin/python 2>/dev/null | sort -V | tail -1 || true)"
+          "${python:-python3}" -u tools/mysql_build.py --version "${{ matrix.version }}" --out dist
+        timeout-minutes: 240
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mysql-${{ matrix.version }}-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    # One release per exact version, holding every artifact of it — the version read back out of
+    # each manifest rather than taken from the input, because the input names lines and each line
+    # resolved to a version in the plan job.
+    #
+    # Not every job runs for every input: a run asking only for 9.7 skips both build jobs. Hence
+    # `!failure()` rather than a plain dependency.
+    needs: [borrow, build-macos, build-linux]
+    if: ${{ inputs.release && !failure() && !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: incoming, merge-multiple: true }
+      - name: publish one release per version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          versions=$(jq -r '.version' incoming/*.json | sort -u)
+          for version in $versions; do
+            tag="mysql-$version"
+            assets=()
+            for manifest in incoming/*.json; do
+              [ "$(jq -r '.version' "$manifest")" = "$version" ] || continue
+              # Both halves: the manifest is what the index generator reads, so a release holding
+              # only the archive is one the index cannot be rebuilt from.
+              assets+=("${manifest%.json}" "$manifest")
+            done
+            # The patched source, where there is one. It is an asset like any other and it is not
+            # optional: these binaries are GPLv2 and were built from modified source, so a release
+            # without it is a licence violation rather than a missing convenience — which is also
+            # why nothing here may ever delete it. See docs/the-archive.md.
+            for source in incoming/mysql-"$version"-patched-src.tar.gz; do
+              [ -f "$source" ] && assets+=("$source")
+            done
+            echo "== $tag: ${#assets[@]} asset(s)"
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              gh release create "$tag" \
+                --title "MySQL $version" \
+                --notes "Relocatable MySQL $version for MixEngine. macOS, Linux and Windows x86_64 are repacked from Oracle's own archive, each verified against a detached PGP signature from a key pinned in tools/mysql.py; on 5.6 and 5.7 the four Unix cells are compiled from upstream's source release, because Oracle withdrew macOS from those lines while they were alive and never published an ARM build of either. Where the source was modified, the complete corresponding source is published here as mysql-$version-patched-src.tar.gz, as GPLv2 requires. Every artifact was run as a database from a directory it had been moved to before being published — a data directory bootstrapped from scratch, the server started against a rendered my.cnf, mysqladmin ping answered, a row written and read back through InnoDB, and the server shut down through mysqladmin — see mixengine-artifact.json inside each one for what was proven."
+            fi
+            gh release upload "$tag" "${assets[@]}" --clobber
+          done
