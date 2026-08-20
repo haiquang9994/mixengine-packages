@@ -50,6 +50,16 @@ exactly which library that artifact loads. It is not a reason to refuse the vers
 own build system rejects a maintained OpenSSL cannot be given one, and the person maintaining an
 application against MySQL 5.6 is exactly who a local development environment is for.
 
+**Neither 5.x line will configure under a current CMake, so the recipe brings its own.** Both trees
+ask for OLD behaviour on `CMP0018`, `CMP0022`, `CMP0042` and `CMP0045` by name, and CMake 4 answers
+that the policy *may not be set to OLD behavior because this version of CMake no longer supports it*
+— four errors before a single file is compiled, on macOS and inside the manylinux container alike.
+`-DCMAKE_POLICY_VERSION_MINIMUM=3.5` answers a different question, about a `CMAKE_MINIMUM_REQUIRED`
+that is too old, and does not help with this one. The alternative to an old tool was editing
+upstream's `CMakeLists.txt`, which means guessing what four compatibility settings from a 2013-era
+build system should become; `tools/mysql_build.py` pins **CMake 3.31.12** instead — the last 3.x
+line — by URL and SHA-256, and fetches it per build the same way it fetches 5.6's OpenSSL.
+
 **The 5.6 artifacts are built from modified source, and the source travels with them.** One block in
 `include/my_global.h`, written for PowerPC-era universal binaries, undoes the `SIZEOF_*` values CMake
 has just detected and hardcodes them from `__i386__ / __ppc__ / __x86_64__ / __ppc64__`, ending in

@@ -60,6 +60,38 @@ OPENSSL_FOR_56 = {
     "version": "1.1.1w",
 }
 
+# The last CMake that will configure a MySQL 5.x tree at all, pinned and fetched the way the
+# OpenSSL above is.
+#
+# **`-DCMAKE_POLICY_VERSION_MINIMUM=3.5` is not enough, and that is worth stating because it looks
+# as though it should be.** That option answers a tree whose `CMAKE_MINIMUM_REQUIRED` is too old.
+# 5.6 and 5.7 do something else as well: they ask for OLD behaviour on CMP0018, CMP0022, CMP0042 and
+# CMP0045 *by name*, and CMake 4 replies `Policy CMP0018 may not be set to OLD behavior because this
+# version of CMake no longer supports it` — four errors, before a single file is compiled, on macOS
+# and inside the manylinux container alike.
+#
+# So the choice was to edit upstream's `CMakeLists.txt` or to bring a CMake that still speaks to it.
+# Editing it would mean turning four compatibility settings a 2013-era build system asked for into
+# whatever today's default happens to be, guessing at each one; this repository patches source only
+# where upstream itself made the same change later (see :func:`patch_universal_binary`). An old tree
+# gets an old tool. 3.31 is the last 3.x line, and it is also the line that introduced
+# `CMAKE_POLICY_VERSION_MINIMUM`, so both halves of the problem are answered by one download.
+CMAKE_FOR_5X = {
+    "version": "3.31.12",
+    "assets": {
+        "linux-x86_64": (
+            "0dc2e9a6860f06bf10bd8fadc03e35d9eeb4df46e33763a7e480e987758f385c", "bin/cmake",
+        ),
+        "linux-aarch64": (
+            "83f8fd91d2038a56556e1400390fcfe42f79602940c494f6c6f1cdae7f9e7f40", "bin/cmake",
+        ),
+        "macos-universal": (
+            "799af7fd545db9bf1b9cfe72f8095880e727a2d4e0df0e3dffc3bc7b95c2d3b0",
+            "CMake.app/Contents/bin/cmake",
+        ),
+    },
+}
+
 # What Homebrew is asked for. `bison` is not decoration: Apple ships 2.3 in /usr/bin and MySQL's
 # grammar needs 2.7 or newer, so the Homebrew one goes on the PATH ahead of it.
 BREW_PACKAGES = ("bison", "openssl@3", "ncurses", "pkg-config")
@@ -67,7 +99,9 @@ BREW_PACKAGES = ("bison", "openssl@3", "ncurses", "pkg-config")
 # What AlmaLinux 8 is asked for. A named list rather than a `dnf group`, so a reader can check it
 # against the configure flags. `perl` is there because OpenSSL's build is written in it.
 DNF_PACKAGES = (
-    "gcc", "gcc-c++", "make", "cmake", "bison", "ncurses-devel", "perl", "perl-IPC-Cmd",
+    # No `cmake`: the one this build runs is pinned and downloaded, because a current one
+    # refuses these trees. See `CMAKE_FOR_5X`.
+    "gcc", "gcc-c++", "make", "bison", "ncurses-devel", "perl", "perl-IPC-Cmd",
     "patchelf", "binutils", "zlib-devel", "openssl-devel", "libtirpc-devel", "rpcgen",
 )
 
@@ -196,6 +230,41 @@ def dependencies() -> dict[str, Path]:
     return {}
 
 
+def cmake_3(work: Path) -> str:
+    """Fetch the pinned CMake and answer with the program to run, verified by hash.
+
+    Kitware publishes no detached signature for these archives and does publish a SHA-256 file
+    beside them, which is what `CMAKE_FOR_5X` carries: the check is against a digest recorded in
+    this repository, not against one fetched next to the download and therefore worth nothing.
+    """
+    _, arch = borrow.host("MySQL")
+    key = "macos-universal" if sys.platform == "darwin" else f"linux-{arch}"
+    if key not in CMAKE_FOR_5X["assets"]:
+        raise SystemExit(f"no pinned CMake for {key}, and MySQL 5.x will not configure without one")
+    expected, program = CMAKE_FOR_5X["assets"][key]
+    version = CMAKE_FOR_5X["version"]
+    name = f"cmake-{version}-{key}.tar.gz"
+    url = f"https://github.com/Kitware/CMake/releases/download/v{version}/{name}"
+
+    directory = work / "cmake"
+    directory.mkdir(parents=True, exist_ok=True)
+    tarball = directory / name
+    print(f"fetching {url}")
+    tarball.write_bytes(borrow.fetch(url, timeout=900))
+    actual = borrow.sha256(tarball)
+    if actual != expected:
+        raise SystemExit(f"{name} hashes to {actual}, and this recipe pins {expected}")
+    print(f"sha256 {actual} (pinned in tools/mysql_build.py)")
+    with tarfile.open(tarball) as archive:
+        archive.extractall(directory, filter="data")
+    unpacked = next(item for item in sorted(directory.iterdir()) if item.is_dir())
+    found = unpacked / program
+    if not found.is_file():
+        raise SystemExit(f"{name} does not hold {program}; Kitware has changed its layout")
+    found.chmod(found.stat().st_mode | 0o755)
+    return str(found)
+
+
 def build_openssl(work: Path) -> Path:
     """Compile the OpenSSL 1.1.1 that MySQL 5.6's own CMake will accept, and answer with its prefix.
 
@@ -242,19 +311,19 @@ def build_openssl(work: Path) -> Path:
 
 
 def configure(source_tree: Path, build: Path, prefix: Path, line: str,
-              found: dict[str, Path], ssl: Path | None, work: Path) -> list[str]:
+              found: dict[str, Path], ssl: Path | None, work: Path, program: str) -> list[str]:
     """Ask CMake for a standalone server, and answer with what it was asked."""
     arguments = [
-        "cmake", str(source_tree),
+        program, str(source_tree),
         f"-DCMAKE_INSTALL_PREFIX={prefix}",
         "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
         "-DINSTALL_LAYOUT=STANDALONE",
         "-DWITH_UNIT_TESTS=OFF",
         "-DWITH_EMBEDDED_SERVER=OFF",
-        # CMake 4 removed compatibility with projects declaring less than 3.5, and 5.6's
-        # CMakeLists.txt says `CMAKE_MINIMUM_REQUIRED(VERSION 2.6)`. Without this the configure step
-        # fails before a single file is compiled, on a runner whose CMake is simply current. Older
-        # CMakes ignore an unused -D, so it is passed unconditionally rather than probed for.
+        # 5.6's CMakeLists.txt says `CMAKE_MINIMUM_REQUIRED(VERSION 2.6)`, which the pinned CMake
+        # deprecates rather than refuses. Passed anyway: it is the option `CMAKE_FOR_5X` exists to
+        # be able to pass, it costs nothing, and it says in the arguments — which go into the
+        # artifact's own record of how it was configured — that this tree needed it.
         "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
     ]
     if line == "5.7":
@@ -282,9 +351,9 @@ def configure(source_tree: Path, build: Path, prefix: Path, line: str,
     return arguments[1:]
 
 
-def compile_and_install(build: Path) -> None:
-    run("cmake", "--build", str(build), "--parallel", jobs(), cwd=build)
-    run("cmake", "--install", str(build), cwd=build)
+def compile_and_install(build: Path, program: str) -> None:
+    run(program, "--build", str(build), "--parallel", jobs(), cwd=build)
+    run(program, "--install", str(build), cwd=build)
 
 
 def assemble(prefix: Path, work: Path) -> tuple[Path, list[str]]:
@@ -412,8 +481,9 @@ def main() -> None:
     ssl = build_openssl(work) if line == "5.6" else None
 
     prefix = work / "prefix"
-    asked = configure(source_tree, work / "build", prefix, line, found, ssl, work)
-    compile_and_install(work / "build")
+    program = cmake_3(work)
+    asked = configure(source_tree, work / "build", prefix, line, found, ssl, work, program)
+    compile_and_install(work / "build", program)
 
     tree, removed = assemble(prefix, work)
     provides = mysql_smoke.describe(tree, windows=False)
