@@ -132,6 +132,27 @@ GNU_SOURCE_BLOCK = """/* Fix problem with S_ISLNK() on Linux */
 #endif
 """
 
+# The same mistake again, in the same word, one directory away — and this one is 5.7's rather than
+# 5.6's. zlib's `zutil.h` has a branch for *classic* Mac OS which it enters on
+# `defined(MACOS) || defined(TARGET_OS_MAC)`, meaning to ask whether TARGET_OS_MAC is 1; Apple's
+# TargetConditionals.h defines it as 1 on every platform Apple sells. The branch does
+# `#define fdopen(fd,mode) NULL`, so the `#include <stdio.h>` that `gzguts.h` does two lines later
+# reaches `FILE *fdopen(int, const char *)` with `fdopen` already a macro and clang stops inside
+# Apple's own header. It splits the two macOS cells the way GNU_SOURCE_BLOCK does — SDK 15.5
+# reaches zutil.h with TargetConditionals.h already included and SDK 14.5 does not, so Xcode 16.4
+# fails and Xcode 15.4 compiles it.
+#
+# **5.6 never reaches this and 5.7 cannot avoid it.** Both are asked for `-DWITH_ZLIB=system`;
+# 5.6 takes it, and 5.7.44 requires a system zlib of at least 1.2.13 — the release that fixed
+# CVE-2022-37434 — while every macOS SDK ships 1.2.12. So its CMake declines the request, says so,
+# and compiles the bundled 1.2.13 instead. That is the right library to compile: the fix belongs in
+# the header test, not in linking a database against the zlib upstream refused.
+#
+# Patched on every operating system rather than on macOS alone, for `patch_gnu_source`'s reason: on
+# Linux and Windows neither macro is ever defined, so the branch is dead there and deleting the way
+# in changes nothing — and every cell of a version then compiles the same source.
+ZLIB_CLASSIC_MAC_TEST = "#if defined(MACOS) || defined(TARGET_OS_MAC)"
+
 
 def run(*command: str, cwd: Path | None = None, env: dict | None = None,
         capture: bool = False, timeout: int = 14400) -> str:
@@ -283,6 +304,42 @@ def patch_gnu_source(source_tree: Path) -> dict[str, str]:
             "which that test reads as yes, so mysys/my_error.c took its GNU branch and assigned "
             "the int that POSIX strerror_r returns to a char *. MySQL 5.7.44 does not have the "
             "block; on Linux _GNU_SOURCE comes from my_config.h, which 5.6 generates as well.",
+    }
+
+
+def patch_zlib_classic_mac(source_tree: Path) -> dict[str, str]:
+    """Stop the bundled zlib reading macOS as classic Mac OS. See :data:`ZLIB_CLASSIC_MAC_TEST`.
+
+    Counted before it is written, the way the other three patches are: one `zutil.h` under
+    `extra/zlib`, holding the test exactly once. A zlib that spells this differently is a build
+    that stops rather than a database compiled against a header nobody read.
+    """
+    headers = sorted((source_tree / "extra" / "zlib").rglob("zutil.h"))
+    if len(headers) != 1:
+        raise SystemExit(
+            f"{source_tree / 'extra' / 'zlib'} holds {len(headers)} zutil.h and this recipe "
+            f"expects one. MySQL has changed which zlib it bundles, and patching the wrong copy — "
+            f"or none — would leave the failure where it was."
+        )
+    path = headers[0]
+    text = path.read_text(encoding="utf-8")
+    if text.count(ZLIB_CLASSIC_MAC_TEST) != 1:
+        raise SystemExit(
+            f"{path} does not contain exactly one classic Mac OS test "
+            f"({text.count(ZLIB_CLASSIC_MAC_TEST)} found). zlib has changed the line this recipe "
+            f"narrows, and guessing here decides whether fdopen exists."
+        )
+    name = path.relative_to(source_tree).as_posix()
+    path.write_text(text.replace(ZLIB_CLASSIC_MAC_TEST, "#if defined(MACOS)"), encoding="utf-8")
+    print(f"patched {name}: macOS is not the classic Mac OS zlib means by TARGET_OS_MAC")
+    return {
+        name:
+            "narrowed `#if defined(MACOS) || defined(TARGET_OS_MAC)` to `#if defined(MACOS)`. "
+            "zlib means classic Mac OS by that branch and asks whether TARGET_OS_MAC exists; "
+            "Apple's TargetConditionals.h defines it as 1 everywhere, so the branch fired, "
+            "`#define fdopen(fd,mode) NULL` landed before <stdio.h>, and clang failed on Apple's "
+            "own declaration of fdopen. Only the classic-Mac spelling is left, which no Apple SDK "
+            "defines.",
     }
 
 
@@ -599,6 +656,8 @@ def main() -> None:
     if line == "5.6":
         changed.update(patch_universal_binary(source_tree))
         changed.update(patch_gnu_source(source_tree))
+    if line == "5.7":
+        changed.update(patch_zlib_classic_mac(source_tree))
     ssl = build_openssl(work) if line == "5.6" else None
 
     prefix = work / "prefix"

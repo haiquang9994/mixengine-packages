@@ -70,18 +70,30 @@ prepending instead of setting. So the flag is passed on the command line, where 
 reach it, on clang as well as GCC — the clash follows the compiler's *default standard*, and Apple's
 has moved too.
 
-**On macOS the compiled cells use the system zlib rather than the one 5.6 carries.** That copy
-dates from 2013 and its `zutil.h` still has a branch for *classic* Mac OS, taken whenever
-`TARGET_OS_MAC` is defined — which is 1 on every Apple platform today. The branch does
-`#define fdopen(fd,mode) NULL`, so the next `#include <stdio.h>` meets `FILE *fdopen(int, const
-char *)` with `fdopen` already a macro and clang stops inside Apple's own header. It is not even
-consistent between the two cells: measured, x86_64 on SDK 15.5 fails and arm64 on SDK 14.5 does
-not, so what compiles depends on which runner image is current. macOS has shipped a maintained zlib
-in `/usr/lib` for as long as there has been a macOS, `relocate` leaves anything there alone, and a
-2013 zlib is not something to ship on purpose. Linux keeps the bundled one, where it compiles.
+**Neither compiled line can compile the zlib it carries on a current macOS SDK.** Every version of
+that `zutil.h` has a branch for *classic* Mac OS, entered on
+`defined(MACOS) || defined(TARGET_OS_MAC)` — meaning to ask whether `TARGET_OS_MAC` is 1, which it
+is on every Apple platform today. The branch does `#define fdopen(fd,mode) NULL`, so the next
+`#include <stdio.h>` meets `FILE *fdopen(int, const char *)` with `fdopen` already a macro and clang
+stops inside Apple's own header. It is not even consistent between the two cells: measured, x86_64
+on SDK 15.5 fails and arm64 on SDK 14.5 does not, so what compiles depends on which runner image is
+current. **The two lines are answered differently, because CMake answers them differently.**
 
-**Both compiled lines are built from modified source, and the source travels with them.** Two
-changes, and each one is a change Oracle itself made in a later version.
+*5.6* is given `-DWITH_ZLIB=system` and takes it. Its copy dates from 2013, macOS has shipped a
+maintained zlib in `/usr/lib` for as long as there has been a macOS, `relocate` leaves anything
+there alone, and a 2013 zlib is not something to ship on purpose.
+
+*5.7* is asked the same and refused. 5.7.44 requires a system zlib of at least 1.2.13 — the release
+that fixed CVE-2022-37434 — and every macOS SDK ships 1.2.12, so its CMake says so and compiles the
+bundled 1.2.13 instead. That is the right library to compile, and the fix belongs in the header
+test rather than in linking a database against the zlib upstream refused: the branch is narrowed to
+`#if defined(MACOS)`, the spelling no Apple SDK defines.
+
+Linux keeps the bundled zlib on both lines, where neither macro is ever defined and the branch is
+dead.
+
+**Both compiled lines are built from modified source, and the source travels with them.** Three
+changes; the two that touch MySQL's own files are changes Oracle itself made in a later version.
 
 *Every cell of both lines* has the file `VERSION` at the root of the tree renamed to
 `MYSQL_VERSION`, with `cmake/mysql_version.cmake` reading the new name. The tree's root is on the
@@ -101,6 +113,14 @@ declares itself GNU, `mysys/my_error.c` takes its
 that returns `int`. Xcode 16.4 refuses it; Xcode 15.4 compiled it with a warning, into a build whose
 `my_strerror` would have read a pointer that was really a zero. **5.7.44 does not have the block**,
 and on Linux `_GNU_SOURCE` comes from `my_config.h`, which 5.6 generates too.
+
+*The 5.7 cells* have the one change that is not Oracle's, because the file is not Oracle's: the
+classic Mac OS test in the bundled `extra/zlib/zlib-1.2.13/zutil.h` is narrowed from
+`#if defined(MACOS) || defined(TARGET_OS_MAC)` to `#if defined(MACOS)`, as described above. It is
+the smallest edit that says what zlib meant — `MACOS` is the classic-Mac spelling, and nothing
+Apple ships defines it — and it is applied on every operating system rather than on macOS alone, so
+that every cell of a version compiles the same source. On Linux and Windows the branch was already
+dead.
 
 The first block is the older one. Written for PowerPC-era universal binaries, it undoes the
 `SIZEOF_*` values CMake has just detected and hardcodes them from
