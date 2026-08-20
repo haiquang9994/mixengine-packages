@@ -121,7 +121,6 @@ def main() -> None:
     removed = mysql.prune(tree)
     if removed:
         print(f"not shipping {len(removed)} paths: {', '.join(removed)}")
-    removed += mysql.unloadable_libraries(tree)
 
     added: dict[str, Path] = {}
     if not windows:
@@ -132,6 +131,11 @@ def main() -> None:
             print(f"bundled {len(added)} librar{'y' if len(added) == 1 else 'ies'}: "
                   f"{', '.join(sorted(added))}")
         relocate.bundled_licences(tree, added)
+
+    # After the bundling, never before it. A plugin naming `libssl.so.3` is unresolvable in the tree
+    # upstream shipped and perfectly resolvable in the one `bundle` has just finished, so asking the
+    # question early would delete the plugins this recipe exists to make work.
+    removed += mysql.unloadable_libraries(tree)
 
     provides = mysql_smoke.describe(tree, windows)
 

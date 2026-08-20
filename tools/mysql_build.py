@@ -1,0 +1,493 @@
+#!/usr/bin/env python3
+"""Compile MySQL 5.6 and 5.7 for the four Unix cells upstream stopped publishing.
+
+**Oracle withdrew macOS from both lines while they were alive.** `5.7.31` offers
+`macos10.14-x86_64`, `5.7.20` offers `macos10.12-x86_64`, and `5.7.44` — the last release of the
+line — offers no macOS asset of any kind and lists no macOS entry in its own operating-system menu.
+5.6 does the same thing earlier. Neither line has ever had an ARM build, on any system. So four of
+six cells have nothing to borrow, and they are compiled here.
+
+**All four, and that is a decision rather than a shortage.** Upstream still publishes
+`linux-glibc2.12-x86_64` for both lines, so that cell *could* be borrowed. It is not. The ARM cell
+has to be compiled — there is nothing to borrow — which means a 2026 toolchain against an OpenSSL
+this repository supplies, while the borrowed tarball is Oracle's 2021 build against whatever it
+linked then, at a glibc floor of 2.12 against the built cell's 2.28. Two Linux artifacts of
+`5.6.51` would be two different databases, and `parity.py` compares finished artifacts precisely
+because that difference is invisible in two green builds. This is the first row in this repository
+where *borrow before you build* loses to *one version means one thing*, and it is worth saying in
+those terms: borrowing is cheaper per cell, and it is not cheaper than having the six cells of a
+version mean one thing.
+
+Two things follow that no other compiled recipe here has had to deal with, and both have their own
+function below: **5.6 will not build for arm64 without a patch**, and **5.6 will not accept a
+maintained OpenSSL**. The patch is upstream's own later change carried back one line, and the
+modified source is published beside the binaries because MySQL Community is GPLv2.
+
+Python 3 stdlib only, by policy.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import borrow
+import mysql
+import mysql_smoke
+import relocate
+
+# MySQL 5.6's own CMake decides this, and it is worth stating as a measurement rather than as
+# history: `cmake/ssl.cmake` in 5.6.51 sets `OPENSSL_FOUND` only when `OPENSSL_MAJOR_VERSION
+# STREQUAL "1"`, while 5.7.44 accepts `"1" OR "3"`. So 5.7 compiles against the OpenSSL every
+# machine already has, and 5.6 needs a 1.1.1 this repository builds and bundles.
+#
+# **1.1.1 stopped receiving public security fixes in September 2023.** `smoke.openssl` on the four
+# compiled 5.6 cells therefore names a TLS library nobody patches, which belongs in the artifact and
+# on the page rather than in a comment. It is not a reason to refuse the version: a version whose
+# own build system rejects a maintained OpenSSL cannot be given one, and the person maintaining an
+# application against MySQL 5.6 is exactly who a local development environment is for.
+OPENSSL_FOR_56 = {
+    "url": "https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-1.1.1w.tar.gz",
+    "sha256": "cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8",
+    "version": "1.1.1w",
+}
+
+# What Homebrew is asked for. `bison` is not decoration: Apple ships 2.3 in /usr/bin and MySQL's
+# grammar needs 2.7 or newer, so the Homebrew one goes on the PATH ahead of it.
+BREW_PACKAGES = ("bison", "openssl@3", "ncurses", "pkg-config")
+
+# What AlmaLinux 8 is asked for. A named list rather than a `dnf group`, so a reader can check it
+# against the configure flags. `perl` is there because OpenSSL's build is written in it.
+DNF_PACKAGES = (
+    "gcc", "gcc-c++", "make", "cmake", "bison", "ncurses-devel", "perl", "perl-IPC-Cmd",
+    "patchelf", "binutils", "zlib-devel", "openssl-devel", "libtirpc-devel", "rpcgen",
+)
+
+# The block that stops MySQL 5.6 compiling on any machine Apple sells today, and on any ARM Linux.
+# Matched at both ends and deleted whole; see :func:`patch_universal_binary` for why this is
+# upstream's change rather than this repository's invention.
+DARWIN_BLOCK_OPENS = "#if defined(__APPLE__) && defined(__MACH__)\n#  undef SIZEOF_CHARP"
+DARWIN_BLOCK_CLOSES = "#endif /* defined(__APPLE__) && defined(__MACH__) */"
+
+
+def run(*command: str, cwd: Path | None = None, env: dict | None = None,
+        capture: bool = False, timeout: int = 14400) -> str:
+    print("$ " + " ".join(str(part) for part in command), flush=True)
+    result = subprocess.run(
+        [str(part) for part in command], cwd=cwd, env=env, text=True, timeout=timeout,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
+    )
+    if result.returncode != 0:
+        if capture:
+            sys.stdout.write(result.stdout or "")
+            sys.stderr.write(result.stderr or "")
+        raise SystemExit(f"{command[0]} exited {result.returncode}")
+    return result.stdout or ""
+
+
+def attempt(*command: str, timeout: int = 3600) -> bool:
+    """Run something whose failure is not fatal — a package that is already installed, say."""
+    print("$ " + " ".join(str(part) for part in command), flush=True)
+    try:
+        return subprocess.run(
+            [str(part) for part in command], capture_output=True, timeout=timeout
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def jobs() -> str:
+    return str(os.cpu_count() or 2)
+
+
+def source(version: str, work: Path) -> tuple[Path, str, str, str]:
+    """Fetch the source release, verify its signature, unpack it, and answer with where it is."""
+    program, home = mysql.keyring(work)
+    name = mysql.source_asset(version)
+    if name is None:
+        raise SystemExit(f"upstream publishes no source tarball for MySQL {version}")
+    tarball, digest, url, fingerprint = mysql.download(program, home, name, version, work)
+    with tarfile.open(tarball) as archive:
+        archive.extractall(work, filter="data")
+    unpacked = work / f"mysql-{version}"
+    if not (unpacked / "CMakeLists.txt").is_file():
+        raise SystemExit(f"{unpacked} has no CMakeLists.txt; this is not a release tarball")
+    return unpacked, digest, url, fingerprint
+
+
+def patch_universal_binary(source_tree: Path) -> dict[str, str]:
+    """Delete the block that stops MySQL 5.6 compiling on any machine Apple sells today.
+
+    ``include/my_global.h`` carries a Darwin block written for PowerPC-era universal binaries. It
+    ``#undef``s the ``SIZEOF_*`` values CMake has just detected correctly and hardcodes them again
+    from ``__i386__ / __ppc__ / __x86_64__ / __ppc64__``, ending in
+    ``#error Building FAT binary for an unknown architecture.`` On Apple Silicon that ``#error`` is
+    the whole of the failure; nothing else in 5.6 is x86-bound.
+
+    **The fix is Oracle's own.** 5.7.44 does not have the block — it was deleted upstream and the
+    detected values left to stand — so what happens here is upstream's later change carried back one
+    line, not a port invented in this repository, and it is checkable with two files at tags
+    ``mysql-5.6.51`` and ``mysql-5.7.44``. MacPorts' still-maintained ``mysql56`` reaches the same
+    place by adding ``__aarch64__`` to the ``#elif``; that is a diagnosis worth having, it is not
+    the source, and no byte of it enters an artifact.
+
+    Guarded the way ``ruby_unix.relative_cert_defaults`` guards its OpenSSL patch: found exactly
+    once, or the build stops. An upstream that changed this file is a build that fails loudly rather
+    than an artifact that ships quietly.
+    """
+    path = source_tree / "include" / "my_global.h"
+    text = path.read_text(encoding="utf-8")
+    opens, closes = text.count(DARWIN_BLOCK_OPENS), text.count(DARWIN_BLOCK_CLOSES)
+    if opens != 1 or closes != 1:
+        raise SystemExit(
+            f"{path} does not contain exactly one Darwin universal-binary block ({opens} openings, "
+            f"{closes} closings). MySQL has changed the file this recipe deletes a block from, and "
+            f"guessing here would compile the wrong SIZEOF_* values into a database."
+        )
+    start = text.index(DARWIN_BLOCK_OPENS)
+    end = text.index(DARWIN_BLOCK_CLOSES, start) + len(DARWIN_BLOCK_CLOSES)
+    path.write_text(text[:start] + text[end:], encoding="utf-8")
+    print("patched include/my_global.h: removed the universal-binary block 5.7 removed upstream")
+    return {
+        "include/my_global.h":
+            "removed the __APPLE__ universal-binary block, which undoes CMake's detected SIZEOF_* "
+            "values, hardcodes them per architecture from __i386__/__ppc__/__x86_64__/__ppc64__ and "
+            "#errors on anything else, arm64 included. MySQL 5.7.44 does not carry the block; this "
+            "is that deletion, applied to 5.6.",
+    }
+
+
+def brew_prefix(formula: str) -> Path | None:
+    result = subprocess.run(["brew", "--prefix", formula], capture_output=True, text=True,
+                            timeout=300)
+    prefix = Path(result.stdout.strip()) if result.stdout.strip() else None
+    return prefix if result.returncode == 0 and prefix and prefix.is_dir() else None
+
+
+def dependencies() -> dict[str, Path]:
+    """Install what this machine needs to compile a MySQL, and answer with where the parts are."""
+    if sys.platform == "darwin":
+        for package in BREW_PACKAGES:
+            attempt("brew", "install", package)
+        found = {name: brew_prefix(name) for name in ("bison", "openssl@3", "ncurses")}
+        missing = [name for name, prefix in found.items() if prefix is None]
+        if missing:
+            raise SystemExit(f"Homebrew has no {', '.join(missing)}, and this build needs each")
+        # Ahead of /usr/bin, where Apple's bison 2.3 is — old enough that MySQL's grammar does not
+        # compile with it, and quiet enough about it that the failure looks like a syntax error in
+        # sql_yacc.yy.
+        os.environ["PATH"] = f"{found['bison'] / 'bin'}{os.pathsep}{os.environ['PATH']}"
+        return {name: prefix for name, prefix in found.items() if prefix}
+
+    for enabling in (["dnf", "config-manager", "--set-enabled", "powertools"],
+                     ["dnf", "config-manager", "--set-enabled", "crb"]):
+        attempt(*enabling)
+    for package in DNF_PACKAGES:
+        attempt("dnf", "install", "-y", package)
+    return {}
+
+
+def build_openssl(work: Path) -> Path:
+    """Compile the OpenSSL 1.1.1 that MySQL 5.6's own CMake will accept, and answer with its prefix.
+
+    ``ruby_unix.build_library``'s shape, one branch older. ``--libdir=lib`` because OpenSSL installs
+    into ``lib64`` on a 64-bit Linux otherwise and everything downstream of this looks in ``lib``;
+    ``install_sw`` rather than ``install`` is the difference between three minutes and twenty, the
+    rest being documentation nothing here reads.
+    """
+    directory = work / "openssl"
+    directory.mkdir(parents=True, exist_ok=True)
+    tarball = directory / OPENSSL_FOR_56["url"].rsplit("/", 1)[-1]
+    print(f"fetching {OPENSSL_FOR_56['url']}")
+    tarball.write_bytes(borrow.fetch(OPENSSL_FOR_56["url"], timeout=900))
+    actual = borrow.sha256(tarball)
+    if actual != OPENSSL_FOR_56["sha256"]:
+        raise SystemExit(
+            f"{tarball.name} hashes to {actual}, and this recipe pins {OPENSSL_FOR_56['sha256']}"
+        )
+    print(f"sha256 {actual} (pinned in tools/mysql_build.py)")
+    with tarfile.open(tarball) as archive:
+        archive.extractall(directory, filter="data")
+    unpacked = next(path for path in sorted(directory.iterdir()) if path.is_dir())
+
+    prefix = work / "openssl-prefix"
+    environment = {**os.environ}
+    if sys.platform == "darwin":
+        # A Mach-O whose load commands were packed tight cannot have its install names rewritten at
+        # all — only the linker can leave room, and finding that out afterwards costs the build.
+        environment["LDFLAGS"] = (
+            "-Wl,-headerpad_max_install_names " + environment.get("LDFLAGS", "")
+        ).strip()
+    run("./config", f"--prefix={prefix}", f"--openssldir={prefix}/ssl", "--libdir=lib",
+        "shared", "no-tests", "no-docs", cwd=unpacked, env=environment)
+    run("make", f"-j{jobs()}", cwd=unpacked, env=environment)
+    run("make", "install_sw", cwd=unpacked, env=environment)
+
+    for text in sorted(unpacked.glob("LICENSE*")):
+        shutil.copy2(text, work / f"licence-openssl-{text.name}")
+    return prefix
+
+
+def configure(source_tree: Path, build: Path, prefix: Path, line: str,
+              found: dict[str, Path], ssl: Path | None, work: Path) -> list[str]:
+    """Ask CMake for a standalone server, and answer with what it was asked."""
+    arguments = [
+        "cmake", str(source_tree),
+        f"-DCMAKE_INSTALL_PREFIX={prefix}",
+        "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+        "-DINSTALL_LAYOUT=STANDALONE",
+        "-DWITH_UNIT_TESTS=OFF",
+        "-DWITH_EMBEDDED_SERVER=OFF",
+        # CMake 4 removed compatibility with projects declaring less than 3.5, and 5.6's
+        # CMakeLists.txt says `CMAKE_MINIMUM_REQUIRED(VERSION 2.6)`. Without this the configure step
+        # fails before a single file is compiled, on a runner whose CMake is simply current. Older
+        # CMakes ignore an unused -D, so it is passed unconditionally rather than probed for.
+        "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+    ]
+    if line == "5.7":
+        # 5.7 needs Boost 1.59 exactly and refuses to look for it anywhere else. Letting its own
+        # build fetch it is upstream's documented route, and pinning a copy here would be this
+        # repository maintaining a mirror of a dependency it does not otherwise touch.
+        boost = work / "boost"
+        boost.mkdir(parents=True, exist_ok=True)
+        arguments += [f"-DWITH_BOOST={boost}", "-DDOWNLOAD_BOOST=1"]
+    if ssl is not None:
+        arguments.append(f"-DWITH_SSL={ssl}")
+    elif sys.platform == "darwin":
+        arguments.append(f"-DWITH_SSL={found['openssl@3']}")
+    else:
+        arguments.append("-DWITH_SSL=system")
+
+    if sys.platform == "darwin":
+        arguments += [
+            f"-DBISON_EXECUTABLE={found['bison'] / 'bin' / 'bison'}",
+            "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-headerpad_max_install_names",
+            "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-headerpad_max_install_names",
+        ]
+    build.mkdir(parents=True, exist_ok=True)
+    run(*arguments, cwd=build)
+    return arguments[1:]
+
+
+def compile_and_install(build: Path) -> None:
+    run("cmake", "--build", str(build), "--parallel", jobs(), cwd=build)
+    run("cmake", "--install", str(build), cwd=build)
+
+
+def assemble(prefix: Path, work: Path) -> tuple[Path, list[str]]:
+    """Copy the install prefix into a tree, and cut it down to what an artifact ships."""
+    tree = work / "tree"
+    shutil.copytree(prefix, tree, symlinks=True)
+    for symbols in sorted(tree.rglob("*.dSYM")):
+        shutil.rmtree(symbols, ignore_errors=True)
+    removed = mysql.prune(tree)
+    if removed:
+        print(f"not shipping {len(removed)} paths: {', '.join(removed)}")
+    return tree, removed
+
+
+def patched_source(source_tree: Path, version: str, out: Path) -> Path:
+    """Publish the source these binaries were actually built from, beside them.
+
+    Every compiled cell in this repository so far — PHP, Ruby, MariaDB, Redis, memcached, nginx — is
+    upstream's source unmodified, so "the source is upstream's, at this URL, with this sha256" has
+    been a complete answer. MySQL 5.6 is the first artifact here built from **modified** source, and
+    MySQL Community is GPLv2: the corresponding source has to travel with the binary rather than be
+    describable on request.
+
+    The route is ``relocate.cygwin_source_note``'s, one obligation stronger. The patched tree is
+    packed and uploaded as an asset of the same release, and the artifact carries a file naming it,
+    the upstream tarball it came from and what was changed. **That asset joins the archive's
+    permanence promise like every other** — a deleted source tarball here is a licence violation
+    rather than a missing convenience — and the patch is small enough that the difference between
+    the two tarballs is readable, which is the point of shipping both.
+    """
+    out.mkdir(parents=True, exist_ok=True)
+    packed = out / f"mysql-{version}-patched-src.tar.gz"
+    run("tar", "-czf", str(packed), "-C", str(source_tree.parent), source_tree.name,
+        timeout=3600)
+    print(f"published the patched source as {packed.name} ({packed.stat().st_size:,} bytes)")
+    return packed
+
+
+SOURCE_NOTE = """\
+# The source these binaries were built from
+
+MySQL Community Server is distributed under the GNU General Public License, version 2. These
+binaries were compiled from upstream's release tarball **with one change**, so the complete
+corresponding source is published as an asset of this same release rather than offered on request:
+
+    mysql-{version}-patched-src.tar.gz
+
+It was made from
+
+    {url}
+
+(sha256 {digest}), verified against a detached PGP signature from {who}, by applying:
+
+{changes}
+
+`diff -ru` between upstream's tarball and that one is the whole of the change. Nothing else in the
+tree was touched.
+
+MySQL's own licence is in `licenses/mysql-COPYING`. Libraries bundled beside these binaries carry
+their own terms, in the files beside this one.
+"""
+
+
+def collect_licences(tree: Path, source_tree: Path, work: Path, bundled: dict[str, Path],
+                     note: str) -> None:
+    """Put MySQL's terms, the bundled libraries' terms and the source offer where a reader looks."""
+    licences = tree / "licenses"
+    licences.mkdir(exist_ok=True)
+    for name in ("COPYING", "LICENSE", "README"):
+        if (source_tree / name).is_file():
+            shutil.copy2(source_tree / name, licences / f"mysql-{name}")
+    for text in sorted(work.glob("licence-openssl-*")):
+        shutil.copy2(text, licences / text.name.replace("licence-", ""))
+    relocate.bundled_licences(tree, bundled)
+    (licences / "SOURCE.md").write_text(note, encoding="utf-8")
+
+
+def openssl_note(tree: Path, provides: dict[str, str], built: str | None) -> str:
+    """What TLS library this server will actually load, read off the server rather than assumed."""
+    mysqld = tree / provides["mysqld"]
+    names = sorted({
+        Path(spelling).name
+        for spelling, _ in relocate.dependencies(
+            mysqld, (tree / "bin"), relocate.loader_search(tree))
+        if "ssl" in Path(spelling).name or "crypto" in Path(spelling).name
+    })
+    if not names:
+        return "linked statically; mysqld names no TLS library at all"
+    where = f"OpenSSL {built}, built and bundled by this recipe" if built else "the system's OpenSSL"
+    return f"{', '.join(names)} ({where})"
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", required=True,
+                        help="an exact version (5.6.51). Not a line: tools/mysql.py --plan "
+                             "resolves those, once, for every cell at the same time.")
+    parser.add_argument("--out", default=Path("dist"), type=Path)
+    arguments = parser.parse_args()
+
+    version = arguments.version.strip()
+    if len(version.split(".")) != 3:
+        raise SystemExit(f"{version} is a line rather than a version; pass what --plan printed")
+    line = ".".join(version.split(".")[:2])
+    if line not in mysql.BUILT_LINES:
+        raise SystemExit(
+            f"upstream publishes a binary for every cell of MySQL {line}; compiling one here would "
+            f"be a pipeline maintained for every security release in place of a download. Use "
+            f"tools/mysql_borrow.py."
+        )
+
+    operating_system, arch = borrow.host("MySQL")
+    if operating_system == "windows":
+        raise SystemExit(
+            "the Windows x86_64 cell of 5.6 and 5.7 is upstream's own zip — use "
+            "tools/mysql_borrow.py — and Windows on ARM64 is empty at every version of every line."
+        )
+
+    work = Path(tempfile.mkdtemp(prefix="mixengine-mysql-"))
+    found = dependencies()
+    source_tree, digest, url, fingerprint = source(version, work)
+    print(f"MySQL {version} for {operating_system}/{arch}")
+
+    changed = patch_universal_binary(source_tree) if line == "5.6" else {}
+    ssl = build_openssl(work) if line == "5.6" else None
+
+    prefix = work / "prefix"
+    asked = configure(source_tree, work / "build", prefix, line, found, ssl, work)
+    compile_and_install(work / "build")
+
+    tree, removed = assemble(prefix, work)
+    provides = mysql_smoke.describe(tree, windows=False)
+
+    search = [ssl / "lib"] if ssl else []
+    if sys.platform == "darwin" and "openssl@3" in found:
+        search.append(found["openssl@3"] / "lib")
+    bundled = relocate.bundle(tree, search=search)
+    print(f"bundled {len(bundled)} librar{'y' if len(bundled) == 1 else 'ies'}: "
+          f"{', '.join(sorted(bundled)) or 'none'}")
+    # After the bundling, never before it: every plugin here names an OpenSSL that lives outside the
+    # tree until `bundle` has run, so the early question deletes what the recipe just built.
+    removed += mysql.unloadable_libraries(tree)
+
+    who = next(file for file, group in mysql.FINGERPRINTS.items() if fingerprint in group)
+    note = SOURCE_NOTE.format(
+        version=version, url=url, digest=digest, who=f"{who} ({fingerprint})",
+        changes="\n".join(f"* `{path}` — {why}" for path, why in sorted(changed.items()))
+        or "* nothing; this line needed no patch, and the tarball is upstream's unchanged",
+    )
+    collect_licences(tree, source_tree, work, bundled, note)
+
+    manifest = {
+        "schema": 1,
+        "kind": "mysql",
+        "version": version,
+        "os": operating_system,
+        "arch": arch,
+        "source": "built",
+        "recipe": (
+            f"{source_tree.name}.tar.gz from source (sha256 {digest[:12]}…, verified against a "
+            f"detached PGP signature from {who}); cmake "
+            + " ".join(part for part in asked if part.startswith("-D"))
+            + (f"; {len(bundled)} bundled libraries" if bundled else "")
+            + ("; patched: " + "; ".join(f"{path} — {why}" for path, why in sorted(changed.items()))
+               if changed else "; upstream's source unmodified")
+        ),
+        "provides": provides,
+    }
+    # `upstream` on a *built* artifact, which most compiled recipes here do without: the source is
+    # upstream's, it is the thing GPLv2 makes this recipe publish, and its signature is what was
+    # checked. `changed` is deliberately **not** declared through `borrow.declare` — that field is
+    # for files the artifact ships, and `include/my_global.h` is a header that was edited before a
+    # compiler read it and is in no tree afterwards. Where the patch is recorded is the `recipe`
+    # string, `licenses/SOURCE.md` and the published source tarball, all three of which a reader can
+    # check; a `changed` entry naming a path that is not in the archive could not be.
+    manifest["upstream"] = {
+        "project": "mysql/mysql-server",
+        "release": version,
+        "url": url,
+        "sha256": digest,
+        "verified_against": mysql.verified_against(fingerprint),
+    }
+    borrow.declare(tree, manifest, removed=removed)
+
+    measured = relocate.floor(tree)
+    if measured:
+        manifest["requires"] = {measured[0]: measured[1]}
+        print(f"needs {measured[0]} {measured[1]} or newer")
+
+    elsewhere = borrow.moved(tree)
+    problems = relocate.verify(elsewhere)
+    for problem in problems:
+        print(f"error: {problem}", file=sys.stderr)
+    if problems:
+        raise SystemExit("the relocated tree reaches outside itself")
+    manifest["smoke"] = {
+        "relocated": True,
+        "ran": mysql_smoke.server(elsewhere, version, provides, windows=False),
+        "openssl": openssl_note(elsewhere, provides, OPENSSL_FOR_56["version"] if ssl else None),
+    }
+    print(f"TLS: {manifest['smoke']['openssl']}")
+    borrow.discard(elsewhere)
+
+    patched_source(source_tree, version, arguments.out)
+    borrow.publish(tree, manifest, arguments.out, "tar")
+    shutil.rmtree(work, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    main()
