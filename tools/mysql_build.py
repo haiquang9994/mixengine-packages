@@ -325,6 +325,22 @@ def configure(source_tree: Path, build: Path, prefix: Path, line: str,
         # be able to pass, it costs nothing, and it says in the arguments — which go into the
         # artifact's own record of how it was configured — that this tree needed it.
         "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+        # **The standard these trees ask for and then throw away.** InnoDB's `univ.i` opens with
+        # `#define byte unsigned char`, which was harmless when a compiler's default was C++98 and
+        # is not now: `<cstddef>` declares `enum class byte : unsigned char` from C++17 on, the
+        # macro rewrites the declaration, and GCC 14 stops with `unnamed scoped enum is not
+        # allowed` in a header nobody here wrote.
+        #
+        # 5.6 knows this. `cmake/build_configurations/compiler_options.cmake` computes
+        # `-std=gnu++03` for GCC 6 and newer — and the very next line is an unconditional
+        # `SET(COMMON_CXX_FLAGS "-g -fabi-version=2 ...")` that overwrites what it just computed.
+        # 5.7 fixed that same file by prepending instead of setting. So this is not a standard
+        # chosen here: it is the one both trees choose and only one of them manages to keep, put
+        # somewhere an overwrite cannot reach.
+        #
+        # On clang too, where upstream applies it only on Linux. The clash is a property of the
+        # compiler's *default standard* rather than of the compiler, and Apple's has moved as well.
+        "-DCMAKE_CXX_FLAGS=-std=gnu++03",
     ]
     if line == "5.7":
         # 5.7 needs Boost 1.59 exactly and refuses to look for it anywhere else. Letting its own

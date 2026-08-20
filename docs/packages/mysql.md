@@ -60,6 +60,16 @@ upstream's `CMakeLists.txt`, which means guessing what four compatibility settin
 build system should become; `tools/mysql_build.py` pins **CMake 3.31.12** instead — the last 3.x
 line — by URL and SHA-256, and fetches it per build the same way it fetches 5.6's OpenSSL.
 
+**And the compiler is told which standard, because both trees ask and only one of them manages to
+keep the answer.** InnoDB's `univ.i` opens with `#define byte unsigned char`, harmless while a
+compiler's default was C++98 and not since: `<cstddef>` declares `enum class byte : unsigned char`
+from C++17 on, the macro rewrites that declaration, and GCC 14 stops with `unnamed scoped enum is
+not allowed` inside a standard header. 5.6's own `compiler_options.cmake` computes `-std=gnu++03`
+for GCC 6 and newer and then overwrites the variable on the very next line; 5.7 fixed that file by
+prepending instead of setting. So the flag is passed on the command line, where an overwrite cannot
+reach it, on clang as well as GCC — the clash follows the compiler's *default standard*, and Apple's
+has moved too.
+
 **The 5.6 artifacts are built from modified source, and the source travels with them.** One block in
 `include/my_global.h`, written for PowerPC-era universal binaries, undoes the `SIZEOF_*` values CMake
 has just detected and hardcodes them from `__i386__ / __ppc__ / __x86_64__ / __ppc64__`, ending in
