@@ -200,6 +200,48 @@ def patch_universal_binary(source_tree: Path) -> dict[str, str]:
     }
 
 
+def patch_version_file(source_tree: Path) -> dict[str, str]:
+    """Rename the tree's ``VERSION`` file out of the way of the C++ header of the same name.
+
+    5.6 and 5.7 keep their version numbers in a file called ``VERSION`` at the root of the tree, and
+    the root of the tree is on the include path. On a case-insensitive filesystem — which is what
+    macOS gives you unless somebody went out of their way — libc++'s ``iosfwd`` doing
+    ``#include <version>`` opens *that* file, and clang reports ``expected unqualified-id`` on the
+    line ``MYSQL_VERSION_MAJOR=5``. Nothing in MySQL is wrong and nothing in libc++ is wrong; the
+    two names collide, and the collision arrived years after both files were written.
+
+    **The fix is Oracle's own.** 8.0.28 renamed the file to ``MYSQL_VERSION`` for exactly this
+    reason, so this is upstream's later change carried back, the way
+    :func:`patch_universal_binary` carries one back. Both references live in one file and are
+    counted before anything is written: a tree that spells this differently stops the build rather
+    than silently configuring against a version file nothing reads.
+    """
+    reference = "${CMAKE_SOURCE_DIR}/VERSION"
+    versions = source_tree / "cmake" / "mysql_version.cmake"
+    text = versions.read_text(encoding="utf-8")
+    if text.count(reference) != 2 or not (source_tree / "VERSION").is_file():
+        raise SystemExit(
+            f"{versions} names {reference} {text.count(reference)} times and this recipe expects "
+            f"two, or {source_tree / 'VERSION'} is not there. MySQL has changed how it reads its "
+            f"own version, and renaming the file underneath that would configure a build against a "
+            f"version nothing states."
+        )
+    versions.write_text(text.replace(reference, "${CMAKE_SOURCE_DIR}/MYSQL_VERSION"),
+                        encoding="utf-8")
+    (source_tree / "VERSION").rename(source_tree / "MYSQL_VERSION")
+    print("renamed VERSION to MYSQL_VERSION: on a case-insensitive filesystem it answers "
+          "#include <version>")
+    return {
+        "VERSION":
+            "renamed to MYSQL_VERSION. The source root is on the include path, and on a "
+            "case-insensitive filesystem a file called VERSION is what `#include <version>` finds "
+            "— libc++'s own `iosfwd` includes that header, so every C++ file in the tree failed to "
+            "compile. MySQL 8.0.28 renamed the same file for the same reason.",
+        "cmake/mysql_version.cmake":
+            "reads MYSQL_VERSION rather than VERSION, in the two places it names the file.",
+    }
+
+
 def brew_prefix(formula: str) -> Path | None:
     result = subprocess.run(["brew", "--prefix", formula], capture_output=True, text=True,
                             timeout=300)
@@ -412,8 +454,9 @@ SOURCE_NOTE = """\
 # The source these binaries were built from
 
 MySQL Community Server is distributed under the GNU General Public License, version 2. These
-binaries were compiled from upstream's release tarball **with one change**, so the complete
-corresponding source is published as an asset of this same release rather than offered on request:
+binaries were compiled from upstream's release tarball **with the changes listed below**, so the
+complete
+corresponding source is published as an asset of this release rather than offered on request:
 
     mysql-{version}-patched-src.tar.gz
 
@@ -493,7 +536,9 @@ def main() -> None:
     source_tree, digest, url, fingerprint = source(version, work)
     print(f"MySQL {version} for {operating_system}/{arch}")
 
-    changed = patch_universal_binary(source_tree) if line == "5.6" else {}
+    changed = patch_version_file(source_tree)
+    if line == "5.6":
+        changed.update(patch_universal_binary(source_tree))
     ssl = build_openssl(work) if line == "5.6" else None
 
     prefix = work / "prefix"

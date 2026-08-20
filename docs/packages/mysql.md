@@ -70,15 +70,28 @@ prepending instead of setting. So the flag is passed on the command line, where 
 reach it, on clang as well as GCC — the clash follows the compiler's *default standard*, and Apple's
 has moved too.
 
-**The 5.6 artifacts are built from modified source, and the source travels with them.** One block in
-`include/my_global.h`, written for PowerPC-era universal binaries, undoes the `SIZEOF_*` values CMake
-has just detected and hardcodes them from `__i386__ / __ppc__ / __x86_64__ / __ppc64__`, ending in
-`#error Building FAT binary for an unknown architecture.` On Apple Silicon that `#error` is the whole
-of the failure. **5.7.44 does not have the block** — Oracle deleted it and let the detected values
-stand — so what is applied here is upstream's own later change carried back one line rather than a
-port invented in this repository. MySQL Community is GPLv2, so the complete corresponding source is
-published as `mysql-<version>-patched-src.tar.gz` beside the binaries, `licenses/SOURCE.md` inside
-each artifact names it, and that asset is under [the archive's permanence promise](../the-archive.md)
+**Both compiled lines are built from modified source, and the source travels with them.** Two
+changes, and each one is a change Oracle itself made in a later version.
+
+*Every cell of both lines* has the file `VERSION` at the root of the tree renamed to
+`MYSQL_VERSION`, with `cmake/mysql_version.cmake` reading the new name. The tree's root is on the
+include path, macOS is case-insensitive unless somebody went out of their way, and libc++'s own
+`iosfwd` does
+`#include <version>` — which therefore opens MySQL's version file and stops clang at
+`MYSQL_VERSION_MAJOR=5` with `expected unqualified-id`. Neither file is wrong; the names collided
+years after both were written, and **MySQL 8.0.28 renamed the same file for the same reason.**
+
+*The 5.6 cells* additionally have one block deleted from `include/my_global.h`. Written for
+PowerPC-era universal binaries, it undoes the `SIZEOF_*` values CMake has just detected and
+hardcodes them from `__i386__ / __ppc__ / __x86_64__ / __ppc64__`, ending in `#error Building FAT
+binary for an unknown architecture.` On Apple Silicon that `#error` is the whole of the failure.
+**5.7.44 does not have the block** — Oracle deleted it and let the detected values stand — so what
+is applied here is upstream's own later change carried back one line rather than a port invented in
+this repository.
+
+MySQL Community is GPLv2, so the complete corresponding source is published as
+`mysql-<version>-patched-src.tar.gz` beside the binaries, `licenses/SOURCE.md` inside each artifact
+names it, and that asset is under [the archive's permanence promise](../the-archive.md)
 like every other — a deleted source tarball here is a licence violation rather than a missing
 convenience.
 
