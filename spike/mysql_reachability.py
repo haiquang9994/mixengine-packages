@@ -58,6 +58,41 @@ ASSETS = [
 ]
 
 
+# Round two. `<asset>.asc` beside the asset answered 404 on both runners, so the question is where a
+# signature lives at all — the archive page links one through a script, and the live lines have a CDN
+# path of their own. Whatever answers here is what `upstream.verified_against` will be able to name;
+# the page's own MD5 is not something this repository would write down as verification.
+SIGNATURES = [
+    ("archive gpg route, source 5.6.51",
+     "https://downloads.mysql.com/archives/gpg/?file=mysql-5.6.51.tar.gz&p=23"),
+    ("archive gpg route, macos 9.7.1",
+     "https://downloads.mysql.com/archives/gpg/?file=mysql-9.7.1-macos15-arm64.tar.gz&p=23"),
+    ("cdn asc, macos 9.7.1",
+     "https://cdn.mysql.com/Downloads/MySQL-9.7/mysql-9.7.1-macos15-arm64.tar.gz.asc"),
+    ("cdn asc, source 5.6.51",
+     "https://cdn.mysql.com/Downloads/MySQL-5.6/mysql-5.6.51.tar.gz.asc"),
+    ("cdn archives asc, source 5.6.51",
+     "https://cdn.mysql.com/archives/mysql-5.6/mysql-5.6.51.tar.gz.asc"),
+]
+
+
+def signature(url: str) -> str:
+    """Read the whole body — a signature is small, and what matters is whether it *is* one."""
+    request = urllib.request.Request(url)
+    request.add_header("User-Agent", BARE)
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+            text = response.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as error:
+        return f"HTTP {error.code} {error.reason}"
+    except Exception as error:                                    # noqa: BLE001 — a probe reports
+        return f"{type(error).__name__}: {error}"
+    if "BEGIN PGP SIGNATURE" in text:
+        return f"PGP SIGNATURE, {len(text)} bytes"
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    return f"NOT a signature, {len(text)} bytes, starts {first[:90]!r}"
+
+
 def ask(url: str, agent: str, ranged: bool) -> str:
     request = urllib.request.Request(url)
     request.add_header("User-Agent", agent)
@@ -93,6 +128,13 @@ def main() -> int:
             print(f"  bare urllib UA : {ask(url, BARE, ranged)}")
             print(f"  browser UA     : {ask(url, BROWSER, ranged)}")
         print()
+    print("== SIGNATURES " + "=" * 47)
+    for name, url in SIGNATURES:
+        print(f"
+{name}
+  {url}
+  {signature(url)}")
+    print()
     return 0
 
 
