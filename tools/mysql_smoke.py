@@ -137,6 +137,32 @@ def configuration(work: Path, tree: Path, port: int, windows: bool) -> Path:
     return path
 
 
+def interpreter(script: Path) -> Path:
+    """What runs *script*, read off its own first line rather than assumed.
+
+    `scripts/mysql_install_db` is **Perl** in a tree compiled from source, and shell in one
+    upstream packaged for Debian. 5.6's `scripts/CMakeLists.txt` configures `mysql_install_db.pl.in`
+    on every platform and only appends `.pl` to the name on Windows, so a compiled Unix tree has a
+    Perl program under a name that says nothing. Handed to `/bin/sh` it answers
+    ``use: command not found`` twice and then a syntax error at ``my @req_mods = (``, which reads
+    like a corrupt tree and is a wrong interpreter.
+
+    The shebang is a path off the machine that built the tree, so it is used when it is still there
+    and looked up by name when it is not.
+    """
+    first = script.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0].strip()
+    if not first.startswith("#!"):
+        return Path("/bin/sh")
+    words = first[2:].strip().split()
+    named = Path(words[0])
+    if named.name == "env" and len(words) > 1:
+        named = Path(words[1])
+    if named.is_absolute() and named.is_file():
+        return named
+    found = shutil.which(named.name)
+    return Path(found) if found else Path("/bin/sh")
+
+
 def bootstrap(tree: Path, work: Path, provides: dict[str, str], version: str,
               path: str, windows: bool) -> str:
     """Make a data directory, by whichever of three mechanisms this artifact has.
@@ -148,10 +174,11 @@ def bootstrap(tree: Path, work: Path, provides: dict[str, str], version: str,
     * **5.7 and newer**: ``mysqld --initialize-insecure``. It writes into an empty directory only,
       and leaves the root account without a password — which is what a local development environment
       wants and what ``--initialize`` (a random password buried in the error log) does not.
-    * **5.6 on Unix**: ``scripts/mysql_install_db``, a shell script that takes ``--basedir`` and
-      ``--datadir`` and does not quote ``$basedir``, so a tree whose path contains a space has to be
-      reached through a symlink. That is not a hypothetical: it is why `mariadb_smoke.install_db`
-      has the same workaround, found the same way.
+    * **5.6 on Unix**: ``scripts/mysql_install_db``, which takes ``--basedir`` and ``--datadir``
+      and does not quote ``$basedir``, so a tree whose path contains a space has to be reached
+      through a symlink. That is not a hypothetical: it is why `mariadb_smoke.install_db` has the
+      same workaround, found the same way. What runs it comes off its own first line — see
+      `interpreter`, which is not a nicety either.
     * **5.6 on Windows**: neither exists. Upstream's zip ships a ``data/`` directory with the system
       tables already built, and the documented first run is to copy it.
 
@@ -187,7 +214,7 @@ def bootstrap(tree: Path, work: Path, provides: dict[str, str], version: str,
         installing = os.pathsep.join([path, "/usr/sbin", "/sbin"])
         try:
             output = borrow.run(
-                Path("/bin/sh"), str(installer), "--no-defaults", f"--basedir={basedir}",
+                interpreter(installer), str(installer), "--no-defaults", f"--basedir={basedir}",
                 f"--datadir={data}", f"--user={getpass.getuser()}",
                 path=installing, timeout=1800,
             )
