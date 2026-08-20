@@ -194,7 +194,7 @@ NOT_SHIPPED = (
 # it: the bintar keeps it and `mariadb_build.py` no longer turns it off.
 
 # Debug information, by extension, wherever it sits. `bin/server.pdb` alone is 74 MB unpacked and
-# 29 MB of the Windows zip — the same waste `strip_debug` takes out of a Linux bintar, in the form
+# 29 MB of the Windows zip — the same waste `strip.debug` takes out of a Linux bintar, in the form
 # Windows uses. Upstream publishes the symbols as a separate `-debugsymbols.zip` for whoever wants
 # them, which is exactly the arrangement Debian makes with its `-dbg` packages.
 #
@@ -327,52 +327,6 @@ def resolve(spec: str, target: tuple[str, str]) -> tuple[str, str, str, str, str
         )
     chosen = offered[max(offered)]
     return (*chosen, series.get("release_eol_date"))
-
-
-def strip_debug(tree: Path) -> dict[str, str]:
-    """Take the debug symbols out of a borrowed bintar, and answer with which files that changed.
-
-    **Measured because the artifacts did not agree with each other.** MariaDB 11.8.8 packs to 27 MB
-    from upstream's own ``arm64`` ``.deb`` packages and to 371 MB from its ``x86_64`` bintar — the
-    same server, the same compression. Debian strips its binaries and ships the symbols in a
-    separate ``-dbg`` package; the bintar carries them inside every executable and every plugin.
-    Nothing in MixEngine reads them, and a user would download them once per version per machine.
-
-    ``--strip-debug`` rather than ``--strip-all``: the dynamic symbol table is what makes a shared
-    object loadable and a stack trace nameable, and removing it saves nothing here because it is
-    small. What goes is ``.debug_*``, which is nearly all of the difference above.
-
-    **What this used to return was a sentence, and P6 is where it stopped being one.** It said
-    "debug symbols stripped from 412 files (371 MB -> 27 MB)" into an ``upstream.stripped`` field of
-    its own, which was this repository's first attempt at recording that a shipped file is not
-    upstream's file — written before there was a rule and before ``upstream.changed`` existed. Two
-    fields saying one thing is the shape of drift the rule is against, so the sentence goes and the
-    mapping stays. The fold-in is worth more to this row than to the one it folds into: 344 MB came
-    out of a bintar here and *nothing checked what came out*, while `strip.symbols` refuses to
-    return unless the loader's and the linker's whole view of every file survived the operation.
-
-    So `strip` failing is now a failed pack rather than a file quietly left alone. That was the
-    right call when this ran `strip` over whatever `machine_files` handed it and hoped; it is the
-    wrong one now that the same list is proved file by file, because a `strip` that exits non-zero
-    on a MariaDB plugin is a fact about the archive and not about the tool.
-    """
-    if sys.platform != "linux" or not shutil.which("strip"):
-        return {}
-
-    files = relocate.machine_files(tree)
-    before = sum(path.stat().st_size for path in files)
-    # Spelled here rather than taken from one of `strip`'s two tables, and those tables are why:
-    # `IMAGES` is `--strip-all` because a CPython tree's binaries are loaded and never linked
-    # against, `ARCHIVES` is `--strip-debug` because an `ar` archive is only ever linked against.
-    # This is an image that *is* linked against — `lib/libmariadb.so` is what a client extension
-    # resolves — so it asks for the third thing, and asking for it in the recipe is what keeps the
-    # two tables meaning what they say.
-    changed = strip.symbols(tree, files, ["--strip-debug"], "linux")
-    after = sum(path.stat().st_size for path in files)
-    if changed:
-        print(f"stripped debug symbols from {len(changed)} of {len(files)} files: "
-              f"{before / 1e6:,.0f} MB of machine code became {after / 1e6:,.0f} MB")
-    return changed
 
 
 def unshippable_plugins(tree: Path) -> list[str]:
@@ -571,7 +525,7 @@ def main() -> None:
         print(f"not shipping {len(removed)} paths: {', '.join(removed)}")
     if not windows:
         removed += unshippable_plugins(tree)
-    changed = strip_debug(tree)
+    changed = strip.debug(tree)
 
     provides = mariadb_smoke.describe(tree, windows)
 

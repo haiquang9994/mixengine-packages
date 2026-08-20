@@ -372,7 +372,7 @@ def strip_symbols(tree: Path, operating_system: str) -> dict[str, str]:
 
     Every binary the loader loads is treated alike, and they are found by
     :func:`relocate.machine_files` rather than by a list of the two big ones — the same call
-    ``mariadb.strip_debug`` has been using since before this repository had a rule. A list would have
+    ``strip.debug`` has been using since before this repository had a rule. A list would have
     to be right about `lib-dynload`, about which versions ship which extension modules compiled, and
     about the day upstream adds a binary; a list that goes quietly out of date is the shape of claim
     P4a deleted an exemption to avoid. It also skips symlinks, which matters here for a reason of its

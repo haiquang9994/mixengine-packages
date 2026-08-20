@@ -53,6 +53,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import borrow  # noqa: E402  — siblings, and this directory is not importable as a package
 import eol  # noqa: E402
 import relocate  # noqa: E402
+import strip  # noqa: E402
 
 DIST = "https://nodejs.org/dist"
 
@@ -267,8 +268,13 @@ def prune(tree: Path, operating_system: str) -> list[str]:
 def describe(
     tree: Path, version: str, target: tuple[str, str], url: str, digest: str,
     added: list[str] | tuple[()] = (), removed: list[str] | tuple[()] = (),
+    changed: dict[str, str] | None = None,
 ) -> dict:
     """What is in the archive, as the daemon will read it.
+
+    *changed* is `strip.debug`'s answer — upstream's own file, at upstream's own path, in
+    bytes that are not upstream's any more, which is the difference a reader holding both
+    archives is least able to explain and the reason `upstream.changed` exists.
 
     *removed* is what :func:`prune` threw out, named by root entry rather than by file: a reader
     holding this artifact and the publisher's own archive should be able to account for every
@@ -304,7 +310,7 @@ def describe(
         },
         "provides": provides,
     }
-    return borrow.declare(tree, manifest, added, removed)
+    return borrow.declare(tree, manifest, added, removed, changed=changed)
 
 
 def smoke(tree: Path, version: str, manifest: dict) -> dict:
@@ -434,8 +440,14 @@ def main() -> None:
     # describe the tree that ships, and the smoke test is what stands between a keep-list and a
     # runtime that was quietly cut in half.
     removed = prune(tree, target[0])
+    # 2.5 MB of it, in `bin/node` itself, on every published Linux artifact of this row.
+    # Declared rather than merely done: this is upstream's own binary at upstream's own
+    # path in bytes that are no longer upstream's, which is the one difference a reader
+    # comparing the two archives would otherwise read as a corrupted download.
+    changed = strip.debug(tree)
 
-    manifest = describe(tree, version, target, url, actual, removed=removed)
+    manifest = describe(tree, version, target, url, actual, removed=removed,
+                        changed=changed)
     manifest["smoke"] = smoke(tree, version, manifest)
 
     # Measured off the archive rather than assumed from the runner: an official Linux build is not

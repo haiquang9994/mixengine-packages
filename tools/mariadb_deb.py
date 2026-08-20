@@ -50,6 +50,7 @@ import borrow  # noqa: E402  — siblings, and this directory is not importable 
 import mariadb  # noqa: E402
 import mariadb_smoke  # noqa: E402
 import relocate  # noqa: E402
+import strip  # noqa: E402
 
 # Upstream's own repository, per release, kept forever beside the tarballs. `deb.mariadb.org` carries
 # only what is current; this carries the exact version being asked for, which is the whole reason the
@@ -476,7 +477,7 @@ def main() -> None:
     # belief about somebody else's packaging policy — and since P6 the measurement is exact, because
     # `strip.symbols` names a file only if its bytes actually moved. An empty mapping here is the
     # policy holding; a full one is Debian having stopped.
-    changed = mariadb.strip_debug(tree)
+    changed = strip.debug(tree)
     added = relocate.bundle(tree, search=[tree / "lib"])
     if added:
         print(f"bundled {len(added)} librar{'y' if len(added) == 1 else 'ies'}: "

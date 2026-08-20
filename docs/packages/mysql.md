@@ -147,10 +147,9 @@ differs is inside the files. A borrowed Linux bintar carries `.debug_*` in `bin/
 plugin, where Oracle ships macOS already stripped and files Windows' symbols in separate `.pdb` that
 `NOT_SHIPPED` drops. The compiled cells reach the same place without anyone's help: DWARF is linked
 into an ELF executable and stays behind in the object files of a Mach-O one, so 5.6 came out at
-131 MB on Linux against 76 MB on macOS from a single set of flags. So `mysql.strip_debug` runs on
-Linux and nowhere else, over both halves of the row, through the `tools/strip.py` that
-`mariadb.strip_debug` and the CPython and Ruby recipes already use — where the same operation
-took a MariaDB bintar from 371 MB to 27 MB. `--strip-debug` and not `--strip-all`, which is what
+131 MB on Linux against 76 MB on macOS from a single set of flags. So `strip.debug` runs on Linux
+and nowhere else, over both halves of the row — the one operation every recipe here now shares, and
+where the same `strip --strip-debug` took a MariaDB bintar from 371 MB to 27 MB. `--strip-debug` and not `--strip-all`, which is what
 `strip.IMAGES` would have asked for: `lib/plugin/*.so` is opened by `dlopen`,
 `lib/libmysqlclient.so` is what a client extension links against, and the dynamic symbol table is
 not what makes these files large anyway. Every file that changed is named in `upstream.changed`,

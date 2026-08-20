@@ -32,6 +32,11 @@ import zipfile
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import relocate  # noqa: E402  — siblings, and this directory is not importable as a package
+import strip  # noqa: E402
+
 # What a recipe exits with when the answer is "upstream builds nothing here", as opposed to
 # "something went wrong". A matrix leg asking for Node 18 on Windows-on-ARM, or Ruby 3.3 on the same,
 # is not a failed run: it is an empty cell of the table, and upstream decided it years ago. Each
@@ -469,6 +474,49 @@ def pack(tree: Path, out: Path, name: str, suffix: str) -> Path:
     return packed
 
 
+def undebugged(tree: Path) -> None:
+    """Refuse a tree whose binaries still carry debug information, naming every one of them.
+
+    "An artifact contains what it takes to run, nothing else" is the second half of
+    docs/one-version-means-one-thing.md, and until this function it was a sentence eleven recipes
+    each kept or did not keep on their own. What that cost is measurable in the published archive:
+    `redis 8.8.1` for Linux is **21.2 MB of DWARF in a 28.9 MB tree**, `nginx 1.31.3` 5.9 of 16.6,
+    `memcached 1.6.45` 1.3 of 1.7, and MySQL 9.7.1 would have shipped a 609 MB Linux artifact beside
+    a 109 MB macOS one. None of those is a recipe that decided to keep its symbols; each is a recipe
+    where nobody thought about it, which is exactly the difference a rule with no check cannot tell.
+
+    Placed here rather than in a checker that runs later because this is the last moment the *tree*
+    exists — `parity.py` sees archives on one disk and can compare their sizes, and a size is a
+    symptom. `strip.debug_sections` asks the question itself, of the file, for nothing.
+
+    There is no exemption argument and no threshold, which is the point: a recipe that wants this
+    tree published calls `strip.debug` and ships the smaller one. If a package ever genuinely needs
+    its DWARF, that is a `keeps` entry and a reason written into the artifact, and this refusal is
+    what would make somebody write it.
+    """
+    carrying = {}
+    for path in sorted(tree.rglob("*")):
+        if path.is_symlink() or not path.is_file() or relocate.kind(path) is None:
+            continue
+        weight = sum(strip.debug_sections(path).values())
+        if weight:
+            carrying[path.relative_to(tree).as_posix()] = weight
+    if not carrying:
+        return
+
+    total = sum(carrying.values())
+    worst = sorted(carrying.items(), key=lambda pair: -pair[1])[:5]
+    raise SystemExit(
+        f"{len(carrying)} binar{'y' if len(carrying) == 1 else 'ies'} in this tree carry "
+        f"{total / 1e6:,.1f} MB of debug information nothing here loads — "
+        + ", ".join(f"{path} ({weight / 1e6:,.1f} MB)" for path, weight in worst)
+        + (f" and {len(carrying) - len(worst)} more" if len(carrying) > len(worst) else "")
+        + ". Every user of this version downloads that once per machine and no MixEngine reads a "
+        "byte of it. Call `strip.debug(tree)` before publishing, or, if this package needs its "
+        "DWARF, say which file and why in `keeps`."
+    )
+
+
 def publish(tree: Path, manifest: dict, out: Path, suffix: str) -> Path:
     """Write the manifest into the tree, pack it, and write the manifest beside the archive too.
 
@@ -476,6 +524,7 @@ def publish(tree: Path, manifest: dict, out: Path, suffix: str) -> Path:
     installed can still say what was proven about it; the copy *beside* is what ``mkindex.py`` reads,
     and what the release has to still hold in a year for the index to be rebuildable.
     """
+    undebugged(tree)
     text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     (tree / "mixengine-artifact.json").write_text(text, encoding="utf-8")
 

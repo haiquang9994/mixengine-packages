@@ -43,6 +43,20 @@ from a corrupted download unless the artifact says what was done to it. There wa
 and two spellings of one fact is the shape of thing this rule exists to remove, so it survives only
 in artifacts published before the check below was written.
 
+Debug symbols are the one item on that list a *diff* cannot find, and they went unnoticed the
+longest for exactly that reason: they are not a file anybody can see, they are bytes inside a file
+every artifact is supposed to have. So they are refused where the tree still exists rather than
+where the archives are compared — [`borrow.undebugged`](../tools/borrow.py) walks every binary a
+recipe is about to pack, asks [`strip.debug_sections`](../tools/strip.py) whether it carries any,
+and names each one that does. There is no threshold and no exemption argument: DWARF lives in
+sections whose names begin `.debug`, or in a Mach-O segment called `__DWARF`, so the question has an
+exact answer and the recipe's answer to it is one call to `strip.debug`. Every recipe had been
+deciding this for itself, and the published archive says how that went — `redis 8.8.1` for Linux was
+**21.2 MB of debug information in a 28.9 MB tree**, `nginx 1.31.3` 5.9 of 16.6, `memcached 1.6.45`
+1.3 of 1.7, and MySQL would have shipped a 609 MB Linux artifact beside a 109 MB macOS one. Not one
+of those was a decision. Each was a recipe where nobody thought about it, which is the difference a
+rule with nothing checking it cannot tell.
+
 **Both rules are checked by comparing finished artifacts, because intent is not evidence.** The first
 audit of a green MariaDB run — six cells, all six proven against a running server — found the two
 Linux artifacts three times apart in size and each of the four asymmetries below, none of which any

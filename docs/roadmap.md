@@ -1219,6 +1219,48 @@ it, which is how MariaDB's row turned out to be wrong in three cells and how Pos
 to be wrong in four — and a smoke test that exercises *run, configure, health-check, stop* rather
 than `--version`.
 
+### [ ] P6b — Debug symbols were a rule nothing could fail on **(rule)**
+
+P6 made "an artifact contains what it takes to run, nothing else" something CI can fail on, and P6a
+found the cells the check was never allowed to look at. This is the item on that list a check of
+*paths* could never have found, because it is not a path: DWARF is bytes inside a file every
+artifact is supposed to have.
+
+Found from the other end. MySQL 9.7.1 packed to 109 MB on macOS, 118 MB on Windows and 609 MB on
+Linux, from one recipe removing the same fifteen paths on every cell. The cause is that a Linux
+bintar carries `.debug_*` inside `bin/mysqld` and every plugin, where Oracle ships macOS stripped
+and Windows' symbols in separate `.pdb` — and that the compiled cells reach the same place unaided,
+because DWARF is linked into an ELF executable and stays behind in the object files of a Mach-O one.
+
+**Nothing in the repository could see it, so the published archive was measured instead**: one Linux
+artifact per kind downloaded and read section by section. Four rows carry debug information and six
+do not, and no row that carries it decided to.
+
+| | debug information | unpacked tree |
+| --- | --- | --- |
+| `redis 8.8.1` | **21.2 MB** | 28.9 MB |
+| `nginx 1.31.3` | 5.9 MB | 16.6 MB |
+| `memcached 1.6.45` | 1.3 MB | 1.7 MB |
+| `node 24.19.0` | 2.5 MB | 138.8 MB |
+| caddy, mariadb, php, postgres, python, ruby | none | |
+
+So one operation, `strip.debug`, replacing the two recipes that had been stripping by their own
+rules, and one refusal: `borrow.undebugged` walks every binary a tree is about to pack and stops the
+pack if any of them still carries some. No threshold — a section is named `.debug*` or it is not —
+and no exemption argument, because a package that genuinely needs its DWARF has `keeps` and has to
+write down which file and why. `--strip-debug` rather than `--strip-all`: `lib/plugin/*.so` is
+reached through `dlopen` and `lib/libmysqlclient.so` by a client extension, and `strip.symbols`
+refuses to return unless the loader's and the linker's whole view of the file survived.
+
+Proven against the published artifacts rather than a fixture: `redis 8.8.1` refused by name, 28.9 MB
+unpacked becoming 6.8 MB, and the stripped `redis-server` starting, answering `SET`/`GET` and
+shutting down cleanly. `.symtab` and `.dynsym` are untouched by `--strip-debug`, so `nm` still reads
+the binary and `backtrace_symbols` names the same functions it did before.
+
+**What is left is the rebuilding.** The four rows above are fixed in their recipes and every
+*published* artifact of them still carries what it carried; each needs a `release=true` run at the
+versions already published, the way P13 replaced eleven PHP releases rather than joining them.
+
 ### [x] P7 — PostgreSQL: EDB's two archives, and what is actually inside them
 
 The evaluation question was Windows and macOS, and the answer moved three of the four cells it

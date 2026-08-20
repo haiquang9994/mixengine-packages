@@ -36,6 +36,7 @@ import borrow
 import mysql
 import mysql_smoke
 import relocate
+import strip
 
 # What a Windows tree's own imports say about the runtime a user has to have. Measured off the
 # binaries rather than taken from a version number, because upstream's archive states the compiler
@@ -124,7 +125,7 @@ def main() -> None:
     # Before the bundling and not after it, so that the files this strips are upstream's own. What
     # `bundle` is about to copy in belongs to the machine's distribution, which stripped it already
     # and whose licence text `bundled_licences` files beside it under its own name.
-    changed = mysql.strip_debug(tree)
+    changed = strip.debug(tree)
 
     added: dict[str, Path] = {}
     if not windows:

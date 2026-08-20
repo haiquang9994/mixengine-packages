@@ -43,8 +43,13 @@ import hashlib
 import shutil
 import struct
 import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import relocate  # noqa: E402  — a sibling, and this directory is not importable as a package
 
 # What the platform's own `strip` is asked to do, and **not one of the four instructions is
 # interchangeable with another**, which is the finding these tables exist to carry rather than a
@@ -119,6 +124,12 @@ FRAME = "__TEXT,__eh_frame"
 LITERAL_SECTIONS = {0x2: 0, 0x3: 4, 0x4: 8, 0x5: 8, 0xE: 16}     # cstring, 4/8/pointer/16-byte
 ZEROFILL_SECTIONS = {0x1, 0xC, 0x12}
 CPU_ARM64, CPU_X86_64 = 0x0100000C, 0x01000007
+
+# What debug information is called, in the two formats that can carry it into a shipped binary.
+# Named rather than sized, because that is what lets `borrow.publish` refuse without a threshold: a
+# section is debug information or it is not, and nothing has to decide how much of it is too much.
+DEBUG_SECTIONS = (".debug", ".zdebug")
+DWARF_SEGMENT = "__DWARF"
 
 ELF_MAGIC = b"\x7fELF"
 MACHO_MAGIC = b"\xcf\xfa\xed\xfe"
@@ -501,6 +512,118 @@ def unmapped(path: Path) -> list[str]:
         stop = blob.index(b"\0", names_at + name)
         astray.append(blob[names_at + name:stop].decode())
     return astray
+
+
+def debug_sections(path: Path) -> dict[str, int]:
+    """Which of *path*'s sections hold debug information, and how many bytes each one is.
+
+    The question `borrow.publish` asks of every binary it is about to ship, and it can be asked at
+    all because debug information is *named*. ELF puts DWARF in sections whose names begin `.debug`
+    — `.zdebug` where the linker compressed them — and nothing maps them: no `SHF_ALLOC`, no segment
+    covering them, no loader or linker that reads one. Mach-O puts the same thing in a segment
+    called `__DWARF`, which a linked executable normally does not have, because there the DWARF
+    stays behind in the object files and is gathered into a `.dSYM` only when somebody asks.
+
+    A file this cannot read answers ``{}`` rather than raising, and the asymmetry with `mapped` is
+    deliberate: that one refuses an unknown format because it is about to write over the file, while
+    this is a measurement taken across a whole tree, where a PE, a shell script and a `.qm`
+    translation all pass through and none of the three is a place DWARF can hide. What it must not
+    do is answer ``{}`` for a *readable* binary that has some, which is why the two walks below are
+    the ones `mapped` makes rather than a second guess at the format.
+    """
+    try:
+        blob = path.read_bytes()
+    except OSError:
+        return {}
+
+    found: dict[str, int] = {}
+    if blob[:4] == ELF_MAGIC:
+        if len(blob) < 64 or blob[4] != 2:
+            return {}
+        end = "<" if blob[5] == 1 else ">"
+        e_shoff, = struct.unpack_from(end + "Q", blob, 0x28)
+        e_shentsize, e_shnum, e_shstrndx = struct.unpack_from(end + "HHH", blob, 0x3A)
+        if not e_shoff or not e_shnum or e_shstrndx >= e_shnum:
+            return {}
+
+        def header(index: int) -> tuple:
+            return struct.unpack_from(end + "IIQQQQ", blob, e_shoff + index * e_shentsize)
+
+        names_at = header(e_shstrndx)[4]
+        for index in range(e_shnum):
+            name, _, _, _, _, size = header(index)
+            stop = blob.index(b"\0", names_at + name)
+            label = blob[names_at + name:stop].decode("ascii", "replace")
+            if label.startswith(DEBUG_SECTIONS) and size:
+                found[label] = size
+        return found
+
+    if blob[:4] != MACHO_MAGIC or len(blob) < 32:
+        return {}
+    ncmds, = struct.unpack_from("<I", blob, 16)
+    offset = 32
+    for _ in range(ncmds):
+        command, size = struct.unpack_from("<II", blob, offset)
+        if command == 0x19:                                          # LC_SEGMENT_64
+            label = blob[offset + 8:offset + 24].split(b"\0")[0].decode("ascii", "replace")
+            filesize, = struct.unpack_from("<Q", blob, offset + 48)
+            if label == DWARF_SEGMENT and filesize:
+                found[label] = filesize
+        offset += size
+    return found
+
+
+def debug(tree: Path) -> dict[str, str]:
+    """Take the debug information out of every binary in *tree*, and answer with what changed.
+
+    **One operation for every recipe, because it was two and they were drifting.** MariaDB stripped
+    its bintar and its `.deb` cells and nothing else did — CPython and Ruby strip for a different
+    reason and with different flags, MySQL stripped nothing at all until a 609 MB Linux artifact was
+    measured against a 109 MB macOS one, and redis, nginx and memcached compile here and ship what
+    the compiler left. Nothing outside each recipe could have noticed, which is the argument this
+    module's own docstring makes about every pair of producers answering one question.
+
+    The saving is not marginal at either end. MariaDB 11.8.8 packs to 27 MB from upstream's
+    own arm64 `.deb` packages and to 371 MB from its x86_64 bintar — the same database, the
+    same compression — because Debian strips its binaries and ships the symbols in a separate
+    `-dbg` package while the bintar carries them inside every executable and every plugin.
+    Redis compiles here and its Linux artifact was 21.2 MB of DWARF in a 28.9 MB tree.
+
+    ``--strip-debug`` rather than the ``--strip-all`` of :data:`IMAGES`, and the difference is not
+    caution. A runtime tree is full of things that are linked against and loaded *by name*:
+    `lib/plugin/*.so` reached through `dlopen`, `lib/libmysqlclient.so` and `lib/libmariadb.so`
+    reached by a client extension, `lib/libpython3.X.so` reached by an embedder. The allocated
+    symbol table is what makes those work, `strip` may not touch it on ELF anyway, and it is not
+    what makes a binary large — measured on MySQL 9.7.1, where `.debug_*` was five sixths of the
+    Linux tree while every symbol a loader or a linker can see survived byte for byte.
+
+    Linux only, measured rather than assumed: DWARF is linked into an ELF executable and stays
+    behind in the object files of a Mach-O one, so the macOS cells of ten packages carry none, and
+    `strip -x` on a signed arm64 binary would cost a re-signature to buy back nothing.
+
+    Only the files that have some are touched, so what comes back is what changed and the tree's
+    other binaries are still upstream's bytes — which is the difference between an artifact whose
+    ``upstream.changed`` a reader can check and one that claims a modification nobody made.
+    """
+    if sys.platform != "linux" or not shutil.which("strip"):
+        return {}
+    # The whole tree, by what each file *is*, and deliberately not `relocate.machine_files`: that
+    # one looks in a list of directories, and Caddy's payload is a single binary at the root. This
+    # has to find exactly what `borrow.undebugged` finds, or a recipe could strip everything it
+    # knows about and still be refused for a file neither of them agreed to look at.
+    files = [path for path in sorted(tree.rglob("*"))
+             if not path.is_symlink() and path.is_file()
+             and relocate.kind(path) is not None and debug_sections(path)]
+    if not files:
+        return {}
+
+    before = sum(path.stat().st_size for path in files)
+    changed = symbols(tree, files, ["--strip-debug"], "linux")
+    after = sum(path.stat().st_size for path in files)
+    if changed:
+        print(f"stripped debug information from {len(changed)} of {len(files)} files: "
+              f"{before / 1e6:,.1f} MB of machine code became {after / 1e6:,.1f} MB")
+    return changed
 
 
 # ------------------------------------------------------------------------- what a linker sees ---
@@ -1150,7 +1273,7 @@ def symbols(tree: Path, paths: Sequence[Path], flags: Sequence[str],
     the manifest, so that two artifacts stripped by two recipes carry one claim.
 
     The tool is the platform's own rather than a bundled one, and it is required rather than
-    optional. `mariadb.strip_debug` returns quietly when there is no `strip` on PATH, because there
+    optional. :func:`debug` returns quietly when there is no `strip` on PATH, because there
     the saving is the whole point and an unstripped bintar is merely large. Here the tree ships
     either way and the difference is what the artifact claims about itself, so a missing tool has to
     stop the pack rather than silently publish the other archive.

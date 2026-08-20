@@ -43,6 +43,7 @@ import borrow
 import mysql
 import mysql_smoke
 import relocate
+import strip
 
 # MySQL 5.6's own CMake decides this, and it is worth stating as a measurement rather than as
 # history: `cmake/ssl.cmake` in 5.6.51 sets `OPENSSL_FOUND` only when `OPENSSL_MAJOR_VERSION
@@ -606,9 +607,9 @@ def main() -> None:
     compile_and_install(work / "build", program)
 
     tree, removed = assemble(prefix, work)
-    # Before the bundling, for `mysql.strip_debug`'s own reason, and recorded in `recipe` rather
-    # than in `upstream.changed`: nothing here is upstream's file to differ from.
-    stripped = mysql.strip_debug(tree)
+    # Before the bundling, for `strip.debug`'s own reason, and recorded in `recipe` rather than
+    # in `upstream.changed`: nothing here is upstream's file to differ from.
+    stripped = strip.debug(tree)
     provides = mysql_smoke.describe(tree, windows=False)
 
     search = [ssl / "lib"] if ssl else []

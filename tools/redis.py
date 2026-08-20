@@ -86,6 +86,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import borrow  # noqa: E402  — siblings, and this directory is not importable as a package
 import relocate  # noqa: E402
+import strip  # noqa: E402
 
 # Upstream's catalogue: one line per published tarball, `hash <file> sha256 <digest> <url>`. It is a
 # plain file in a git repository rather than an API, which is the reason to prefer it over the
@@ -771,6 +772,11 @@ def main() -> None:
     prefix = work / f"prefix-{version}"
     asked = build(source_tree, prefix)
     tree, provides = assemble(prefix, work, source_tree)
+    # 21.2 MB of DWARF in a 28.9 MB tree was what the published Linux artifact of this row
+    # carried, and no recipe here decided to keep it. `borrow.publish` refuses the tree that
+    # still does; this is where it stops being one. Before any bundling, because a library
+    # copied in from the machine is that distribution's file and already stripped.
+    strip.debug(tree)
 
     runtime = ""
     if operating_system == "windows":

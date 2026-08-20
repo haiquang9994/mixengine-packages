@@ -105,6 +105,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import borrow  # noqa: E402  — siblings, and this directory is not importable as a package
 import relocate  # noqa: E402
+import strip  # noqa: E402
 
 # memcached publishes no GitHub releases at all — the API answers with an empty list — so the tags
 # are the catalogue, and www.memcached.org/files/ is the distribution. Two documents rather than one,
@@ -638,6 +639,11 @@ def main() -> None:
 
     asked = build(source_tree, prefix, libevent_prefix=prefix)
     tree, provides = assemble(prefix, work)
+    # 1.3 MB of DWARF in a 1.7 MB tree was what the published Linux artifact of this row
+    # carried, and no recipe here decided to keep it. `borrow.publish` refuses the tree that
+    # still does; this is where it stops being one. Before any bundling, because a library
+    # copied in from the machine is that distribution's file and already stripped.
+    strip.debug(tree)
 
     # The Windows cell is the only one where anything outside the payload has to travel with it, and
     # the difference from the Unix cells is not the bundling but *what is left over*: after a static

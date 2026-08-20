@@ -88,6 +88,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import borrow  # noqa: E402  — siblings, and this directory is not importable as a package
 import relocate  # noqa: E402
+import strip  # noqa: E402
 
 DOWNLOAD = "https://nginx.org/download"
 KEYS = "https://nginx.org/keys"
@@ -1026,6 +1027,12 @@ def main() -> None:
     if missing:
         raise SystemExit(f"the tree provides no {', '.join(missing)}")
     manifest["provides"] = provides
+
+    # 5.9 MB of DWARF in a 16.6 MB tree was what the published Linux artifact of this row
+    # carried, and no recipe here decided to keep it. `borrow.publish` refuses the tree that
+    # still does; this is where it stops being one. Before the libcrypt bundling below, because a
+    # library copied in from the machine is that distribution's file and already stripped.
+    strip.debug(tree)
 
     if upstream:
         borrow.declare(tree, manifest, added=upstream["added"], removed=upstream["removed"])
