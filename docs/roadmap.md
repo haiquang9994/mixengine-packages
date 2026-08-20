@@ -1978,26 +1978,53 @@ import, the way `nginx.py` pins its seven.
 #### Windows on ARM64 is empty, and this one is not close
 
 Oracle has never published an ARM64 Windows build at any version. Unlike nginx's empty cell the
-source could not simply be compiled instead: 5.6 targets Visual Studio 2013 and 5.7 Visual Studio
-2015, nobody has demonstrated either one building with MSVC on ARM64, and for 8.0 and newer it is a
-build nobody here has attempted. The cell is stated rather than attempted, and its leg exits 75 in
-every run like the other stated absences.
+source could not simply be compiled instead: the 5.x trees are of an era whose published binaries
+still import the Visual Studio 2010 runtime, nobody has demonstrated either line building with MSVC
+on ARM64, and for 8.0 and newer it is a build nobody here has attempted. The cell is stated rather
+than attempted — and unlike Redis, memcached and nginx it gets **no leg at all**, because those cells
+are empty for a reason that can change with a version and this one has been empty at every version of
+every line.
 
-#### What has to be decided before this starts
+#### What the implementation measured, and what it changed
 
-* **End-of-life dates.** Six kinds, six publishers, [no third-party mirror](end-of-life-dates.md).
-  Oracle states MySQL's schedule in a support-policy PDF, and whether anything machine-readable exists
-  has to be *asked* — a seventh publisher if it does, an absence with a written reason like Caddy's if
-  it does not. `endoflife.date` is not the answer either way.
-* **`provides` across lines.** `mysql_upgrade` is gone from 8.0.16 onwards and `mysqlpump` from 8.4;
-  `parity.py` compares the cells of one version, so this is legal, and the page has to say it before
-  somebody reads a shorter command list as a packing fault.
-* **The Windows zip and `requires.vcredist`.** Upstream's zip links the MSVC runtime dynamically;
-  which redistributable, per line, is a measurement to take rather than a version to assume.
-* **Nothing here has been compiled yet.** No cell of 5.6 or 5.7 has been through CI, so the first green
-  run of `mysql_build.py` is the evidence for everything above about the compile. PHP 7 took ten rounds
-  and Ruby four; this is a 2021 tree on a 2026 toolchain and should be expected to cost the same kind
-  of number.
+Four things were asked as questions above and have answers now. They are recorded here because each
+of them changed a decision.
+
+* **End-of-life dates: an absence, with a third kind of reason.** Oracle does state MySQL's schedule
+  and states it where a program cannot check it — a support-policy PDF, and an announcements page
+  that says an EOL *after* it happens. Every entry in `data/eol.json` is a transcription `eol.py`
+  re-reads weekly; there is nothing here it could re-read, so MySQL is undated and
+  `_mysql_comment` says why. The dates themselves are on the package page, which promises less.
+* **`provides` across lines**, measured rather than remembered: `mysql_upgrade` is in 5.6, 5.7 **and
+  8.0.44**, gone in 8.4; `mysqlpump` is in 5.7 and 8.0, gone in 8.4; `mysql_install_db` is 5.6 alone.
+  The claim that `mysql_upgrade` went at 8.0.16 was wrong — it was deprecated there and still ships.
+* **`requires.vcredist`, read off the binaries and not off the documentation.**
+  `mysql-5.6.51-winx64.zip` imports `msvcr100.dll`, which is Visual Studio **2010**, while 5.7.44 —
+  a 2023 rebuild of a 2015-era line — imports `vcruntime140_1.dll` and needs the newest
+  redistributable. `schema/index.schema.json` gained `2010` and `2013` for it.
+* **8.0 is packed at 8.0.44.** 8.0.45 published its Linux tarballs with no detached signature at all,
+  while its own macOS and Windows assets are signed and 8.0.44's Linux ones are. So a line is
+  resolved **once, for every cell at the same time**, and the refusal is printed — a per-leg
+  resolution would have split one line across two releases with three cells in one and two in the
+  other.
+
+Three more that nothing above anticipated. **Every MySQL signing key that has ever existed is
+expired** — 2022, 2023 and 2025 — and all three are needed, so the recipe trusts pinned fingerprints
+and reads gpg's `VALIDSIG` rather than its exit code; 5.6's signature is DSA over SHA-1, so
+`--allow-weak-digest-algos` is passed explicitly rather than left to whichever gpg a runner carries.
+**CMake 4 refuses `CMAKE_MINIMUM_REQUIRED(VERSION 2.6)`**, which is what 5.6's own `CMakeLists.txt`
+says, so `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` is passed. And **upstream ships libraries it did not
+finish**: `mysql-5.7.44-winx64.zip` carries a `bin/saslSCRAM.dll` importing a `libcrypto-3-x64.dll`
+that is in no MySQL zip, so it is deleted and declared rather than shipped in a tree that fails its
+own relocation check.
+
+* **What is still open: nothing here has been compiled.** The five Windows cells were packed and
+  smoke-tested on a developer machine, which is the one cell a Windows machine can produce. No cell
+  of 5.6 or 5.7 has been through a compile, so the first green run of `mysql_build.py` is the
+  evidence for everything above about the build. PHP 7 took ten rounds and Ruby four; this is a 2021
+  tree on a 2026 toolchain and should be expected to cost the same kind of number. **The README's
+  table is not to gain a MySQL row until the index holds one**, because that table means "published
+  today" and nothing else.
 
 #### What it adds
 

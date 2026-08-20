@@ -16,6 +16,13 @@ name: build mysql
 # more than it sounds: 8.0.45 published its Linux tarballs without signatures while its macOS and
 # Windows assets have them, so a per-leg resolution would put three cells of 8.0.45 and two of
 # 8.0.44 in two releases, each with a table three-fifths empty.
+#
+# **There is no Windows-on-ARM64 leg**, and that is a departure from build-redis.yml, build-nginx.yml
+# and build-memcached.yml, which keep a leg for their empty cell so that every run says out loud what
+# is missing. Those cells are empty for a reason that can change with a version. This one cannot:
+# Oracle has never published an ARM64 Windows build at any version of any line, and the 5.x trees are
+# of an era whose published binaries still import the Visual Studio 2010 runtime. The absence is
+# stated here and in docs/packages/mysql.md rather than re-measured every run.
 on:
   workflow_dispatch:
     inputs:

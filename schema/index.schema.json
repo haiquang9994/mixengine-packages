@@ -23,7 +23,7 @@
         "kind": {
           "type": "string",
           "pattern": "^[a-z][a-z0-9-]*$",
-          "description": "php | node | python | ruby | caddy | nginx | mariadb | postgresql | redis | memcached …"
+          "description": "php | node | python | ruby | caddy | nginx | mariadb | mysql | postgresql | redis | memcached …"
         },
         "version": {
           "type": "string",

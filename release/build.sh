@@ -7,7 +7,7 @@
 # Two things this exists to remember, because both are silent when you get them wrong. Every build
 # workflow's `release` input defaults to **false** — a run without it builds everything, uploads the
 # artifacts for inspection and publishes nothing installable. And the input is not called the same
-# thing on every workflow: php takes `branch`, mariadb and postgres take a comma-separated
+# thing on every workflow: php takes `branch`, mariadb, mysql and postgres take a comma-separated
 # `versions`, the other seven take `version`.
 set -euo pipefail
 
@@ -30,6 +30,7 @@ nginx|build-nginx.yml|version||1.30|1.30 is stable, 1.31 is mainline, or "latest
 redis|build-redis.yml|version||8.10|a line (8.10), an exact version (8.10.0), or "latest".
 memcached|build-memcached.yml|version||1.6|a line (1.6), an exact version (1.6.45), or "latest".
 mariadb|build-mariadb.yml|versions|all||A LIST: "all" (the default), "latest", or "11.8,10.11".
+mysql|build-mysql.yml|versions|all||A LIST: "all" (the default) or "5.6,8.4". NOT "latest".
 postgres|build-postgres.yml|versions|all||A LIST: "all" (the default), "latest", or "18,16.10".
 EOF
 }

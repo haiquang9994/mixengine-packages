@@ -32,6 +32,13 @@ python tools/mariadb.py --version 11.8 --out dist/        # Windows x86_64, Linu
 python3 tools/mariadb_deb.py --version 11.8 --out dist/   # Linux aarch64, out of upstream's .deb
 python tools/mariadb_build.py --version 11.8 --out dist/  # macOS, and Windows on ARM64
 
+# MySQL: two recipes, and which cell uses which depends on the version. 8.0 and newer are
+# upstream's tarballs; 5.6 and 5.7 are compiled on all four Unix cells, because Oracle withdrew
+# macOS from both lines while they were alive and never published an ARM build of either
+python tools/mysql_borrow.py --version 9.7.1 --out dist/
+python3 tools/mysql_build.py --version 5.6.51 --out dist/
+python tools/mysql.py --version all --plan   # which line resolves to which version, and why
+
 # PostgreSQL: two recipes, because the project publishes no binaries of its own
 python tools/postgres.py --version 18 --out dist/         # EDB's, most of which is never unpacked
 python3 tools/postgres_deb.py --version 18 --out dist/    # Linux, out of the project's own .deb
@@ -71,6 +78,12 @@ off, and the version input is called `branch` on one workflow, `versions` on two
 rest — so [`release/`](../release/README.md) wraps them. `release/build.sh <kind> <version>` and then
 `release/publish.sh`, which is the whole of what a new patch needs.
 
+MySQL's Windows-on-ARM64 cell is the one empty cell here with **no leg at all**, which is a departure
+from the practice below worth naming where it can be found: Redis, memcached and nginx keep an empty
+leg because what they publish for that cell can change with a version, and Oracle has never published
+an ARM64 Windows MySQL at any version of any line. `tools/mysql.py`'s runner table simply has no row
+for it, and the workflow says so at the top rather than spending a runner minute on it every run.
+
 Three of those keep legs in the matrix that produce nothing by design — both Windows legs for Redis,
 the ARM64 one for Memcached, the ARM64 one for nginx. An empty cell stated in every run's log is
 worth a runner minute; a row somebody has to remember is missing is not. See
@@ -83,6 +96,14 @@ two cells, `.deb` packages for a third and nothing at all for the rest. And it t
 versions — `all` expands to every supported series — because MariaDB maintains four at once with
 end-of-life dates years apart, so a workflow that took one version would have to be invoked four
 times and would miss one.
+
+`build-mysql.yml` takes a list too, and is the one workflow here that does not write its matrix down
+at all. Five lines are live at once, and **which recipe a cell uses depends on the version rather
+than only on the cell** — 5.6 is compiled on macOS where 9.7 is borrowed — so `tools/mysql.py --plan`
+produces the legs and the workflow reads them. The same command resolves each line to **one exact
+version for every cell at once**, which is not fussiness: 8.0.45 published its Linux tarballs
+unsigned while its macOS and Windows assets are signed, and a per-leg resolution would have split one
+line across two releases with three cells in one and two in the other.
 
 `build-postgres.yml` takes a list for the same reason, and runs **two** recipes across five legs: EDB
 builds three of the six cells and the project's own `.deb` packages cover two more, leaving Windows
@@ -98,7 +119,7 @@ every publisher and the *claim* is not, and this repository has already been bit
 producers writing the same manifest field to mean two different strengths of proof.
 
 Inside a kind the opposite holds, and for the same reason read backwards. `ruby_smoke.py` is shared
-by the two Ruby recipes, `mariadb_smoke.py` by three and `postgres_smoke.py` by two, precisely
+by the two Ruby recipes, `mariadb_smoke.py` by three, `mysql_smoke.py` and `postgres_smoke.py` by two, precisely
 *because* each set produces one runtime for one row of the table: two producers of the same thing
 that check it differently will drift, and the drift is invisible because they agree on the field
 name. Where the routes disagree about a tree's shape the shared module carries every spelling — see

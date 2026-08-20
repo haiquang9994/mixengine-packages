@@ -91,7 +91,12 @@ def invariants(index: dict, previous: dict | None) -> list[str]:
             # `initdb` beside it has nothing to start *against* — the data directory is a first-run
             # job rather than part of the install, which is the one thing both databases here agree
             # on and neither says in its file layout.
+            # MySQL is the third row and asks for two rather than three, which is upstream's doing:
+            # `mysql_install_db` exists in 5.6 and was deleted in 5.7, where `mysqld
+            # --initialize-insecure` bootstraps a data directory instead. A required list naming the
+            # installer would fail four lines of five for having been written from the oldest.
             for kind, needs in (("mariadb", ("mariadbd", "mariadb-install-db")),
+                                ("mysql", ("mysqld", "mysql")),
                                 ("postgres", ("postgres", "initdb"))):
                 if package["kind"] != kind:
                     continue

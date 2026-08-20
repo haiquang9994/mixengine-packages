@@ -182,6 +182,22 @@
     "11.8": "2030-02-13",
     "12.3": "2029-06-12"
   },
+  "_mysql_comment": [
+    "MySQL has no entry, and the absence is a third kind — neither Caddy's nor Redis's. Caddy states",
+    "no schedule because it has one line and support means its newest patch. Redis branches and",
+    "simply publishes no date for the open-source product. **Oracle does state MySQL's schedule, and",
+    "states it where a program cannot check it**: the Lifetime Support Policy is a PDF, and",
+    "mysql.com/support/eol-notice.html is a chronological page of announcements written after the",
+    "fact — on 20 August 2026 it says 'as of April 21, 2026, MySQL 8.0 is covered under Oracle",
+    "Sustaining Support' and carries no forward date for 8.4 or 9.7 at all.",
+    "Every entry in this file is a transcription `tools/eol.py` re-reads weekly and compares. There",
+    "is nothing here it could re-read: a date typed from a PDF would be this file's memory of a",
+    "document rather than the document, and the check that makes the other six entries trustworthy",
+    "would be the one thing MySQL's did not have. So MySQL is undated, `mkindex.py` leaves it so,",
+    "and the honest place for 'MySQL 5.6 went out of support in February 2021' is the package page.",
+    "Re-ask it when MySQL's packaging is next touched, the way P8 and P9 did for Caddy and nginx.",
+    "endoflife.date is not the answer, for the reason the top of this file gives."
+  ],
   "_postgres_comment": [
     "postgresql.org/versions.json, field `eolDate` — the same document `tools/postgres.py` resolves",
     "a version against, and it states every major back to 6.3. Keyed by major alone, because that is",
