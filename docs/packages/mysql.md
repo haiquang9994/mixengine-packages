@@ -145,9 +145,17 @@ line looked for in the log afterwards.
 
 Bootstrapping is where the five lines disagree most, and `mysql_smoke.bootstrap` is a table of three
 routes rather than a version test: 5.7 and newer use `mysqld --initialize-insecure`; 5.6 on Unix uses
-`scripts/mysql_install_db`, a shell script that does not quote `$basedir` and therefore has to be
-reached through a space-free symlink; 5.6 on Windows has neither, and upstream's zip ships a `data/`
-directory with the system tables already built.
+`scripts/mysql_install_db`, which does not quote `$basedir` and so has to be reached through a
+space-free symlink; 5.6 on Windows has neither, and upstream's zip ships a `data/` directory with
+the system tables already built.
+
+Two things about that middle route are worth stating because both read as broken artifacts when they
+are not. **In a tree compiled here `mysql_install_db` is Perl, not shell** — 5.6's
+`scripts/CMakeLists.txt` configures `mysql_install_db.pl.in` on every platform and only appends
+`.pl` to the name on Windows — so what runs it is read off its own first line. And **`support-files` is
+otherwise not shipped, but `support-files/my-default.cnf` is kept**: the script looks for that
+template in four places, refuses to run without it, and checks for it before it looks at
+`--keep-my-cnf`. One file, and the 5.6 cells cannot bootstrap without it.
 
 One platform difference this turned up that no documentation states: **MariaDB's installer creates
 `root@127.0.0.1` and MySQL's `--initialize-insecure` creates only `root@localhost`**, so the

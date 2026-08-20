@@ -149,6 +149,20 @@ PRUNE = (
     "lib/plugin/debug",
 )
 
+# Kept out of a directory `PRUNE` otherwise takes whole, because something the artifact has to be
+# able to do needs it.
+#
+# **`support-files/my-default.cnf` is one file and the 5.6 cells do not bootstrap without it.**
+# `scripts/mysql_install_db` — which is how a 5.6 data directory is made, there being no
+# `mysqld --initialize` until 5.7 — looks for that template in `.`, `share`, `share/mysql` and
+# `support-files`, and stops with `FATAL ERROR: Could not find my-default.cnf` when it is in none of
+# them. It checks *before* it looks at `--keep-my-cnf`, so asking it not to write a `my.cnf` does
+# not excuse the file. The rest of `support-files` is init scripts and systemd units for a system
+# install nobody here performs, and it still goes.
+KEPT = (
+    "support-files/my-default.cnf",
+)
+
 # Deleted by pattern rather than by path, because where each of these lands moved between 5.6 and
 # 9.7 and a list of paths would silently stop matching.
 NOT_SHIPPED = (
@@ -491,6 +505,29 @@ def legs(spec: str) -> dict[str, list[dict[str, str]]]:
     return planned
 
 
+def prune_around(tree: Path, directory: Path, kept: set[str]) -> list[str]:
+    """Empty *directory* of everything except *kept*, and answer with what went, path by path.
+
+    Path by path because that is what `borrow.declare` checks: ``upstream.removed`` naming a
+    directory that is still there — because one file in it survived — is a declaration that fails
+    the pack, and rightly.
+    """
+    removed = []
+    for child in sorted(directory.iterdir()):
+        relative = child.relative_to(tree).as_posix()
+        if relative in kept:
+            continue
+        if any(keep.startswith(f"{relative}/") for keep in kept):
+            removed += prune_around(tree, child, kept)
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink()
+        removed.append(relative)
+    return removed
+
+
 def prune(tree: Path) -> list[str]:
     """Take out what no artifact here ships, and answer with what was taken.
 
@@ -500,7 +537,18 @@ def prune(tree: Path) -> list[str]:
     removed = []
     for relative in PRUNE:
         path = tree / relative
-        if path.is_dir():
+        kept = {
+            keep for keep in KEPT
+            if keep == relative or keep.startswith(f"{relative}/")
+        }
+        if path.is_dir() and kept:
+            removed += prune_around(tree, path, kept)
+            # 8.0 and newer ship no `my-default.cnf`, so the directory can come out of this empty,
+            # and an empty directory nobody asked for is still something the artifact carries.
+            if not any(path.iterdir()):
+                path.rmdir()
+                removed.append(relative)
+        elif path.is_dir():
             shutil.rmtree(path, ignore_errors=True)
             removed.append(relative)
         elif path.is_file():
