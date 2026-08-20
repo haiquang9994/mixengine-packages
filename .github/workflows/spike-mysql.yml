@@ -9,8 +9,12 @@ name: spike mysql reachability
 # carrying a query string while answering 200 to the asset URLs themselves. A runner is on a
 # different network than that machine, so the split may not be the same one, and guessing either way
 # writes a design that discovers the truth on the first real build.
+# `push` rather than `workflow_dispatch`, which is the one place this file breaks the rule every
+# other workflow here keeps. Actions registers a dispatchable workflow only from the default
+# branch, and this one is never going to be there.
 on:
-  workflow_dispatch:
+  push:
+    branches: ['spike/**']
 
 jobs:
   ask:
