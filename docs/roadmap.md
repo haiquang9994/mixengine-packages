@@ -1836,6 +1836,178 @@ new body coming back, `-s quit` — and the Unix path was exercised with the com
 the downloads, the pinned library digests, the licence collection and the assembled tree are known
 good and the compile itself is not. It needs a `workflow_dispatch` on `build-nginx.yml`.
 
+### [ ] P14 — MySQL, and the line upstream stopped building
+
+The number is out of sequence and the position is not: this is a kind still to pack, so it goes with
+the others rather than after the index tasks, and it is new work rather than a follow-up to nginx, so
+it takes a number rather than a suffix.
+
+MariaDB is packed and MySQL is not the same product to anybody maintaining an application against one
+of them. Five lines are wanted, **5.6 through 9.7**, and the floor is a request rather than a
+measurement — with one condition attached that shapes everything below: 5.6 has to run natively on
+ARM, on macOS and on Linux.
+
+Upstream publishes nothing for either. Which is ordinary here — MariaDB has no macOS build at all —
+except for the part that is not: **Oracle withdrew macOS from the 5.x lines while they were still
+alive**. `5.7.31` offers `macos10.14-x86_64`, `5.7.20` offers `macos10.12-x86_64`, and `5.7.44` — the
+last release of the line — offers no macOS asset of any kind and lists no macOS entry in its own
+operating-system menu. 5.6 does the same thing earlier. So the newest patch of a line is *less
+portable* than a patch from the middle of it, and a recipe that reads a release's asset list, the way
+`caddy.py` does, would quietly produce fewer cells for a newer version.
+
+#### The table, as upstream's asset lists state it
+
+Measured 2026-08-20 against the archive catalogue, not assumed.
+
+| Line | macOS aarch64 | macOS x86_64 | Linux x86_64 | Linux aarch64 | Win x86_64 | Win aarch64 |
+| --- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **5.6** (5.6.51) | build | build | build | build | borrow | — |
+| **5.7** (5.7.44) | build | build | build | build | borrow | — |
+| **8.0** (8.0.45) | borrow | borrow | borrow | borrow | borrow | — |
+| **8.4** (8.4.10) | borrow | borrow | borrow | borrow | borrow | — |
+| **9.7** (9.7.1) | borrow | borrow | borrow | borrow | borrow | — |
+
+The three live lines publish `macos15-arm64` and `macos15-x86_64` tarballs and a
+`linux-glibc2.28-aarch64` one, so five of their six cells are a borrow and the recipe for them is
+`caddy.py`'s shape. **8.0 additionally publishes a whole second set at `glibc2.17`, and that set has
+no aarch64.** Taking it for x86_64 would buy a lower floor and cost the thing the floor is for: two
+Linux cells of one version compiled against two different glibcs, which is one version meaning two
+things. Both Linux cells of 8.0 take `glibc2.28`, and its page says what was refused.
+
+#### 5.6 and 5.7 are compiled on all four Unix cells, and that is a decision rather than a shortage
+
+Upstream still publishes `linux-glibc2.12-x86_64` for both, so that cell *could* be borrowed. It is
+not, and the reason is the rule rather than a preference. The ARM cell has to be compiled — there is
+nothing to borrow — which means a 2026 toolchain against an OpenSSL this repository supplies, while
+the borrowed tarball is Oracle's 2021 build against whatever it linked then, at a glibc floor of 2.12
+against the built cell's 2.28. Two Linux artifacts of `5.6.51` would be two different databases, and
+`parity.py` compares finished artifacts precisely because that difference is invisible in two green
+builds. So 5.6 and 5.7 compile on macOS ×2 and Linux ×2 from one source tree with one configure line,
+and only Windows x86_64 stays a borrow.
+
+That is the first row here where *Borrow before you build* loses to *One version means one thing*, and
+it is worth stating in those terms: borrowing is cheaper per cell, and it is not cheaper than having
+the six cells of a version mean one thing.
+
+#### What stops 5.6 compiling on ARM is one block, and the fix is Oracle's own
+
+`include/my_global.h` in 5.6.51 carries a Darwin block written for PowerPC-era universal binaries. It
+`#undef`s the `SIZEOF_*` values CMake has just detected correctly and hardcodes them again from
+`__i386__ / __ppc__ / __x86_64__ / __ppc64__`, ending in `#error Building FAT binary for an unknown
+architecture`. On Apple Silicon that `#error` is the whole of the failure. Nothing in MySQL 5.6 is
+x86-bound; a header written in 2005 does not know the machine exists.
+
+**5.7.44 does not have the block.** Oracle deleted it and let the detected values stand, so what is
+applied here is upstream's own change carried back one line rather than a port invented in this
+repository — checkable with two `curl`s against `raw.githubusercontent.com/mysql/mysql-server` at tags
+`mysql-5.6.51` and `mysql-5.7.44`. MacPorts' still-maintained `mysql56` port reaches the same place by
+adding `__aarch64__` to the `#elif`; that is a diagnosis worth having, it is not the source, and no
+byte of it enters an artifact.
+
+The edit is guarded the way `ruby_unix.py` guards its OpenSSL one: the block has to be found exactly
+once or the build stops. An upstream that changed this file is a build that fails loudly rather than
+an artifact that ships quietly.
+
+#### OpenSSL: 5.6 accepts major version 1, and that is measured from its own CMake
+
+`cmake/ssl.cmake` offers `system` or a path in both lines — **yaSSL is gone from 5.6.51 as well as
+from 5.7.44**, which is the opposite of what the 5.6 documentation of its own era describes. The two
+lines then differ in one line of CMake:
+
+* `5.6.51` sets `OPENSSL_FOUND` only when `OPENSSL_MAJOR_VERSION STREQUAL "1"`;
+* `5.7.44` accepts `"1" OR "3"`.
+
+So 5.7 compiles against the OpenSSL 3 every runner and every Homebrew already has, and **5.6 needs an
+OpenSSL 1.1.1 this repository builds and bundles** — the `autoconf 2.69` case in `php_legacy_unix.py`,
+one branch older. The consequence is not only at build time: 1.1.1 stopped receiving public security
+fixes in September 2023, so `smoke.openssl` on the four compiled 5.6 cells will name a TLS library
+nobody patches. That belongs in the artifact and on the page, stated the way this repository stated
+the nginx 1.24 zip it refused — except that here it is not a reason to refuse. A version whose own
+build system rejects a maintained OpenSSL cannot be given one, and the person maintaining an
+application against MySQL 5.6 is exactly the person a local development environment is for.
+
+#### The first artifact here built from modified source, and what GPLv2 asks for it
+
+Every compiled cell so far — PHP, Ruby, MariaDB, Redis, memcached, nginx — is upstream's source
+unmodified. MySQL 5.6 and 5.7 will not be, and MySQL Community is GPLv2, so the corresponding source
+has to travel with the binary rather than be describable on request.
+
+The route is the one `relocate.cygwin_source_note` already established for LGPLv3: the patched source
+tarball is published as an asset of the same release, and the archive carries a file naming it, the
+upstream tarball it came from, and what was changed. Two things follow. That asset joins
+[the archive's permanence promise](the-archive.md) like every other — a deleted source tarball is a
+licence violation rather than a missing convenience. And the patch is small enough that the diff
+between the two tarballs is readable, which is the point of shipping both.
+
+#### The catalogue works, and the trap is the opposite of the expected one
+
+MySQL publishes no REST API and no `versions.json`; the archive's own pages are the catalogue. From a
+developer machine every archive URL carrying a query string answered **403** while the asset URLs
+answered 200, which would have meant keeping a version list in this repository. A throwaway spike on
+`ubuntu-24.04` and `macos-14` — runs `32372452914` and `32372694602`, 2026-08-20 — measured the
+opposite:
+
+| Sent as | Catalogue fragment | Asset | Signature |
+| --- | :---: | :---: | :---: |
+| `Python-urllib/3`, the default | 200 | 206 | 200 |
+| a browser `User-Agent` | 403 | 403 | 403 |
+
+Identical on both runners. The 403 is Oracle's edge refusing a *browser* claim from a datacentre
+address, and it was self-inflicted: the local probe had been told to be polite and send one. **A
+recipe here must send urllib's default User-Agent and never a browser's** — the sort of thing
+`building-from-source.md` exists to record, where the courteous choice is the one that gets blocked.
+
+So MySQL gets a `--plan` like `mariadb.py`'s: the version list off
+`downloads.mysql.com/archives/community/`, the per-version asset list off its
+`?tpl=files&os=<id>&version=<v>` fragment, and nothing kept here that upstream already states. One
+more thing the spike caught: **that page answers `200 text/html` with a body reading "Technical
+Difficulties"** rather than a status a client can branch on, so the recipe checks what came back and
+not only how it came back.
+
+#### Verification, and where a MySQL signature is not
+
+The page publishes MD5, which is not something this repository writes into
+`upstream.verified_against`. Detached PGP signatures exist and were fetched on both runners at three
+routes — `cdn.mysql.com/Downloads/MySQL-<line>/<name>.asc`,
+`cdn.mysql.com/archives/mysql-<line>/<name>.asc`, and
+`downloads.mysql.com/archives/gpg/?file=<name>&p=23`. The route that does **not** exist is `.asc`
+beside the asset under `/archives/get/`, which answers 404 and is the first thing anybody would try.
+The key is at `repo.mysql.com/RPM-GPG-KEY-mysql-2023`, pinned by fingerprint and checked before
+import, the way `nginx.py` pins its seven.
+
+#### Windows on ARM64 is empty, and this one is not close
+
+Oracle has never published an ARM64 Windows build at any version. Unlike nginx's empty cell the
+source could not simply be compiled instead: 5.6 targets Visual Studio 2013 and 5.7 Visual Studio
+2015, nobody has demonstrated either one building with MSVC on ARM64, and for 8.0 and newer it is a
+build nobody here has attempted. The cell is stated rather than attempted, and its leg exits 75 in
+every run like the other stated absences.
+
+#### What has to be decided before this starts
+
+* **End-of-life dates.** Six kinds, six publishers, [no third-party mirror](end-of-life-dates.md).
+  Oracle states MySQL's schedule in a support-policy PDF, and whether anything machine-readable exists
+  has to be *asked* — a seventh publisher if it does, an absence with a written reason like Caddy's if
+  it does not. `endoflife.date` is not the answer either way.
+* **`provides` across lines.** `mysql_upgrade` is gone from 8.0.16 onwards and `mysqlpump` from 8.4;
+  `parity.py` compares the cells of one version, so this is legal, and the page has to say it before
+  somebody reads a shorter command list as a packing fault.
+* **The Windows zip and `requires.vcredist`.** Upstream's zip links the MSVC runtime dynamically;
+  which redistributable, per line, is a measurement to take rather than a version to assume.
+* **Nothing here has been compiled yet.** No cell of 5.6 or 5.7 has been through CI, so the first green
+  run of `mysql_build.py` is the evidence for everything above about the compile. PHP 7 took ten rounds
+  and Ruby four; this is a 2021 tree on a 2026 toolchain and should be expected to cost the same kind
+  of number.
+
+#### What it adds
+
+`tools/mysql.py` (the catalogue, and the packing rules all six cells answer to), `tools/mysql_borrow.py`,
+`tools/mysql_build.py`, and `tools/mysql_smoke.py` — shared by both recipes, with a `LAYOUT` table
+rather than an `if`, because 5.6 bootstraps a data directory with `mysql_install_db` and 5.7 onwards
+with `mysqld --initialize-insecure`. Then `.github/workflows/build-mysql.yml` taking a *list* of
+versions, since five lines are live at once; a row in `release/build.sh`'s table, because the input
+name is not the same on every workflow; `docs/packages/mysql.md`; and a row in the README table.
+
 ---
 
 ## The index
