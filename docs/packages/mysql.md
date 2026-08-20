@@ -91,13 +91,22 @@ include path, macOS is case-insensitive unless somebody went out of their way, a
 `MYSQL_VERSION_MAJOR=5` with `expected unqualified-id`. Neither file is wrong; the names collided
 years after both were written, and **MySQL 8.0.28 renamed the same file for the same reason.**
 
-*The 5.6 cells* additionally have one block deleted from `include/my_global.h`. Written for
-PowerPC-era universal binaries, it undoes the `SIZEOF_*` values CMake has just detected and
-hardcodes them from `__i386__ / __ppc__ / __x86_64__ / __ppc64__`, ending in `#error Building FAT
-binary for an unknown architecture.` On Apple Silicon that `#error` is the whole of the failure.
-**5.7.44 does not have the block** — Oracle deleted it and let the detected values stand — so what
-is applied here is upstream's own later change carried back one line rather than a port invented in
-this repository.
+*The 5.6 cells* additionally have **two** blocks deleted from `include/my_global.h`, and the second
+is the same mistake as the zlib one above, made in the other direction.
+`#if defined(TARGET_OS_LINUX) || defined(__GLIBC__)` turns `_GNU_SOURCE` on — and it asks whether
+Apple's `TARGET_OS_LINUX` *exists*, meaning to ask whether it is 1. Apple's `TargetConditionals.h` has since grown that macro,
+defined as 0, so on SDK 15.5 a macOS build declares itself GNU, `mysys/my_error.c` takes its
+`#elif defined _GNU_SOURCE` branch, and `char *r = strerror_r(...)` meets the POSIX `strerror_r`
+that returns `int`. Xcode 16.4 refuses it; Xcode 15.4 compiled it with a warning, into a build whose
+`my_strerror` would have read a pointer that was really a zero. **5.7.44 does not have the block**,
+and on Linux `_GNU_SOURCE` comes from `my_config.h`, which 5.6 generates too.
+
+The first block is the older one. Written for PowerPC-era universal binaries, it undoes the
+`SIZEOF_*` values CMake has just detected and hardcodes them from
+`__i386__ / __ppc__ / __x86_64__ / __ppc64__`, ending in `#error Building FAT binary for an unknown
+architecture.` On Apple Silicon that `#error` is the whole of the failure. 5.7.44 does not have that
+one either — Oracle deleted it and let the detected values stand. So every change made here is a
+change upstream itself made a line later, rather than a port invented in this repository.
 
 MySQL Community is GPLv2, so the complete corresponding source is published as
 `mysql-<version>-patched-src.tar.gz` beside the binaries, `licenses/SOURCE.md` inside each artifact

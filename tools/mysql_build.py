@@ -111,6 +111,26 @@ DNF_PACKAGES = (
 DARWIN_BLOCK_OPENS = "#if defined(__APPLE__) && defined(__MACH__)\n#  undef SIZEOF_CHARP"
 DARWIN_BLOCK_CLOSES = "#endif /* defined(__APPLE__) && defined(__MACH__) */"
 
+# The other block 5.7 deleted, four lines long, and the reason it matters is one word in it:
+# `defined`. It asks whether `TARGET_OS_LINUX` **exists**, meaning to ask whether it is 1 — and
+# Apple's `TargetConditionals.h` has since grown a `TARGET_OS_LINUX`, defined as 0. So a macOS SDK
+# new enough to carry it turns `_GNU_SOURCE` on for a platform that is not GNU, `mysys/my_error.c`
+# takes its `#elif defined _GNU_SOURCE` branch, and `char *r = strerror_r(...)` meets the POSIX
+# `strerror_r` that answers `int`.
+#
+# It is the same shape as the zlib clash `-DWITH_ZLIB=system` answers, and it splits the two macOS
+# cells the same way: SDK 15.5 defines `TARGET_OS_LINUX`, SDK 14.5 does not, so Xcode 16.4 fails
+# and Xcode 15.4 compiles it — with a warning, into a build where a failing `my_strerror` would
+# read a pointer that is really a zero. **5.7.44 does not have the block at all**; on Linux
+# `_GNU_SOURCE` comes from `my_config.h`, which 5.6 generates too, so deleting it changes nothing
+# there and stops lying about what macOS is.
+GNU_SOURCE_BLOCK = """/* Fix problem with S_ISLNK() on Linux */
+#if defined(TARGET_OS_LINUX) || defined(__GLIBC__)
+#undef  _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+"""
+
 
 def run(*command: str, cwd: Path | None = None, env: dict | None = None,
         capture: bool = False, timeout: int = 14400) -> str:
@@ -239,6 +259,29 @@ def patch_version_file(source_tree: Path) -> dict[str, str]:
             "compile. MySQL 8.0.28 renamed the same file for the same reason.",
         "cmake/mysql_version.cmake":
             "reads MYSQL_VERSION rather than VERSION, in the two places it names the file.",
+    }
+
+
+def patch_gnu_source(source_tree: Path) -> dict[str, str]:
+    """Delete the block that tells a macOS SDK it is GNU. See :data:`GNU_SOURCE_BLOCK`."""
+    path = source_tree / "include" / "my_global.h"
+    text = path.read_text(encoding="utf-8")
+    if text.count(GNU_SOURCE_BLOCK) != 1:
+        raise SystemExit(
+            f"{path} does not contain exactly one _GNU_SOURCE block "
+            f"({text.count(GNU_SOURCE_BLOCK)} found). MySQL has changed the lines this recipe "
+            f"deletes, and a guess here decides "
+            f"which strerror_r a database compiles against."
+        )
+    path.write_text(text.replace(GNU_SOURCE_BLOCK, ""), encoding="utf-8")
+    print("patched include/my_global.h: removed the _GNU_SOURCE block 5.7 removed upstream")
+    return {
+        "include/my_global.h (the _GNU_SOURCE block)":
+            "removed the block defining _GNU_SOURCE on `defined(TARGET_OS_LINUX) || "
+            "defined(__GLIBC__)`. Apple's TargetConditionals.h now defines TARGET_OS_LINUX as 0, "
+            "which that test reads as yes, so mysys/my_error.c took its GNU branch and assigned "
+            "the int that POSIX strerror_r returns to a char *. MySQL 5.7.44 does not have the "
+            "block; on Linux _GNU_SOURCE comes from my_config.h, which 5.6 generates as well.",
     }
 
 
@@ -554,6 +597,7 @@ def main() -> None:
     changed = patch_version_file(source_tree)
     if line == "5.6":
         changed.update(patch_universal_binary(source_tree))
+        changed.update(patch_gnu_source(source_tree))
     ssl = build_openssl(work) if line == "5.6" else None
 
     prefix = work / "prefix"
