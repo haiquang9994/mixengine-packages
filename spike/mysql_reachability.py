@@ -130,10 +130,10 @@ def main() -> int:
         print()
     print("== SIGNATURES " + "=" * 47)
     for name, url in SIGNATURES:
-        print(f"
-{name}
-  {url}
-  {signature(url)}")
+        print("")
+        print(name)
+        print("  " + url)
+        print("  " + signature(url))
     print()
     return 0
 
