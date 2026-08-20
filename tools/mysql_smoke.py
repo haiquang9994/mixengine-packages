@@ -53,9 +53,11 @@ LAYOUT = {
     "my_print_defaults": ["bin/my_print_defaults"],
 }
 
-# Three, and `mysql_install_db` is deliberately not among them. It exists in 5.6 and was deleted in
-# 5.7, where `mysqld --initialize-insecure` does the job; a required list naming it would fail four
-# lines of five. Which program bootstraps a data directory is :func:`bootstrap`'s business, and that
+# Three, and `mysql_install_db` is deliberately not among them. 5.6 and 5.7 carry it on Unix — at
+# `scripts/` on the older line and at `bin/` on the newer one — 5.7 deprecates it in favour of
+# `mysqld --initialize-insecure`, 8.0 removes it, and upstream's Windows zip never had it at all. So
+# a required list naming it would fail three lines of five and one cell of a fourth. Which
+# program bootstraps a data directory is :func:`bootstrap`'s business, and that
 # `provides` is shorter on a newer version than on an older one is upstream's decision rather than a
 # packing fault — see docs/packages/mysql.md, which says so before anybody files it as one.
 REQUIRED = ("mysqld", "mysql", "mysqladmin")

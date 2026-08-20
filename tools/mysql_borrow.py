@@ -147,6 +147,10 @@ def main() -> None:
     removed += mysql.unloadable_libraries(tree)
 
     provides = mysql_smoke.describe(tree, windows)
+    # Asked on both cells and answering on one — see `mysql.lacks`. `parity.py` compares a cell
+    # against its siblings and cannot know why one of them is short of a command, so the reason
+    # travels in the archive that is short of it rather than in a list beside the checker.
+    absent = mysql.lacks(line, target[0])
 
     manifest = {
         "schema": 1,
@@ -164,6 +168,8 @@ def main() -> None:
         },
         "provides": provides,
     }
+    if absent:
+        manifest["lacks"] = absent
     borrow.declare(
         tree, manifest,
         added=[f"lib/{library}" for library in added],

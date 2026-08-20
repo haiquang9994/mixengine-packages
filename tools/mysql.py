@@ -175,6 +175,53 @@ NOT_SHIPPED = (
 )
 
 
+# What a cell cannot offer, keyed by the line, as the manifest's ``lacks`` field.
+#
+# **One command, one platform, and two different reasons.** `mysql_install_db` is a shell script, so
+# Oracle's Windows zip has never carried it: `mysql-5.6.51-winx64.zip` holds 238 entries, none of
+# them named for it, and no `scripts/` directory to hold it — nor the `.pl` variant, which
+# `NOT_SHIPPED` would have deleted and recorded. On 8.0 and newer nothing carries it anywhere, so
+# nothing is uneven and nothing is written here. On 5.6 and 5.7 the four Unix cells are compiled and
+# do carry it, and `parity.py` asks — rightly — what happened to the fifth.
+#
+# The two answers differ because what replaces it differs, which is exactly why this is a sentence
+# in the artifact rather than a name on a checker's exemption list. 5.7 has
+# `mysqld --initialize-insecure`, the program that replaced the script and what `mysql_smoke`
+# bootstraps every 5.7 cell with, Unix ones included. 5.6 predates it: upstream's zip instead ships
+# a `data/` whose system tables are already built, and the documented first run copies that
+# directory. A daemon on the 5.6 Windows cell is not running the Unix command from another path —
+# it is performing a different operation, and this is where it is told so.
+LACKS = {
+    "5.6": {
+        "mysql_install_db": (
+            "Upstream's Windows zip carries no mysql_install_db, which is a shell script, and 5.6 "
+            "is older than `mysqld --initialize`. The zip ships a data/ directory with the system "
+            "tables already built; a first run copies it rather than generating one."
+        ),
+    },
+    "5.7": {
+        "mysql_install_db": (
+            "Upstream's Windows zip carries no mysql_install_db, which is a shell script. "
+            "`mysqld --initialize-insecure` is what replaced it in 5.7, and is what every cell of "
+            "this line bootstraps with here, the compiled Unix ones included."
+        ),
+    },
+}
+
+
+def lacks(line: str, operating_system: str) -> dict[str, str]:
+    """What this cell cannot offer, as the manifest's ``lacks`` field.
+
+    A function rather than a lookup so the empty case is a value and not a `KeyError`, and asked by
+    both recipes rather than only by the one that can answer: a cell that lacks nothing writes
+    nothing, and an artifact with an empty `lacks` would otherwise be indistinguishable from one
+    whose recipe never put the question.
+    """
+    if operating_system != "windows":
+        return {}
+    return dict(LACKS.get(line, {}))
+
+
 def page(url: str, timeout: int = 60) -> str:
     """Read an archive page, and refuse the error page it serves with a 200.
 

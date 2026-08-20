@@ -708,6 +708,13 @@ def main() -> None:
         ),
         "provides": provides,
     }
+    # Asked on this side too, and answering nothing every time. `mysql.lacks` is about what
+    # upstream's Windows zip never carried, and this recipe compiles the four Unix cells — but a
+    # question only the cell that fails it is allowed to ask is a question that gets forgotten on
+    # the day a compiled cell is the short one.
+    absent = mysql.lacks(line, operating_system)
+    if absent:
+        manifest["lacks"] = absent
     # `upstream` on a *built* artifact, which most compiled recipes here do without: the source is
     # upstream's, it is the thing GPLv2 makes this recipe publish, and its signature is what was
     # checked. `changed` is deliberately **not** declared through `borrow.declare` — that field is
