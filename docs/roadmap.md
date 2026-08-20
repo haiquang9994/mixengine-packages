@@ -2060,13 +2060,49 @@ finish**: `mysql-5.7.44-winx64.zip` carries a `bin/saslSCRAM.dll` importing a `l
 that is in no MySQL zip, so it is deleted and declared rather than shipped in a tree that fails its
 own relocation check.
 
-* **What is still open: nothing here has been compiled.** The five Windows cells were packed and
-  smoke-tested on a developer machine, which is the one cell a Windows machine can produce. No cell
-  of 5.6 or 5.7 has been through a compile, so the first green run of `mysql_build.py` is the
-  evidence for everything above about the build. PHP 7 took ten rounds and Ruby four; this is a 2021
-  tree on a 2026 toolchain and should be expected to cost the same kind of number. **The README's
-  table is not to gain a MySQL row until the index holds one**, because that table means "published
-  today" and nothing else.
+* **What was open here — nothing had been compiled — is closed, and the next section is what it
+  cost.** The five Windows cells had been packed and smoke-tested on a developer machine, which is
+  the one cell a Windows machine can produce, and everything stated above about the build was an
+  argument until a runner agreed with it. **The README's table is still not to gain a MySQL row
+  until the index holds one**, because that table means "published today" and nothing else.
+
+#### Every cell has now compiled, and two macro tests are what it cost
+
+Each line dispatched on its own as an inspection run — `release=false`, so nothing is published —
+on 2026-08-20: `9.7.1` (32399334209), `5.6.51` (32399947996), `5.7.44` (32403978570), `8.0.44`
+(32404012841) and `8.4.10` (32404023165). Every cell of every line is green, the four compiled
+cells of 5.6 and 5.7 included, and each of those four published a
+`mysql-<version>-patched-src.tar.gz` beside its archive naming what was changed — the GPLv2 route
+above, exercised rather than described. `smoke.server` bootstrapped a data directory, started the
+server, wrote a row through InnoDB and read it back on all five cells of all five lines.
+
+**The compile cost two source patches nobody planned for, and they are the same mistake in the same
+word.** 5.6's `my_global.h` tests `defined(TARGET_OS_LINUX)` and the zlib 5.7 bundles tests
+`defined(MACOS) || defined(TARGET_OS_MAC)`; both mean to ask whether an Apple macro is **1** and
+ask instead whether it exists, and `TargetConditionals.h` defines all of them on every Apple
+platform. So `_GNU_SOURCE` turned on for a platform that is not GNU, and `fdopen` became `NULL`
+before `<stdio.h>` declared it. Each one splits the two macOS cells **by SDK rather than by
+architecture** — 15.5 carries the macro, 14.5 does not — so in both cases the arm64 cell compiled
+while the x86_64 cell failed. A cell that is green because of which runner image was current is one
+that fails later for no reason of its own, which is why both are patched on every operating system:
+on Linux and Windows neither macro is defined, the branch is dead, and every cell of a version then
+compiles the same source.
+
+**The second one also corrected something this item states.** `-DWITH_ZLIB=system` is described
+above as what the macOS cells do about their bundled zlib; it is what **5.6** does. 5.7.44's CMake
+requires a system zlib of at least 1.2.13 — the release that fixed CVE-2022-37434 — and every macOS
+SDK ships 1.2.12, so it prints the refusal and compiles the copy it carries. That is the right
+library to compile, and the fix belongs in the header test rather than in linking a database
+against a zlib upstream declined.
+
+And P6b is visible from this end too: the two compiled Linux cells of 5.7 stripped **564.6 MB and
+574.7 MB of debug information from 74 of 74 files**, packing to 48.5 MB and 48.2 MB — a compiled
+cell reaches the same place a borrowed bintar does, unaided, because DWARF is linked into an ELF
+executable and stays behind in the object files of a Mach-O one.
+
+**What is left is a release.** Five lines have been proven at `release=false` and none of them is
+published; the run that publishes them is `release=true` at these versions, and the README row and
+the index entry follow it rather than precede it.
 
 #### What it adds
 

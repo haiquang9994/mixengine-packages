@@ -501,15 +501,16 @@ def configure(source_tree: Path, build: Path, prefix: Path, line: str,
 
     if sys.platform == "darwin":
         arguments += [
-            # **The bundled zlib is older than the SDK it is compiled against.** 5.6 carries a zlib
-            # of 2013 whose `zutil.h` still has a branch for *classic* Mac OS, taken on
-            # `defined(MACOS) || defined(TARGET_OS_MAC)` — and `TARGET_OS_MAC` is 1 on every Apple
-            # platform today. The branch does `#define fdopen(fd,mode) NULL`, so the next
-            # `#include <stdio.h>` reaches `FILE *fdopen(int, const char *)` with `fdopen` already a
-            # macro and clang stops inside Apple's own header. Measured: the x86_64 cell (Xcode
-            # 16.4, SDK 15.5) fails there and the arm64 one (Xcode 15.4, SDK 14.5) does not, a
-            # difference between two SDKs rather than between two architectures, and a cell that
-            # depends on which runner image was current is one that breaks later for no reason.
+            # **The bundled zlib is older than the SDK it is compiled against.** Both lines carry
+            # a `zutil.h` whose branch for *classic* Mac OS is taken on `TARGET_OS_MAC`, which
+            # Apple defines as 1 on every platform it sells; :data:`ZLIB_CLASSIC_MAC_TEST` is what
+            # that branch then does to `fdopen`, and which of the two macOS cells it stops.
+            #
+            # **This flag is 5.6's way out of it and only 5.6's.** It is passed on both lines
+            # because 5.7.44's CMake answers it rather than failing on it: that tree requires a
+            # system zlib of at least 1.2.13 — the release that fixed CVE-2022-37434 — every macOS
+            # SDK ships 1.2.12, so it prints the refusal and compiles the copy it carries. Which is
+            # the right library to compile, and why 5.7 is patched at the header instead.
             #
             # macOS has shipped zlib in `/usr/lib` since forever, `relocate` leaves anything there
             # alone, and it is maintained — which the copy inside a 2013 source tree is not. Linux
