@@ -110,6 +110,9 @@ def configuration(work: Path, tree: Path, port: int, windows: bool) -> Path:
     server that only works when every setting is an argument is a server whose configuration
     generation is untested.
 
+    A ``user`` line appears only when this is running as root, which is the container the compiled
+    Linux cells are built in and nowhere else — see below.
+
     **No ``skip-name-resolve``, which MariaDB's equivalent does set**, and the difference is not a
     preference: ``mysqld --initialize-insecure`` creates exactly one account, ``root@localhost``,
     while MariaDB's installer also creates ``root@127.0.0.1``. With name resolution off the server
@@ -132,6 +135,17 @@ def configuration(work: Path, tree: Path, port: int, windows: bool) -> Path:
         # space in it.
         socket_directory = Path(tempfile.mkdtemp(prefix="mxe-", dir="/tmp"))
         lines.append(f'socket = "{(socket_directory / "s.sock").as_posix()}"')
+    if not windows and hasattr(os, "geteuid") and os.geteuid() == 0:
+        # **`mysqld` refuses to start as root unless it is told to be root.** `check_user` prints
+        # `Fatal error: Please read "Security" section of the manual to find out how to run mysqld
+        # as root!` and aborts when it is running as uid 0 and no user was named; naming one is the
+        # documented way through, and `root` is special-cased there rather than looked up.
+        #
+        # Only ever true inside the manylinux container the compiled Linux cells are built in,
+        # which has one account. A borrow leg runs on the runner as an ordinary user and adds
+        # nothing here — the file a user of the artifact gets is not this one either way, since
+        # MixEngine renders its own.
+        lines.append(f"user = {getpass.getuser()}")
     path = work / "my.cnf"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
