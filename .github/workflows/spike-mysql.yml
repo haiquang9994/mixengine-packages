@@ -1,0 +1,28 @@
+name: spike mysql reachability
+
+# Throwaway, and on a branch that is not meant to merge. It answers one question P14 cannot be
+# written without: can a recipe here reach MySQL at all?
+#
+# Every other kind in this repository resolves its catalogue from something a plain client can read —
+# MariaDB's REST API, PostgreSQL's versions.json, python-build-standalone's releases. MySQL has no
+# such document, and from a developer machine `downloads.mysql.com` answered 403 to every archive URL
+# carrying a query string while answering 200 to the asset URLs themselves. A runner is on a
+# different network than that machine, so the split may not be the same one, and guessing either way
+# writes a design that discovers the truth on the first real build.
+on:
+  workflow_dispatch:
+
+jobs:
+  ask:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Two runners because the answer is about the network the request leaves from, and the built
+        # cells leave from macOS while the borrowed ones leave from Linux.
+        runner: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: python -u spike/mysql_reachability.py
