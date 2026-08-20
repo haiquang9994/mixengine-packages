@@ -94,8 +94,9 @@ years after both were written, and **MySQL 8.0.28 renamed the same file for the 
 *The 5.6 cells* additionally have **two** blocks deleted from `include/my_global.h`, and the second
 is the same mistake as the zlib one above, made in the other direction.
 `#if defined(TARGET_OS_LINUX) || defined(__GLIBC__)` turns `_GNU_SOURCE` on — and it asks whether
-Apple's `TARGET_OS_LINUX` *exists*, meaning to ask whether it is 1. Apple's `TargetConditionals.h` has since grown that macro,
-defined as 0, so on SDK 15.5 a macOS build declares itself GNU, `mysys/my_error.c` takes its
+Apple's `TARGET_OS_LINUX` *exists*, meaning to ask whether it is 1. Apple's
+`TargetConditionals.h` has since grown that macro, defined as 0, so on SDK 15.5 a macOS build
+declares itself GNU, `mysys/my_error.c` takes its
 `#elif defined _GNU_SOURCE` branch, and `char *r = strerror_r(...)` meets the POSIX `strerror_r`
 that returns `int`. Xcode 16.4 refuses it; Xcode 15.4 compiled it with a warning, into a build whose
 `my_strerror` would have read a pointer that was really a zero. **5.7.44 does not have the block**,
