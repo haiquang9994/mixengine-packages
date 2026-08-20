@@ -939,6 +939,57 @@ def dpkg_owner(path: Path) -> str | None:
     return result.stdout.split(":", 1)[0].strip() or None
 
 
+def rpm_owner(path: Path) -> str | None:
+    """Which RPM installed this file, if the machine can say. `dpkg_owner` in the other dialect."""
+    try:
+        result = subprocess.run(["rpm", "-qf", "--queryformat", "%{NAME}", str(path)],
+                                capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    name = result.stdout.strip()
+    return name if result.returncode == 0 and name and " " not in name else None
+
+
+def rpm_query(*arguments: str) -> str:
+    try:
+        result = subprocess.run(["rpm", *arguments], capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout if result.returncode == 0 else ""
+
+
+def rpm_licences(owner: str) -> list[tuple[str, Path]]:
+    """Every licence file covering *owner*, which is not always filed under its own name.
+
+    `/usr/share/licenses/<package>` is where a Fedora-descended distribution puts them, and that
+    directory holds nothing else, so every file in it is taken rather than the ones matching
+    `LICENCE_GLOBS` — `libxcrypt` files its terms as `LICENSING`, which no glob for `LICENSE*`
+    finds.
+
+    **A subpackage often carries none of its own.** AlmaLinux 8 — which is what the manylinux image
+    these recipes compile in is — ships `libncurses.so.6` in `ncurses-libs`, and that package has no
+    licence file at all; the `COPYING` covering it is in `ncurses-base`, built from the same source
+    RPM. Measured against the published packages rather than assumed. So a package with no directory
+    of its own is asked what it was built from, and the other packages of that build are searched.
+    """
+    directory = Path("/usr/share/licenses") / owner
+    if directory.is_dir():
+        return [(owner, path) for path in sorted(directory.rglob("*")) if path.is_file()]
+
+    source = rpm_query("-q", "--queryformat", "%{SOURCERPM}", owner).strip()
+    if not source:
+        return []
+    found: list[tuple[str, Path]] = []
+    for line in rpm_query("-qa", "--queryformat", "%{NAME} %{SOURCERPM}\n").splitlines():
+        name, _, theirs = line.partition(" ")
+        if name == owner or theirs.strip() != source:
+            continue
+        sibling = Path("/usr/share/licenses") / name
+        if sibling.is_dir():
+            found += [(name, path) for path in sorted(sibling.rglob("*")) if path.is_file()]
+    return found
+
+
 def cygwin_posix(root: Path, path: Path) -> str:
     r"""*path* spelled the way Cygwin spells it, asked of Cygwin's own mount table.
 
@@ -1161,6 +1212,12 @@ def licence_texts(origin: Path) -> list[tuple[str, Path]]:
         owner = dpkg_owner(real) or dpkg_owner(origin)
         if owner:
             places = [Path("/usr/share/doc") / owner]
+        else:
+            # No dpkg, or a file no package owns. The compiled Linux artifacts are built inside
+            # AlmaLinux 8, where the question is spelled `rpm` and the answer is filed elsewhere.
+            owner = rpm_owner(real) or rpm_owner(origin)
+            if owner:
+                return rpm_licences(owner)
 
     found: list[tuple[str, Path]] = []
     for place in places:
