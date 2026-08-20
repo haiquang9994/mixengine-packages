@@ -152,8 +152,9 @@ the system tables already built.
 Two things about that middle route are worth stating because both read as broken artifacts when they
 are not. **In a tree compiled here `mysql_install_db` is Perl, not shell** — 5.6's
 `scripts/CMakeLists.txt` configures `mysql_install_db.pl.in` on every platform and only appends
-`.pl` to the name on Windows — so what runs it is read off its own first line. And **`support-files` is
-otherwise not shipped, but `support-files/my-default.cnf` is kept**: the script looks for that
+`.pl` to the name on Windows — so what runs it is read off its own first line. And
+**`support-files` is otherwise not shipped, but `support-files/my-default.cnf` is kept**: the
+script looks for that
 template in four places, refuses to run without it, and checks for it before it looks at
 `--keep-my-cnf`. One file, and the 5.6 cells cannot bootstrap without it.
 
