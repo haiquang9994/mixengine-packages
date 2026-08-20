@@ -69,6 +69,20 @@ BINARY_DIRECTORIES = ("bin", "sbin", "ext", "lib", "libexec", "modules")
 WINDOWS_ROOT = Path(os.environ.get("SystemRoot", r"C:\Windows"))
 SYSTEM_DIRECTORIES = (WINDOWS_ROOT / "System32", WINDOWS_ROOT / "SysWOW64", WINDOWS_ROOT)
 
+# Left alone on Windows, by name, because no tree may hold them: the Visual C++ runtime is
+# redistributed by installing Microsoft's redistributable, not by copying a DLL beside a binary, and
+# a machine that lacks it is a machine that installs it. That is what `requires.vcredist` in the
+# manifest is *for*, so a tree naming one is stating a precondition rather than reaching outside
+# itself.
+#
+# **The current runtimes pass without this and the old ones do not**, which is why it is a rule
+# about names rather than about locations. `vcruntime140.dll` is in `System32` on every runner and
+# on most machines, so the location rule below already leaves it alone; `MSVCR100.dll` is Visual
+# Studio 2010, is on almost nothing today, and `mysql-5.6.51-winx64.zip` imports it from twenty-four
+# of its programs. Judged by location that zip is a tree that cannot be packed at all — judged by
+# name it is a tree with one declared precondition, which is what it is.
+WINDOWS_REDISTRIBUTABLES = ("msvcr", "msvcp", "vcruntime", "vccorlib", "concrt", "mfc")
+
 # **Named in import tables and not files.** `api-ms-win-core-*.dll` and `ext-ms-*.dll` are API sets:
 # the loader resolves them from a schema it carries, and there is nothing on disk to copy. Any tool
 # that reports a path for one has found a file that merely happens to be on `PATH` — `cygcheck`
@@ -564,7 +578,8 @@ def is_system(spelling: str, resolved: Path | None) -> bool:
         # By location, because a PE import is a bare name and carries nothing else to judge it by.
         # An unresolved name is *not* system: it is a library this machine does not have either,
         # which `bundle` refuses and `verify` reports — the same treatment ELF gives a "not found".
-        if Path(spelling).name.lower().startswith(API_SET_PREFIXES):
+        name = Path(spelling).name.lower()
+        if name.startswith(API_SET_PREFIXES) or name.startswith(WINDOWS_REDISTRIBUTABLES):
             return True
         return resolved is not None and inside(resolved, WINDOWS_ROOT)
     name = Path(spelling).name

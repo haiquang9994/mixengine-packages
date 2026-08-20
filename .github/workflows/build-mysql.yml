@@ -84,6 +84,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
+      - name: install the Visual C++ 2010 runtime 5.6 was built against
+        # `mysql-5.6.51-winx64.zip` imports `MSVCR100.dll` from twenty-four of its programs, and
+        # windows-2022 does not carry the 2010 redistributable — no runner image has for years. The
+        # artifact states that as `requires.vcredist: "2010"` and a user installs it once; this
+        # runner has to install it too, because the pack does not stop at reading an import table.
+        # It bootstraps a data directory, starts `mysqld`, writes a row and shuts the server down,
+        # and none of that happens against a runtime that is not on the machine.
+        #
+        # 5.7 and everything newer need `vcruntime140*.dll`, which every runner image does carry.
+        if: ${{ matrix.os == 'windows' && startsWith(matrix.version, '5.6.') }}
+        run: choco install vcredist2010 --no-progress -y
       - name: pack ${{ matrix.version }}
         id: pack
         # bash on every leg, Windows included, so the exit code is read the same way everywhere
