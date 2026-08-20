@@ -657,8 +657,21 @@ def bundle(tree: Path, libdir: str = "lib", search: Sequence[Path] = (),
             # missing from the machine rather than as one not copied over yet.
             queue.append(resolved)
 
-    rewrite(tree, libdir, set(bundled), executable_dir, directories)
+    # The directories *this caller named* that are inside the tree are part of the tree's layout,
+    # and the rewrite has to go on pointing at them. See `rewrite`'s *keep*.
+    kept = [
+        directory for directory in search
+        if directory.is_dir() and inside(directory, tree) and directory != library_directory
+    ]
+    rewrite(tree, libdir, set(bundled), executable_dir, directories, keep=kept)
     return dict(sorted(bundled.items()))
+
+
+def _unique(spellings) -> list[str]:
+    """The spellings, first occurrence kept. Two anchors can land on one string — a file sitting in
+    the bundled directory of a tree that also named it in *keep* — and a search path repeated is a
+    loader asking the same question twice."""
+    return list(dict.fromkeys(spellings))
 
 
 def dependencies(
@@ -672,8 +685,21 @@ def dependencies(
 
 
 def rewrite(tree: Path, libdir: str, bundled: set[str], executable_dir: Path,
-            directories: Sequence[str] = BINARY_DIRECTORIES) -> None:
+            directories: Sequence[str] = BINARY_DIRECTORIES,
+            keep: Sequence[Path] = ()) -> None:
     """Point every load at the copy beside it, relative to whoever is doing the loading.
+
+    *keep* is the other library directories **the tree already had**, and it is not a refinement:
+    without it this function is a statement that a tree has exactly one place libraries live in,
+    which is true of every tree this repository builds and false of one it borrows. MySQL 8.0 and
+    newer ship `lib/private/` holding their own OpenSSL and protobuf; setting a single anchor here
+    deletes upstream's own search path, and then `libssl.so.3` — sitting in the tree, beside the
+    `libcrypto.so.3` it needs — resolves to the *machine's* OpenSSL instead. `verify` reports that,
+    correctly, as a tree reaching outside itself, and `mysql.unloadable_libraries` reads the same
+    damage as upstream having shipped unfinished plugins and deletes eight files over it.
+
+    Everything absolute is still dropped, which is the whole point of the rewrite: a kept directory
+    is re-spelled relative to each file that loads from it, so the tree goes on being movable.
 
     Nothing to do on Windows, and it is worth saying so rather than leaving the reader to infer it
     from an empty branch. A PE image names its dependencies by bare file name and the loader looks
@@ -684,10 +710,14 @@ def rewrite(tree: Path, libdir: str, bundled: set[str], executable_dir: Path,
     if sys.platform == "win32":
         return
     library_directory = tree / libdir
+    anchors = [library_directory, *(directory for directory in keep
+                                    if directory != library_directory)]
     for path in machine_files(tree, directories):
-        relative = os.path.relpath(library_directory, path.parent).replace(os.sep, "/")
+        relative = [os.path.relpath(directory, path.parent).replace(os.sep, "/")
+                    for directory in anchors]
         if sys.platform == "darwin":
-            anchor = "@loader_path" if relative == "." else f"@loader_path/{relative}"
+            spelled = _unique("@loader_path" if part == "." else f"@loader_path/{part}"
+                              for part in relative)
             # An install name is a property of a *dylib*, and not every Mach-O under a library
             # directory is one: Ruby's compiled extensions live in `lib/ruby/<version>/<arch>/` and
             # are MH_BUNDLE, which has no `LC_ID_DYLIB` to set. `macho_id` answering None is how
@@ -711,16 +741,22 @@ def rewrite(tree: Path, libdir: str, bundled: set[str], executable_dir: Path,
             # absolute — a Homebrew cellar, a temporary build prefix — and on the machine that built
             # this they all still exist, so `@rpath/libzip.5.dylib` would go on resolving to the
             # builder's copy and the archive would look correct here and load a stranger's library
-            # there. Everything the tree needs is in one directory, so one search path is enough.
+            # there. What survives is the anchors and nothing else: the bundled directory, and
+            # whatever library directories of its own the tree came with.
             for existing in macho_rpaths(path):
-                if existing != anchor:
+                if existing not in spelled:
                     run("install_name_tool", "-delete_rpath", existing, str(path), check=False)
-            if anchor not in macho_rpaths(path):
-                run("install_name_tool", "-add_rpath", anchor, str(path))
+            for wanted in spelled:
+                if wanted not in macho_rpaths(path):
+                    run("install_name_tool", "-add_rpath", wanted, str(path))
             macho_sign(path)
         else:
-            anchor = "$ORIGIN" if relative == "." else f"$ORIGIN/{relative}"
-            elf_set_rpath(path, anchor)
+            # One `DT_RUNPATH` holding every anchor, in the order they were given: the bundled
+            # directory first, so a library this repository put there answers a name before a copy
+            # upstream left elsewhere in the tree.
+            elf_set_rpath(path, ":".join(
+                _unique("$ORIGIN" if part == "." else f"$ORIGIN/{part}" for part in relative)
+            ))
 
 
 def verify(tree: Path, directories: Sequence[str] = BINARY_DIRECTORIES,

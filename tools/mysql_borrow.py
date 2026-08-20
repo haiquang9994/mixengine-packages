@@ -125,7 +125,11 @@ def main() -> None:
     added: dict[str, Path] = {}
     if not windows:
         # `lib/private` is 8.0 and newer: upstream's own protobuf and OpenSSL, named by soname with
-        # no search path, which is a directory MariaDB's bintar does not have.
+        # no search path, which is a directory MariaDB's bintar does not have. Naming it here does
+        # two jobs, and the second one is easy to miss: it is where `bundle` looks while it decides
+        # what is missing, *and* — because it is inside the tree — it is a directory `rewrite` then
+        # keeps in every `DT_RUNPATH` it writes. Left out, the rewrite would point the whole tree at
+        # `lib/` alone and upstream's own OpenSSL would stop being found from inside its own tree.
         added = relocate.bundle(tree, search=[tree / "lib", tree / "lib" / "private"])
         if added:
             print(f"bundled {len(added)} librar{'y' if len(added) == 1 else 'ies'}: "
