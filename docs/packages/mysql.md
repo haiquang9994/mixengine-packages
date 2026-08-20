@@ -70,6 +70,16 @@ prepending instead of setting. So the flag is passed on the command line, where 
 reach it, on clang as well as GCC — the clash follows the compiler's *default standard*, and Apple's
 has moved too.
 
+**On macOS the compiled cells use the system zlib rather than the one 5.6 carries.** That copy
+dates from 2013 and its `zutil.h` still has a branch for *classic* Mac OS, taken whenever
+`TARGET_OS_MAC` is defined — which is 1 on every Apple platform today. The branch does
+`#define fdopen(fd,mode) NULL`, so the next `#include <stdio.h>` meets `FILE *fdopen(int, const
+char *)` with `fdopen` already a macro and clang stops inside Apple's own header. It is not even
+consistent between the two cells: measured, x86_64 on SDK 15.5 fails and arm64 on SDK 14.5 does
+not, so what compiles depends on which runner image is current. macOS has shipped a maintained zlib
+in `/usr/lib` for as long as there has been a macOS, `relocate` leaves anything there alone, and a
+2013 zlib is not something to ship on purpose. Linux keeps the bundled one, where it compiles.
+
 **Both compiled lines are built from modified source, and the source travels with them.** Two
 changes, and each one is a change Oracle itself made in a later version.
 

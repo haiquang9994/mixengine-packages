@@ -400,6 +400,21 @@ def configure(source_tree: Path, build: Path, prefix: Path, line: str,
 
     if sys.platform == "darwin":
         arguments += [
+            # **The bundled zlib is older than the SDK it is compiled against.** 5.6 carries a zlib
+            # of 2013 whose `zutil.h` still has a branch for *classic* Mac OS, taken on
+            # `defined(MACOS) || defined(TARGET_OS_MAC)` — and `TARGET_OS_MAC` is 1 on every Apple
+            # platform today. The branch does `#define fdopen(fd,mode) NULL`, so the next
+            # `#include <stdio.h>` reaches `FILE *fdopen(int, const char *)` with `fdopen` already a
+            # macro and clang stops inside Apple's own header. Measured: the x86_64 cell (Xcode
+            # 16.4, SDK 15.5) fails there and the arm64 one (Xcode 15.4, SDK 14.5) does not, a
+            # difference between two SDKs rather than between two architectures, and a cell that
+            # depends on which runner image was current is one that breaks later for no reason.
+            #
+            # macOS has shipped zlib in `/usr/lib` since forever, `relocate` leaves anything there
+            # alone, and it is maintained — which the copy inside a 2013 source tree is not. Linux
+            # keeps the bundled one: it compiles, and taking the system's would add a library to
+            # bundle for no gain.
+            "-DWITH_ZLIB=system",
             f"-DBISON_EXECUTABLE={found['bison'] / 'bin' / 'bison'}",
             "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-headerpad_max_install_names",
             "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-headerpad_max_install_names",
