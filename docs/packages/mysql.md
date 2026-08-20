@@ -140,6 +140,23 @@ did not finish**: `mysql-5.7.44-winx64.zip` carries a `bin/saslSCRAM.dll` that i
 machine including Oracle's. It is deleted, named in `upstream.removed`, and the alternative was
 shipping a tree that fails its own relocation check.
 
+**The Linux artifacts were five times the size of the others, and the same pruning made both.**
+MySQL 9.7.1 packed to 109 MB on macOS and 118 MB on Windows and to **609 MB on Linux** — one
+server, one compression, the same fifteen paths named in `upstream.removed` on every cell. What
+differs is inside the files. A borrowed Linux bintar carries `.debug_*` in `bin/mysqld` and in every
+plugin, where Oracle ships macOS already stripped and files Windows' symbols in separate `.pdb` that
+`NOT_SHIPPED` drops. The compiled cells reach the same place without anyone's help: DWARF is linked
+into an ELF executable and stays behind in the object files of a Mach-O one, so 5.6 came out at
+131 MB on Linux against 76 MB on macOS from a single set of flags. So `mysql.strip_debug` runs on
+Linux and nowhere else, over both halves of the row, through the `tools/strip.py` that
+`mariadb.strip_debug` and the CPython and Ruby recipes already use — where the same operation
+took a MariaDB bintar from 371 MB to 27 MB. `--strip-debug` and not `--strip-all`, which is what
+`strip.IMAGES` would have asked for: `lib/plugin/*.so` is opened by `dlopen`,
+`lib/libmysqlclient.so` is what a client extension links against, and the dynamic symbol table is
+not what makes these files large anyway. Every file that changed is named in `upstream.changed`,
+mapped to the command that changed it, and `strip.symbols` refuses to return unless the loader's
+and the linker's whole view of it survived.
+
 **There are no end-of-life dates**, and [that absence has its own reason written down](../end-of-life-dates.md):
 Oracle publishes MySQL's schedule in a support-policy PDF and announces an EOL on a page written
 after the fact, neither of which `tools/eol.py` can re-read and compare. For the record, and stated

@@ -121,6 +121,10 @@ def main() -> None:
     removed = mysql.prune(tree)
     if removed:
         print(f"not shipping {len(removed)} paths: {', '.join(removed)}")
+    # Before the bundling and not after it, so that the files this strips are upstream's own. What
+    # `bundle` is about to copy in belongs to the machine's distribution, which stripped it already
+    # and whose licence text `bundled_licences` files beside it under its own name.
+    changed = mysql.strip_debug(tree)
 
     added: dict[str, Path] = {}
     if not windows:
@@ -163,6 +167,10 @@ def main() -> None:
         tree, manifest,
         added=[f"lib/{library}" for library in added],
         removed=removed,
+        # A plugin can be stripped and then deleted a few lines later for naming a library upstream
+        # did not ship, and `declare` refuses — rightly — to claim a modification to a file the
+        # archive does not contain. What went out is already declared, once, in `upstream.removed`.
+        changed={path: how for path, how in changed.items() if (tree / path).exists()},
     )
 
     requires = {}

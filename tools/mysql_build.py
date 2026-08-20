@@ -606,6 +606,9 @@ def main() -> None:
     compile_and_install(work / "build", program)
 
     tree, removed = assemble(prefix, work)
+    # Before the bundling, for `mysql.strip_debug`'s own reason, and recorded in `recipe` rather
+    # than in `upstream.changed`: nothing here is upstream's file to differ from.
+    stripped = mysql.strip_debug(tree)
     provides = mysql_smoke.describe(tree, windows=False)
 
     search = [ssl / "lib"] if ssl else []
@@ -638,6 +641,7 @@ def main() -> None:
             f"detached PGP signature from {who}); cmake "
             + " ".join(part for part in asked if part.startswith("-D"))
             + (f"; {len(bundled)} bundled libraries" if bundled else "")
+            + (f"; debug symbols stripped from {len(stripped)} files" if stripped else "")
             + ("; patched: " + "; ".join(f"{path} — {why}" for path, why in sorted(changed.items()))
                if changed else "; upstream's source unmodified")
         ),

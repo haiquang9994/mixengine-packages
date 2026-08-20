@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import borrow
 import relocate
+import strip
 
 ARCHIVE = "https://downloads.mysql.com/archives"
 COMMUNITY = f"{ARCHIVE}/community/"
@@ -571,6 +572,50 @@ def prune(tree: Path) -> list[str]:
             path.unlink()
             removed.append(str(path.relative_to(tree)).replace("\\", "/"))
     return sorted(dict.fromkeys(removed))
+
+
+def strip_debug(tree: Path) -> dict[str, str]:
+    """Take the debug symbols out of a Linux tree, and answer with which files that changed.
+
+    **Measured, because the five cells of one version did not agree with each other.** MySQL 9.7.1
+    packs to 109 MB on macOS and 118 MB on Windows, and to **609 MB on Linux** — the same server,
+    the same pruning, the same compression. The difference is not what is in the archive: the log of
+    that pack names the same fifteen paths removed on Linux as on macOS. It is what is inside the
+    files, and both halves of this row have the same answer for a different reason.
+
+    A *borrowed* Linux bintar carries `.debug_*` in `bin/mysqld` and in every plugin, where Oracle
+    ships macOS stripped and files Windows' symbols in separate `.pdb` that `NOT_SHIPPED` already
+    drops. A *built* cell reaches the same place without anyone's help: DWARF is linked into an ELF
+    executable and is not linked into a Mach-O one — it stays behind in the object files — so the
+    5.6 cells this repository compiles itself come out at 131 MB on Linux against 76 MB on macOS
+    from one set of flags. Nothing in MixEngine reads either, and a user downloads them once per
+    version per machine.
+
+    ``--strip-debug`` rather than ``--strip-all``, which is `strip.IMAGES`' Linux row and the reason
+    this asks for something else: `lib/plugin/*.so` is opened by `dlopen` and
+    `lib/libmysqlclient.so` is what a client extension links against, so the dynamic symbol table
+    has to stay — and removing it would save almost nothing, because it is not what makes these
+    files large.
+
+    Linux only. Not portability caution: on macOS there is nothing here to take, which the sizes
+    above are the measurement of, and `strip -x` on a signed arm64 binary costs a re-signature
+    (`strip.countersigned`) to buy back a rounding error.
+
+    What comes back is ``upstream.changed`` — see :func:`strip.symbols`, which refuses to return
+    unless the loader's and the linker's whole view of every file survived the operation. A built
+    cell has no upstream binary to differ from and records it in ``recipe`` instead.
+    """
+    if sys.platform != "linux" or not shutil.which("strip"):
+        return {}
+
+    files = relocate.machine_files(tree)
+    before = sum(path.stat().st_size for path in files)
+    changed = strip.symbols(tree, files, ["--strip-debug"], "linux")
+    after = sum(path.stat().st_size for path in files)
+    if changed:
+        print(f"stripped debug symbols from {len(changed)} of {len(files)} files: "
+              f"{before / 1e6:,.0f} MB of machine code became {after / 1e6:,.0f} MB")
+    return changed
 
 
 def unloadable_libraries(tree: Path) -> list[str]:
