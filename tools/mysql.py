@@ -42,6 +42,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import borrow
+import relocate
 
 ARCHIVE = "https://downloads.mysql.com/archives"
 COMMUNITY = f"{ARCHIVE}/community/"
@@ -85,8 +86,9 @@ CELLS = {
 # manylinux_2_28 container the workflow names, so their floor is the image's 2.28 and not the host's.
 #
 # There is no ("windows", "aarch64") row, and that is the empty cell of the table rather than an
-# omission: Oracle has never published an ARM64 Windows build at any version, 5.6 targets Visual
-# Studio 2013 and 5.7 Visual Studio 2015, and for 8.0 and newer it is a build nobody here has
+# omission: Oracle has never published an ARM64 Windows build at any version, the 5.x trees are of
+# an era whose published binaries still import the Visual Studio 2010 runtime and neither has been
+# demonstrated building with MSVC on ARM64, and for 8.0 and newer it is a build nobody here has
 # attempted.
 RUNNERS = {
     ("macos", "aarch64"): "macos-14",
@@ -140,13 +142,22 @@ GPG = (
 PRUNE = (
     "mysql-test", "sql-bench", "share/man", "man", "docs", "include", "lib/pkgconfig",
     "share/aclocal", "support-files", "share/doc", "share/mysql-test", "share/sql-bench",
+    # A whole second server, and every plugin built against it. Upstream ships `mysqld-debug` and
+    # `lib/plugin/debug/` in the same archive as the real one — a quarter of the download — and
+    # `relocate.verify` is what noticed: those plugins import `mysqld-debug.exe` by name, so a tree
+    # keeping them fails its own relocation check for a program MixEngine would never start.
+    "lib/plugin/debug",
 )
 
 # Deleted by pattern rather than by path, because where each of these lands moved between 5.6 and
 # 9.7 and a list of paths would silently stop matching.
 NOT_SHIPPED = (
     "*.a", "mysql_config*", "mysqltest*", "mysql_client_test*", "mysqlxtest*",
-    "*_test_plugin*", "auth_test*", "test_*", "*.pdb", "*.lib", "*.pl", "*.def",
+    "*_test_plugin*", "auth_test*", "test_*", "*.pdb", "*.lib", "*.pl",
+    # The debug server itself, wherever it landed. Not `*debug*`: `lib/mecab/dic/` holds dictionary
+    # files whose names a broad pattern would take, and a full-text plugin that cannot find its
+    # dictionary fails at the first CJK query rather than at the pack.
+    "mysqld-debug*",
 )
 
 
@@ -361,8 +372,13 @@ def signed(program: str, home: Path, archive: Path, detached: Path) -> str:
 
 
 def download(program: str, home: Path, name: str, version: str,
-             work: Path) -> tuple[Path, str, str]:
-    """Fetch one asset and its signature, and refuse to return an unverified one."""
+             work: Path) -> tuple[Path, str, str, str]:
+    """Fetch one asset and its signature, and refuse to return an unverified one.
+
+    Answers with the fingerprint that signed it as well as the file, because that is what the
+    manifest has to say — and verifying once and reporting what verified is a different thing from
+    verifying twice and hoping both agree.
+    """
     url = f"{GET}{name}"
     archive, detached = work / name, work / f"{name}.asc"
     material = signature(name, version)
@@ -383,7 +399,7 @@ def download(program: str, home: Path, name: str, version: str,
     digest = borrow.sha256(archive)
     print(f"{name}: good signature from {who} ({fingerprint})")
     print(f"sha256 {digest} (computed here; MySQL's page publishes only an MD5)")
-    return archive, digest, url
+    return archive, digest, url, fingerprint
 
 
 def verified_against(fingerprint: str) -> str:
@@ -507,6 +523,53 @@ def prune(tree: Path) -> list[str]:
             path.unlink()
             removed.append(str(path.relative_to(tree)).replace("\\", "/"))
     return sorted(dict.fromkeys(removed))
+
+
+def unloadable_libraries(tree: Path) -> list[str]:
+    """Delete the libraries upstream shipped against other libraries it did not ship, naming each.
+
+    Not a hypothetical tidy-up. **MySQL 5.7.44's Windows zip carries `bin/saslSCRAM.dll`, which
+    imports `libcrypto-3-x64.dll`, and that zip contains no OpenSSL DLL at all** — so the file
+    cannot load on any machine, upstream's own included, and `relocate.verify` refuses the whole
+    tree over it. The choice is to ship a tree that fails its own relocation check, to weaken the
+    check, or to take the file out and say which. MariaDB reached the same fork on Linux, over
+    plugins rather than a helper in `bin/`, and this is the same answer.
+
+    **Libraries only, never a program.** An executable whose dependency does not resolve is a
+    broken build and has to fail the pack — that is the check doing its job. A plugin nobody here
+    loads is upstream shipping something it did not finish, and deleting it is the smallest honest
+    repair. The pass repeats while anything is still moving, because one deletion can orphan the
+    next, and it stops rather than looping if it ever stops converging.
+
+    Every path returned goes into ``upstream.removed``, where :func:`borrow.declare` checks it — a
+    file declared gone that is still in the tree fails the pack.
+    """
+    dropped: list[str] = []
+    for _ in range(4):
+        search = relocate.loader_search(tree)
+        executable_dir = tree / "bin" if (tree / "bin").is_dir() else tree
+        rejected = []
+        for path in relocate.machine_files(tree):
+            if not any(suffix in (".dll", ".so", ".dylib") for suffix in path.suffixes):
+                continue
+            missing = [
+                spelling
+                for spelling, resolved in relocate.dependencies(path, executable_dir, search)
+                if resolved is None and not relocate.is_system(spelling, resolved)
+            ]
+            if missing:
+                print(f"not shipping {path.relative_to(tree)}: it needs {', '.join(missing)}, "
+                      f"which upstream did not ship beside it and a user's machine would not have")
+                path.unlink()
+                rejected.append(str(path.relative_to(tree)).replace("\\", "/"))
+        dropped += rejected
+        if not rejected:
+            return sorted(dict.fromkeys(dropped))
+    raise SystemExit(
+        "four passes of deleting unloadable libraries have not settled, which means each one is "
+        "orphaning the next. That is a tree missing something central rather than a few plugins "
+        f"upstream did not finish: {', '.join(dropped[-10:])}"
+    )
 
 
 def main() -> None:

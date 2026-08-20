@@ -71,8 +71,8 @@
           "additionalProperties": false,
           "properties": {
             "vcredist": {
-              "enum": ["2015", "2017", "2019", "2022"],
-              "description": "Per branch, not per runtime: PHP 7.0-7.1 are VC14, 7.2-7.3 VC15, 7.4-8.3 VS16, 8.4+ VS17."
+              "enum": ["2010", "2013", "2015", "2017", "2019", "2022"],
+              "description": "Per branch, not per runtime: PHP 7.0-7.1 are VC14, 7.2-7.3 VC15, 7.4-8.3 VS16, 8.4+ VS17. 2010 and 2013 are here for MySQL, and for a reason worth keeping: mysql-5.6.51-winx64.zip imports msvcr100.dll, which is Visual Studio 2010 — measured off the binaries rather than read off the line's documentation, which says 2013. An artifact whose precondition cannot be declared is one the user meets when mysqld fails to start."
             },
             "macos": { "type": "string", "description": "Minimum macOS version, e.g. \"11.0\"." },
             "glibc": { "type": "string", "description": "Minimum glibc, e.g. \"2.28\"." },

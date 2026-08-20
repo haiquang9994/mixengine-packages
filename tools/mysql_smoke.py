@@ -109,6 +109,13 @@ def configuration(work: Path, tree: Path, port: int, windows: bool) -> Path:
     A file rather than a command line, because that is how MixEngine will start it and because a
     server that only works when every setting is an argument is a server whose configuration
     generation is untested.
+
+    **No ``skip-name-resolve``, which MariaDB's equivalent does set**, and the difference is not a
+    preference: ``mysqld --initialize-insecure`` creates exactly one account, ``root@localhost``,
+    while MariaDB's installer also creates ``root@127.0.0.1``. With name resolution off the server
+    compares the incoming address as a string, so a TCP connection from 127.0.0.1 matches nothing
+    and every client here is refused by a server whose own log says it is ready for connections —
+    which is what this check found the first time it ran.
     """
     lines = [
         "[mysqld]",
@@ -117,7 +124,6 @@ def configuration(work: Path, tree: Path, port: int, windows: bool) -> Path:
         f'log_error = "{(work / "mysqld.err").as_posix()}"',
         f"port = {port}",
         "bind-address = 127.0.0.1",
-        "skip-name-resolve",
         "innodb_buffer_pool_size = 32M",
     ]
     if not windows:
@@ -228,6 +234,7 @@ def await_ping(tree: Path, provides: dict[str, str], port: int, process: subproc
                logs: list[Path], path: str, seconds: float = 180) -> None:
     """Wait until ``mysqladmin ping`` answers, or until the server proves it will not."""
     admin = tree / provides["mysqladmin"]
+    refused = "(it was never asked)"
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         if process.poll() is not None:
@@ -241,9 +248,16 @@ def await_ping(tree: Path, provides: dict[str, str], port: int, process: subproc
         )
         if answered.returncode == 0 and "alive" in answered.stdout:
             return
+        refused = (answered.stderr or answered.stdout).strip()
         time.sleep(0.5)
     process.kill()
-    raise SystemExit(f"mysqld never answered a ping on 127.0.0.1:{port}\n{said(logs)}")
+    # What the client said, not only what the server wrote. A server that is up and refusing every
+    # connection writes "ready for connections" and nothing else, so a failure quoting only the log
+    # reads as a server that never started, which is the opposite of what happened.
+    raise SystemExit(
+        f"mysqld never answered a ping on 127.0.0.1:{port}\n"
+        f"mysqladmin said: {refused}\n{said(logs)}"
+    )
 
 
 def query(tree: Path, provides: dict[str, str], port: int, statement: str, path: str) -> str:
