@@ -131,6 +131,24 @@ that release's own asset list. For the record: below 2.4.0 there is no macOS ARM
 Six full cells that upstream does not have: it publishes x86_64 for Linux and Windows and nothing
 else, so three recipes stand behind this row and three of the cells are compiled here.
 
+### [MySQL](docs/packages/mysql.md)
+
+| Version | macOS aarch64 | macOS x86_64 | Linux x86_64 | Linux aarch64 | Windows x86_64 | Windows aarch64 |
+| --- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **5.6** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| **5.7** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| **8.0** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| **8.4** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| **9.7** | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+
+Twenty-five cells, and eight of them are compiled here because upstream **withdrew macOS from 5.6
+and 5.7 while both lines were still alive**: 5.7.31 offers a `macos10.14-x86_64` tarball and 5.7.44,
+the last release of that line, offers no macOS asset of any kind. The two Linux cells of those lines
+are compiled rather than half-borrowed, since the ARM one has nothing to borrow and two Linux
+artifacts of one version — one Oracle's 2021 build at a glibc floor of 2.12, one built here in 2026
+against an OpenSSL this repository supplies — would be two different databases under one version
+number. Windows on ARM is empty on every line: Oracle has never published one, at any version.
+
 ### [PostgreSQL](docs/packages/postgres.md)
 
 | Version | macOS aarch64 | macOS x86_64 | Linux x86_64 | Linux aarch64 | Windows x86_64 | Windows aarch64 |

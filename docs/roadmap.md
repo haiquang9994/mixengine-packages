@@ -61,8 +61,9 @@ task that already closes it.
 had quietly come apart: the releases page held PHP, Node.js, Python, Ruby, Caddy and MariaDB, while
 PostgreSQL, Redis, Memcached and nginx had recipes and nothing to install. P12 was that gap, found by
 P11 while counting the archive, and it is closed — every kind here is now published. The releases
-page holds 55 packages, and it was rebuilt from empty on 2026-08-17 after the repository was deleted
-and recreated; [the archive](the-archive.md) carries the record of what that cost.
+page holds 60 packages — 55 of them, and then MySQL's five lines, published on 2026-08-20 by P14 —
+and it was rebuilt from empty on 2026-08-17 after the repository was deleted and
+recreated; [the archive](the-archive.md) carries the record of what that cost.
 
 Nothing below is a rewrite. Every recipe already downloads, verifies, relocates, proves and packs
 correctly; what they do not do is *choose*, and choosing once is the whole of the rule.
@@ -1211,15 +1212,16 @@ cannot pass on a GitHub Windows runner at all, which runs as an administrator; t
 
 ---
 
-## Services still to pack
+## The services
 
-Caddy, MariaDB and PostgreSQL are in. The remaining two are the same shape, and each owes the same
+None of them is still to pack, which is what this section used to be called. Every one owed the same
 two things: an evaluation — **borrow before you build**, asking the catalogue rather than assuming
-it, which is how MariaDB's row turned out to be wrong in three cells and how PostgreSQL's turned out
-to be wrong in four — and a smoke test that exercises *run, configure, health-check, stop* rather
-than `--version`.
+it, which is how MariaDB's row turned out to be wrong in three cells, PostgreSQL's in four and
+MySQL's in eight — and a smoke test that exercises *run, configure, health-check, stop* rather than
+`--version`. What is left open below is P7c, and it is not work this repository can do: it waits on
+a PostgreSQL release that compiles on Windows for ARM.
 
-### [ ] P6b — Debug symbols were a rule nothing could fail on **(rule)**
+### [x] P6b — Debug symbols were a rule nothing could fail on **(rule)**
 
 P6 made "an artifact contains what it takes to run, nothing else" something CI can fail on, and P6a
 found the cells the check was never allowed to look at. This is the item on that list a check of
@@ -1257,9 +1259,33 @@ unpacked becoming 6.8 MB, and the stripped `redis-server` starting, answering `S
 shutting down cleanly. `.symtab` and `.dynsym` are untouched by `--strip-debug`, so `nm` still reads
 the binary and `backtrace_symbols` names the same functions it did before.
 
-**What is left is the rebuilding.** The four rows above are fixed in their recipes and every
-*published* artifact of them still carries what it carried; each needs a `release=true` run at the
-versions already published, the way P13 replaced eleven PHP releases rather than joining them.
+#### The rebuilding, and what the four rows weigh now
+
+Done on 2026-08-20 as **twenty `release=true` runs** — every published version of the four rows and
+not a sample of them: `memcached 1.6.45`, `nginx 1.26.3` through `1.31.3`, `node 16.20.2` through
+`24.19.0`, and `redis 7.2.15` through `8.10.0`. Each replaced the assets of the tag it already had
+rather than opening a new one, the way P13 replaced eleven PHP releases: a version in the archive is
+a promise about which upstream release it is, not about which day this repository packed it.
+
+What the strip removed, read off those runs rather than off the table above:
+
+| | machine code before | after |
+| --- | --- | --- |
+| `redis 8.8.1`, the two Linux cells | 28.6 MB / 28.8 MB | 6.2 MB / 6.6 MB |
+| `nginx 1.26.3`, the two Linux cells | 15.1 MB / 15.5 MB | 9.5 MB / 9.9 MB |
+| `node 16.20.2`, the two Linux cells | 82.6 MB / 82.3 MB | 81.2 MB / 80.9 MB |
+| `memcached 1.6.45`, the two Linux cells | 1.6 MB / 1.7 MB | 0.4 MB / 0.4 MB |
+
+Node is the row that moves least and it is the one worth reading: 1.4 MB off 82 MB, because almost
+all of that binary is V8 and its snapshot rather than DWARF. The rule is not a size target — it is
+that no artifact carries debug sections — and a row that was nearly clean already is now a row the
+check will not let regress.
+
+Then the index was regenerated and signed over the new bytes, because a rebuilt asset makes the
+published archive newer than the signature that names it, and `check-archive` re-hashed **all 636
+assets** rather than its usual slice: every asset the index names is present, and every one of them
+is the bytes it was signed as. `redis 8.8.1` on Linux x86_64 is 2.7 MB compressed, where the tree
+behind it used to carry 21.2 MB of debug information.
 
 ### [x] P7 — PostgreSQL: EDB's two archives, and what is actually inside them
 
@@ -1878,7 +1904,7 @@ new body coming back, `-s quit` — and the Unix path was exercised with the com
 the downloads, the pinned library digests, the licence collection and the assembled tree are known
 good and the compile itself is not. It needs a `workflow_dispatch` on `build-nginx.yml`.
 
-### [ ] P14 — MySQL, and the line upstream stopped building
+### [x] P14 — MySQL, and the line upstream stopped building
 
 The number is out of sequence and the position is not: this is a kind still to pack, so it goes with
 the others rather than after the index tasks, and it is new work rather than a follow-up to nginx, so
@@ -2038,8 +2064,10 @@ of them changed a decision.
   re-reads weekly; there is nothing here it could re-read, so MySQL is undated and
   `_mysql_comment` says why. The dates themselves are on the package page, which promises less.
 * **`provides` across lines**, measured rather than remembered: `mysql_upgrade` is in 5.6, 5.7 **and
-  8.0.44**, gone in 8.4; `mysqlpump` is in 5.7 and 8.0, gone in 8.4; `mysql_install_db` is 5.6 alone.
-  The claim that `mysql_upgrade` went at 8.0.16 was wrong — it was deprecated there and still ships.
+  8.0.44**, gone in 8.4 — the claim that it went at 8.0.16 was wrong, it was deprecated there and
+  still ships; `mysqlpump` is in 5.7 and 8.0, gone in 8.4; `mysql_install_db` is in 5.6 **and 5.7**
+  — at `scripts/` on the older line and at `bin/` on the newer one — and gone in 8.0, and it is in
+  neither Windows zip, which is what the release below had to stop and say out loud.
 * **`requires.vcredist`, read off the binaries and not off the documentation.**
   `mysql-5.6.51-winx64.zip` imports `msvcr100.dll`, which is Visual Studio **2010**, while 5.7.44 —
   a 2023 rebuild of a 2015-era line — imports `vcruntime140_1.dll` and needs the newest
@@ -2100,18 +2128,53 @@ And P6b is visible from this end too: the two compiled Linux cells of 5.7 stripp
 cell reaches the same place a borrowed bintar does, unaided, because DWARF is linked into an ELF
 executable and stays behind in the object files of a Mach-O one.
 
-**What is left is a release.** Five lines have been proven at `release=false` and none of them is
-published; the run that publishes them is `release=true` at these versions, and the README row and
-the index entry follow it rather than precede it.
+#### The release, and the cell that had to say what it does not have
+
+Five `release=true` runs on 2026-08-20 — `9.7.1` (32405943784), `8.4.10` (32405947389), `8.0.44`
+(32405951714), `5.7.44` (32405955334) and `5.6.51` (32405958734). Each line resolved to the version
+it had been proven at, 8.0 included: a line is resolved once for every cell at the same time, and
+8.0.45 is still refused for publishing Linux tarballs nobody signed. Twenty-five archives, and
+beside the two compiled lines a `mysql-5.6.51-patched-src.tar.gz` (33.5 MB) and a
+`mysql-5.7.44-patched-src.tar.gz` (58.2 MB) — the GPLv2 route above discharged by the release rather
+than promised by it.
+
+**Then `publish-index` failed, on the one thing five green builds are structurally unable to see.**
+A build leg sees one cell; `parity.py` compares the cells of one version against each other, and it
+said `FAIL mysql 5.6.51` and `FAIL mysql 5.7.44` — `windows/x86_64 has no command mysql_install_db`,
+while the four compiled Unix cells of both lines have one. Every leg had been green because every
+leg was right: upstream's zip genuinely carries no such file — 238 entries, no `scripts/` directory,
+and not the `.pl` spelling either, so there was nothing for `NOT_SHIPPED` to have pruned and
+recorded — and the four Unix cells genuinely build one. Nothing was signed or published; the signing
+steps sit behind the check.
+
+The answer is a sentence in the artifact rather than a name on the checker's exemption list, and
+what decides that is that **the two lines are short of the same command for two different reasons**.
+5.7 has the program that replaced it — `mysqld --initialize-insecure`, which is what every cell of
+that line bootstraps with here, the compiled Unix ones included. 5.6 predates it, and Oracle's zip
+instead ships a `data/` whose system tables are already built, so a first run copies a directory
+rather than generating one. An exemption list would state "Windows has no `mysql_install_db`" once
+and be true twice for reasons that are not the same fact — which is the distinction `php_parity` is
+drawn against, where what Windows never built *is* one fact about a whole row. So `mysql.lacks` is
+asked by both recipes, answers on one, and the reason travels inside the archive that is short of
+the command. 5.6 and 5.7 were rebuilt at the same versions (32409802023 and 32409798155), and parity
+then reads `5 cell(s) agree on 13 provides` on both.
+
+The index was published over those bytes (32411502096): **60 packages, 636 assets**, MySQL's five
+among them. `check-archive` re-hashed all 636 rather than a slice, and `check-eol` is green. The
+README row is added here and not earlier, because that table means published today.
 
 #### What it adds
 
-`tools/mysql.py` (the catalogue, and the packing rules all six cells answer to), `tools/mysql_borrow.py`,
-`tools/mysql_build.py`, and `tools/mysql_smoke.py` — shared by both recipes, with a `LAYOUT` table
-rather than an `if`, because 5.6 bootstraps a data directory with `mysql_install_db` and 5.7 onwards
-with `mysqld --initialize-insecure`. Then `.github/workflows/build-mysql.yml` taking a *list* of
-versions, since five lines are live at once; a row in `release/build.sh`'s table, because the input
-name is not the same on every workflow; `docs/packages/mysql.md`; and a row in the README table.
+`tools/mysql.py` (the catalogue, the packing rules all six cells answer to, and `mysql.lacks`, which
+is how the Windows cell of both 5.x lines states in its own manifest what it does not carry and
+why), `tools/mysql_borrow.py`, `tools/mysql_build.py`, and `tools/mysql_smoke.py` — shared by both
+recipes, with a `LAYOUT` table rather than an `if`, because bootstrapping a data directory takes
+three routes and not two: 5.7 and newer run `mysqld --initialize-insecure`, 5.6 on Unix runs
+`mysql_install_db` through a space-free symlink because the script does not quote `$basedir`, and
+5.6 on Windows has neither and copies the prebuilt `data/` out of upstream's zip. Then
+`.github/workflows/build-mysql.yml` taking a *list* of versions, since five lines are live at once;
+a row in `release/build.sh`'s table, because the input name is not the same on every workflow;
+`docs/packages/mysql.md`; and a row in the README table.
 
 ---
 

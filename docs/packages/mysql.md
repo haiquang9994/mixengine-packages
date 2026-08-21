@@ -37,10 +37,20 @@ terms: borrowing is cheaper per cell, and it is not cheaper than having the six 
 mean one thing.
 
 **`provides` is shorter on newer versions, and that is legal.** `mysqlpump` is in 5.7 and 8.0 and
-gone from 8.4; `mysql_upgrade` is in 5.6, 5.7 and 8.0 and gone from 8.4; 5.6 alone has
-`mysql_install_db`. `parity.py` compares the six cells of *one* version, so none of this is a parity
-failure — but somebody reading a shorter command list on 9.7 than on 5.6 needs to be told that before
-filing it.
+gone from 8.4; `mysql_upgrade` is in 5.6, 5.7 and 8.0 and gone from 8.4; `mysql_install_db` is in
+5.6 and 5.7 — at `scripts/` on the older line and at `bin/` on the newer one — and gone from 8.0.
+`parity.py` compares the six cells of *one* version, so none of this is a parity failure — but
+somebody reading a shorter command list on 9.7 than on 5.6 needs to be told that before filing it.
+
+**Within one version it is a parity failure, and on the 5.x lines it was one.** Upstream's Windows
+zip carries no `mysql_install_db` at all — it is a shell script, and the zip has no `scripts/`
+directory to put it in — while the four Unix cells of 5.6 and 5.7 are compiled here and do build
+one. So each of those two Windows artifacts states the absence itself, in `lacks`, and states its
+own reason for it: 5.7 has `mysqld --initialize-insecure`, the program that replaced the script and
+what every cell of that line bootstraps with here; 5.6 predates that program, and the zip ships a
+`data/` directory whose system tables are already built for a first run to copy. Two lines short of
+the same command for two different reasons is why the sentence travels in the archive rather than
+sitting on a list beside the checker.
 
 **MySQL 5.6 ships an OpenSSL nobody patches.** Its own `cmake/ssl.cmake` sets `OPENSSL_FOUND` only
 when `OPENSSL_MAJOR_VERSION STREQUAL "1"`; 5.7.44 accepts `"1" OR "3"`. So 5.7 compiles against the
