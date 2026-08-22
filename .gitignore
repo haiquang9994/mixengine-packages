@@ -12,3 +12,7 @@ __pycache__/
 # compiled into MixEngine, so recovering from that needs an application release.
 minisign.key
 *.key
+
+# Implementation plans — local working notes for one stretch of work, never shared or referenced.
+# The design document that outlives the branch is its spec, under docs/superpowers/specs/.
+docs/superpowers/plans/
